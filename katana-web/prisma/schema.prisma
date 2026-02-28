@@ -1,0 +1,93 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id             String          @id @default(uuid())
+  name           String          @unique
+  email          String?         @unique
+  emailVerified  DateTime?
+  image          String?
+  password       String
+  role           String          @default("user")
+  katanaRequests KatanaRequest[] // 逆リレーションを追加
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  katanas Katana[]
+}
+
+// 格付けの定義
+// enum Grade {
+//   JuyoBijutsu // 重要美術品
+//   TokubetsuJuyoToken // 特別重要刀剣
+//   JuyoToken // 重要刀剣
+//   TokubetsuHozonToken // 特別保存刀剣
+//   HozonToken // 保存刀剣
+// }
+
+// 制作年代の定義（必要に応じて細分化も可能）
+// enum Era {
+//   MidHeian // 平安時代中期
+//   LateHeian // 平安時代後期
+//   EarlyKamakura // 鎌倉時代前期
+//   MidKamakura // 鎌倉時代中期
+//   LateKamakura // 鎌倉時代後期
+//   Nanboku // 南北朝時代
+//   EarlyMuromachi // 室町時代前期
+//   MidMuromachi // 室町時代中期
+//   LateMuromachi // 室町時代後期
+//   Azuchi // 安土桃山時代
+//   EarlyEdo // 江戸時代前期
+//   MidEdo // 江戸時代中期
+//   LateEdo // 江戸時代後期
+//   Meiji // 明治時代
+// }
+
+model Katana {
+  id String @id @default(cuid())
+
+  // 基本情報
+  shopName String // 店舗名
+  name     String // 銘
+  katanaType     String // 種別 (打刀, 脇差, 短刀など)
+  era      String? // 時代
+  price    Int // 価格
+  status   String // 在庫状況 (例: 販売中, 売約済)
+
+  // リレーション
+  dealerId String
+  dealer   User   @relation(fields: [dealerId], references: [id])
+
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  katanaRequests KatanaRequest[]
+}
+
+// 申請データ（追加・編集・削除のすべてをここで管理）
+model KatanaRequest {
+  id     String @id @default(uuid())
+  status String @default("PENDING")
+  crudType   String // "CREATE", "UPDATE", "DELETE"
+
+  // 申請内容（カラムとして定義）
+  shopName   String
+  name       String
+  katanaType String
+  era        String
+  price      Int
+
+  // リレーション定義
+  applicantId    String
+  applicant      User    @relation(fields: [applicantId], references: [id])
+  targetKatanaId String?
+  targetKatana   Katana? @relation(fields: [targetKatanaId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

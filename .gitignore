@@ -1,0 +1,38 @@
+# --- Node.js / Next.js ---
+# すべての階層の node_modules を対象にするため、先頭の / を取ります
+node_modules/
+.next/
+out/
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# --- Android / Kotlin / KMP ---
+.gradle/
+# すべての build フォルダを対象にします
+build/
+.gradle/
+*/build/
+.kotlin/
+.idea/
+*.iml
+local.properties
+.externalNativeBuild
+.cxx
+*.jks
+*.gpg
+
+# --- Debug & Logs ---
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# --- OS & Env ---
+.DS_Store
+.env*
+*.pem
+.vercel
