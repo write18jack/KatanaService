@@ -13,7 +13,7 @@ data class KatanaInput(
     val name: String,
     val katanaType: KatanaType,
     val era: String,
-    val price: Long // 通貨を扱うため、Intより大きなLong、またはDouble推奨
+    val price: String // 通貨を扱うため、Intより大きなLong、またはDouble推奨
 )
 
 /**
@@ -39,13 +39,26 @@ data class KatanaActionRequest(
 @Serializable
 data class KatanaResponse(
     val id: String,
-    val shopName: String,
+    val shopName: String = "",
     val name: String,
-    val katanaType: KatanaType,
+    val katanaType: String,
     val era: String,
-    val price: Long,
-    val status: String,
-    val dealerId: String,
+    val price: Int,
+    val status: String = "",
+    val dealerId: String = "",
+    val version: Int = 0,
+    val imageUrl: String? = null,
     val createdAt: String, // ISO8601形式の文字列として受け取る
     val updatedAt: String
+)
+
+@Serializable
+data class KatanaRequest(
+    val shopName: String,
+    val name: String,
+    val katanaType: String,
+    val era: String,
+    val price: Int,
+    val imageUrl: String?,
+    val dealerId: String? = null
 )

@@ -8,4 +8,5 @@ plugins {
     alias(libs.plugins.sqlDelight).apply(false)
     alias(libs.plugins.buildConfig).apply(false)
     alias(libs.plugins.android.application).apply(false)
+
 }
