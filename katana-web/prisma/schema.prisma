@@ -22,6 +22,84 @@ model User {
   katanas Katana[]
 }
 
+// -----------------------------
+// NEW: enum（normalizeと一致させる）
+// -----------------------------
+enum KatanaType {
+  KATANA
+  WAKIZASHI
+  TANTO
+  UNKNOWN
+}
+
+enum Era {
+  HEIAN
+  KAMAKURA
+  MUROMACHI
+  MOMOYAMA
+  EDO
+  MODERN
+  UNKNOWN
+}
+
+// -----------------------------
+// NEW: 市場データ（主役）
+// -----------------------------
+model KatanaListing {
+  id          String   @id @default(cuid())
+
+  name        String
+  price       Int?
+
+  katanaType  KatanaType
+  era         Era?
+
+  source      String
+  // 同じ商品を二重登録しないためのURL（ユニーク制約を付与）
+  sourceUrl   String   @unique
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // relations
+  rawData      RawListing?
+  priceHistory PriceHistory[]
+
+  @@index([katanaType, era])
+  @@index([source])
+}
+
+// -----------------------------
+// NEW: 生データ（超重要）
+// -----------------------------
+model RawListing {
+  id          String   @id @default(cuid())
+
+  sourceUrl   String   @unique
+  rawJson     Json
+
+  createdAt   DateTime @default(now())
+
+  listingId   String   @unique
+  listing     KatanaListing @relation(fields: [listingId], references: [id])
+}
+
+// -----------------------------
+// NEW: 価格履歴（相場の核）
+// -----------------------------
+model PriceHistory {
+  id         String   @id @default(cuid())
+
+  listingId  String
+  listing    KatanaListing @relation(fields: [listingId], references: [id])
+
+  price      Int
+  recordedAt DateTime @default(now())
+
+  @@index([listingId])
+  @@index([recordedAt])
+}
+
 // 格付けの定義
 // enum Grade {
 //   JuyoBijutsu // 重要美術品
@@ -29,24 +107,6 @@ model User {
 //   JuyoToken // 重要刀剣
 //   TokubetsuHozonToken // 特別保存刀剣
 //   HozonToken // 保存刀剣
-// }
-
-// 制作年代の定義（必要に応じて細分化も可能）
-// enum Era {
-//   MidHeian // 平安時代中期
-//   LateHeian // 平安時代後期
-//   EarlyKamakura // 鎌倉時代前期
-//   MidKamakura // 鎌倉時代中期
-//   LateKamakura // 鎌倉時代後期
-//   Nanboku // 南北朝時代
-//   EarlyMuromachi // 室町時代前期
-//   MidMuromachi // 室町時代中期
-//   LateMuromachi // 室町時代後期
-//   Azuchi // 安土桃山時代
-//   EarlyEdo // 江戸時代前期
-//   MidEdo // 江戸時代中期
-//   LateEdo // 江戸時代後期
-//   Meiji // 明治時代
 // }
 
 model Katana {
