@@ -21,13 +21,29 @@ export default function ListingTable() {
 
   const [filter, setFilter] = useState("ALL");
 
+  const [sort, setSort] = useState("latest");
+
   async function fetchListings(type?: string) {
     setLoading(true);
 
     let url = "/api/market/listings";
 
+    const params = new URLSearchParams();
+
+    // filter
     if (type && type !== "ALL") {
-      url += `?katanaType=${type}`;
+      params.set("katanaType", type);
+    }
+
+    // sort
+    if (sort !== "latest") {
+      params.set("sort", sort);
+    }
+
+    const query = params.toString();
+
+    if (query) {
+      url += `?${query}`;
     }
 
     const res = await fetch(url);
@@ -41,12 +57,12 @@ export default function ListingTable() {
 
   useEffect(() => {
     fetchListings(filter);
-  }, [filter]);
+  }, [filter, sort]);
 
   return (
     <div>
       {/* Filters */}
-      <div className="mb-6 flex gap-2">
+      <div className="mb-4 flex gap-2">
         {FILTERS.map((item) => (
           <button
             key={item}
@@ -58,6 +74,36 @@ export default function ListingTable() {
             {item}
           </button>
         ))}
+      </div>
+
+      {/* Sort */}
+      <div className="mb-6 flex gap-2">
+        <button
+          onClick={() => setSort("latest")}
+          className={`rounded border px-4 py-2 ${
+            sort === "latest" ? "bg-black text-white" : "bg-white"
+          }`}
+        >
+          Latest
+        </button>
+
+        <button
+          onClick={() => setSort("price_desc")}
+          className={`rounded border px-4 py-2 ${
+            sort === "price_desc" ? "bg-black text-white" : "bg-white"
+          }`}
+        >
+          Price ↓
+        </button>
+
+        <button
+          onClick={() => setSort("price_asc")}
+          className={`rounded border px-4 py-2 ${
+            sort === "price_asc" ? "bg-black text-white" : "bg-white"
+          }`}
+        >
+          Price ↑
+        </button>
       </div>
 
       {/* Table */}
@@ -89,6 +135,7 @@ export default function ListingTable() {
                     <a
                       href={item.sourceUrl}
                       target="_blank"
+                      rel="noopener noreferrer"
                       className="underline"
                     >
                       {item.name}

@@ -14,6 +14,7 @@ export async function GET(request: NextRequest) {
     const limit = Number(searchParams.get("limit") || 20);
 
     const skip = (page - 1) * limit;
+    const sort = searchParams.get("sort");
 
     const listings = await prisma.katanaListing.findMany({
       where: {
@@ -26,10 +27,18 @@ export async function GET(request: NextRequest) {
         }),
       },
 
-      orderBy: {
-        createdAt: "desc",
-      },
-
+      orderBy:
+        sort === "price_asc"
+          ? {
+              price: "asc",
+            }
+          : sort === "price_desc"
+            ? {
+                price: "desc",
+              }
+            : {
+                createdAt: "desc",
+              },
       skip,
       take: limit,
     });
