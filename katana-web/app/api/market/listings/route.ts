@@ -15,6 +15,7 @@ export async function GET(request: NextRequest) {
 
     const skip = (page - 1) * limit;
     const sort = searchParams.get("sort");
+    const search = searchParams.get("search");
 
     const listings = await prisma.katanaListing.findMany({
       where: {
@@ -24,6 +25,13 @@ export async function GET(request: NextRequest) {
 
         ...(era && {
           era: era as any,
+        }),
+
+        ...(search && {
+          name: {
+            contains: search,
+            mode: "insensitive",
+          },
         }),
       },
 

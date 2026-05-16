@@ -23,6 +23,8 @@ export default function ListingTable() {
 
   const [sort, setSort] = useState("latest");
 
+  const [search, setSearch] = useState("");
+
   async function fetchListings(type?: string) {
     setLoading(true);
 
@@ -38,6 +40,11 @@ export default function ListingTable() {
     // sort
     if (sort !== "latest") {
       params.set("sort", sort);
+    }
+
+    // search
+    if (search.trim()) {
+      params.set("search", search);
     }
 
     const query = params.toString();
@@ -57,7 +64,7 @@ export default function ListingTable() {
 
   useEffect(() => {
     fetchListings(filter);
-  }, [filter, sort]);
+  }, [filter, sort, search]);
 
   return (
     <div>
@@ -74,6 +81,16 @@ export default function ListingTable() {
             {item}
           </button>
         ))}
+      </div>
+
+      <div className="mb-4">
+        <input
+          type="text"
+          placeholder="Search sword name..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="w-full rounded border px-4 py-2"
+        />
       </div>
 
       {/* Sort */}
