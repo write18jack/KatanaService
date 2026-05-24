@@ -62,9 +62,13 @@ export default function ListingTable() {
     setLoading(false);
   }
 
-  useEffect(() => {
-    fetchListings(filter);
-  }, [filter, sort, search]);
+  useEffect(
+    () => {
+      fetchListings(filter);
+    },
+    // useEffect dependency
+    [filter, sort, search],
+  );
 
   return (
     <div>
@@ -83,6 +87,7 @@ export default function ListingTable() {
         ))}
       </div>
 
+      {/* Search */}
       <div className="mb-4">
         <input
           type="text"
@@ -93,7 +98,7 @@ export default function ListingTable() {
         />
       </div>
 
-      {/* Sort */}
+      {/* Sort Buttons */}
       <div className="mb-6 flex gap-2">
         <button
           onClick={() => setSort("latest")}

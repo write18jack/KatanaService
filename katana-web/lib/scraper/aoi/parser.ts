@@ -31,23 +31,10 @@ export function parseListingLinks(html: string): string[] {
   });
 
   return links;
-
-  // $("a").each((_, el) => {
-  //   const href = $(el).attr("href");
-
-  //   if (!href) return;
-
-  //   // AOIの詳細ページは /sword/ を含むことが多い
-  //   if (href.includes("/sword/")) {
-  //     links.push(href);
-  //   }
-  // });
-
-  // return [...new Set(links)];
 }
 
 // -----------------------------
-// 詳細ページ → データ抽出
+// 詳細ページ → データ抽出p
 // -----------------------------
 export function parseDetail(html: string, url: string): RawListing {
   const $ = cheerio.load(html);
@@ -58,13 +45,17 @@ export function parseDetail(html: string, url: string): RawListing {
   // 商品名
   // -----------------------------
   const name =
-    $("h1.entry-title").text().trim() || $("h1").first().text().trim();
+    //$("h1.entry-title").text().trim() || $("h1").first().text().trim();
+    $(".jet-listing-dynamic-link__label").first().text().trim() ||
+    $("h1.entry-title").first().text().trim() ||
+    $("title").text().replace(" - Japanese Sword Shop Aoi-Art", "").trim();
 
   // -----------------------------
   // 価格
   // 450,000JPY に対応
   // -----------------------------
-  const priceMatch = bodyText.match(/([\d,]+)\s?JPY/i);
+  const priceMatch =
+    bodyText.match(/¥\s?([\d,]+)/i) || bodyText.match(/([\d,]+)\s?JPY/i);
   const price = priceMatch
     ? parseInt(priceMatch[1].replace(/,/g, ""), 10)
     : null;
