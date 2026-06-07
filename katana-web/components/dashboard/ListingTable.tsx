@@ -25,7 +25,11 @@ export default function ListingTable() {
 
   const [search, setSearch] = useState("");
 
-  async function fetchListings(type?: string) {
+  const [page, setPage] = useState(1);
+
+  const [totalPages, setTotalPages] = useState(1);
+
+  async function fetchListings(type?: string, currentPage = 1) {
     setLoading(true);
 
     let url = "/api/market/listings";
@@ -47,6 +51,9 @@ export default function ListingTable() {
       params.set("search", search);
     }
 
+    // pagination
+    params.set("page", currentPage.toString());
+
     const query = params.toString();
 
     if (query) {
@@ -59,16 +66,22 @@ export default function ListingTable() {
 
     setListings(data.data);
 
+    setTotalPages(data.totalPages);
+
     setLoading(false);
   }
 
   useEffect(
     () => {
-      fetchListings(filter);
+      fetchListings(filter, page);
     },
     // useEffect dependency
-    [filter, sort, search],
+    [filter, sort, search, page],
   );
+
+  useEffect(() => {
+    setPage(1);
+  }, [filter, sort, search]);
 
   return (
     <div>
@@ -88,13 +101,17 @@ export default function ListingTable() {
       </div>
 
       {/* Search */}
-      <div className="mb-4">
+      <div className="relative mb-4">
+        <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2">
+          🔍
+        </span>
+
         <input
           type="text"
           placeholder="Search sword name..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="w-full rounded border px-4 py-2"
+          className="w-full rounded-lg border-2 border-slate-300 bg-white py-3 pl-10 pr-4 shadow-sm focus:border-slate-700 focus:outline-none"
         />
       </div>
 
@@ -178,6 +195,29 @@ export default function ListingTable() {
             )}
           </tbody>
         </table>
+      </div>
+
+      {/* Pager */}
+      <div className="mt-6 flex items-center justify-center gap-4">
+        <button
+          onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
+          disabled={page === 1}
+          className="rounded border px-4 py-2 disabled:opacity-50"
+        >
+          Previous
+        </button>
+
+        <span>
+          {page} / {totalPages}
+        </span>
+
+        <button
+          onClick={() => setPage((prev) => Math.min(prev + 1, totalPages))}
+          disabled={page >= totalPages}
+          className="rounded border px-4 py-2 disabled:opacity-50"
+        >
+          Next
+        </button>
       </div>
     </div>
   );
