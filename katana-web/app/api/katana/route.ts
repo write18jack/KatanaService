@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
+import { prisma } from "@/lib/prisma";
 
 /**
  * モバイルアプリのトップ画面などで表示する「販売中」の刀剣データを返すエンドポイント
