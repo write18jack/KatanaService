@@ -3,7 +3,6 @@
 import { signIn, auth } from "@/auth";
 import { LoginForm, loginSchema } from "@/types/login-form";
 import { AuthError } from "next-auth";
-import { redirect } from "next/navigation";
 
 // api\auth\[...nextauth]\route.tsからsignInロジックを
 // 分離して実装してる
