@@ -5,53 +5,68 @@ export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
 
-    // クエリ
     const katanaType = searchParams.get("katanaType");
+
     const era = searchParams.get("era");
 
-    // pagination
-    const page = Number(searchParams.get("page") || 1);
-    const limit = Number(searchParams.get("limit") || 20);
+    const page = Number(searchParams.get("page")) || 1;
+
+    const limit = Number(searchParams.get("limit")) || 20;
+
+    const sort = searchParams.get("sort");
+
+    const search = searchParams.get("search");
 
     const skip = (page - 1) * limit;
 
+    // 共通where
+    const where = {
+      ...(katanaType && {
+        katanaType: katanaType as any,
+      }),
+
+      ...(era && {
+        era: era as any,
+      }),
+
+      ...(search && {
+        name: {
+          contains: search,
+          mode: "insensitive" as const,
+        },
+      }),
+    };
+
     const listings = await prisma.katanaListing.findMany({
-      where: {
-        ...(katanaType && {
-          katanaType: katanaType as any,
-        }),
+      where,
 
-        ...(era && {
-          era: era as any,
-        }),
-      },
-
-      orderBy: {
-        createdAt: "desc",
-      },
-
+      orderBy:
+        sort === "price_asc"
+          ? {
+              price: "asc",
+            }
+          : sort === "price_desc"
+            ? {
+                price: "desc",
+              }
+            : {
+                createdAt: "desc",
+              },
       skip,
       take: limit,
     });
 
     const total = await prisma.katanaListing.count({
-      where: {
-        ...(katanaType && {
-          katanaType: katanaType as any,
-        }),
-
-        ...(era && {
-          era: era as any,
-        }),
-      },
+      where,
     });
 
     return NextResponse.json({
       page,
       limit,
       total,
-      totalPages: Math.ceil(total / limit),
 
+      totalPages: Math.ceil(total / limit),
+      era: era as any,
       data: listings,
     });
   } catch (error) {
@@ -67,4 +82,3 @@ export async function GET(request: NextRequest) {
     );
   }
 }
-F;
