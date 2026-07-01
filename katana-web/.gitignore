@@ -14,6 +14,7 @@ out/
 # Prisma
 prisma/*.db
 prisma/migrations/
+lib/generated/prisma
 
 # Logs
 npm-debug.log*
@@ -31,3 +32,6 @@ sample-db.tar
 # Editor settings
 .vscode/
 .idea/
+
+debug.html
+file_paths.txt

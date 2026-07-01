@@ -1,7 +1,21 @@
 "use client";
 
-import type { NextPage } from "next";
-
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { registerSchema, RegisterInput } from "@/actions/validation/auth-schema";
+import { registerUser } from "@/actions/auth/register";
+import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -11,49 +25,37 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-
-import { Input } from "@/components/ui/input";
-import { useForm } from "react-hook-form";
-import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from "@/components/ui/form";
-
-import { zodResolver } from "@hookform/resolvers/zod";
-import { LoginForm, loginSchema } from "@/types/login-form";
-import { credentialsLogin } from "@/actions/login";
-import { FormError } from "@/components/form-error";
-import { useState, useTransition } from "react";
 import Link from "next/link";
+import { FormError } from "@/components/form-error";
 import { ChevronLeft } from "lucide-react";
 
-const Page: NextPage = () => {
+export default function RegisterPage() {
   const [error, setError] = useState<string | undefined>("");
   const [isPending, startTransition] = useTransition();
+  const router = useRouter();
 
-  const form = useForm<LoginForm>({
-    resolver: zodResolver(loginSchema),
+  const form = useForm<RegisterInput>({
+    resolver: zodResolver(registerSchema),
     defaultValues: {
-      username: "",
+      name: "",
+      email: "",
       password: "",
     },
   });
 
-  async function onSubmit(values: LoginForm) {
+  const onSubmit = async (values: RegisterInput) => {
     setError("");
     startTransition(async () => {
-      const result = await credentialsLogin(values);
-
-      if (result === null) {
-        return;
+      const res = await registerUser(values);
+      if (res.error) {
+        setError(res.error);
+        toast.error(res.error);
+      } else {
+        toast.success(res.success);
+        router.push("/login");
       }
-      setError(result);
     });
-  }
+  };
 
   return (
     <div className="relative flex min-h-screen flex-col items-center bg-gray-50">
@@ -71,34 +73,54 @@ const Page: NextPage = () => {
         </Button>
       </div>
 
-      {/* ログインフォームを中央上部に配置 (mt-24〜32程度で調整) */}
       <div className="mt-32 w-full max-w-md px-4">
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)}>
             <Card className="shadow-xl">
               <CardHeader>
                 <CardTitle className="text-center text-2xl font-bold">
-                  ログイン
+                  新規アカウント登録
                 </CardTitle>
                 <CardDescription className="text-center">
-                  ユーザー名/パスワードによるログイン
+                  必要事項を入力して登録してください
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <FormField
                   control={form.control}
-                  name="username"
+                  name="name"
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>ユーザー名</FormLabel>
                       <FormControl>
-                        <Input disabled={isPending} {...field} />
+                        <Input
+                          placeholder="山田太郎"
+                          disabled={isPending}
+                          {...field}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
                   )}
                 />
-
+                <FormField
+                  control={form.control}
+                  name="email"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>メールアドレス</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="email"
+                          placeholder="example@mail.com"
+                          disabled={isPending}
+                          {...field}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
                 <FormField
                   control={form.control}
                   name="password"
@@ -107,8 +129,9 @@ const Page: NextPage = () => {
                       <FormLabel>パスワード</FormLabel>
                       <FormControl>
                         <Input
-                          disabled={isPending}
                           type="password"
+                          placeholder="******"
+                          disabled={isPending}
                           {...field}
                         />
                       </FormControl>
@@ -117,24 +140,17 @@ const Page: NextPage = () => {
                   )}
                 />
               </CardContent>
-              {error && (
-                <div className="px-6 pb-4">
-                  <FormError title="ログイン失敗" message={error} />
-                </div>
-              )}
+              {error && <FormError title="登録失敗" message={error} />}
               <CardFooter className="flex flex-col gap-4">
-                <Button className="h-11 w-full text-lg" disabled={isPending}>
-                  {isPending ? "認証中..." : "ログイン"}
+                <Button className="w-full" disabled={isPending}>
+                  {isPending ? "登録中..." : "登録する"}
                 </Button>
-                <div className="text-muted-foreground text-center text-sm">
-                  アカウントをお持ちでないですか？{" "}
-                  <Link
-                    href="/register"
-                    className="text-primary font-semibold hover:underline"
-                  >
-                    新規登録はこちら
+                <p className="text-muted-foreground text-center text-sm">
+                  既にアカウントをお持ちですか？{" "}
+                  <Link href="/login" className="text-primary hover:underline">
+                    ログイン
                   </Link>
-                </div>
+                </p>
               </CardFooter>
             </Card>
           </form>
@@ -142,6 +158,4 @@ const Page: NextPage = () => {
       </div>
     </div>
   );
-};
-
-export default Page;
+}

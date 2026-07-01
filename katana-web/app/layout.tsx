@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { cn } from "@/lib/utils";
-import Header from "@/components/header";
 import { Toaster } from "sonner";
 
 const geistSans = Geist({
@@ -36,16 +35,12 @@ export default function RootLayout({
           geistSans.variable,
           geistMono.variable,
           // 背景色と全体レイアウトの設定
-          "bg-linear-to-t from-neutral-300 via-neutral-200 to-neutral-100",
+          "bg-linear-to-t from-neutral-300 via-neutral-300 to-neutral-100",
           "flex min-h-screen flex-col",
         )}
       >
-        <Header /> {/* ここにヘッダーを追加 */}
-        {/* メインコンテンツ: justify-centerで中央寄せを維持しつつ、ヘッダーの高さ分下げる */}
-        <main className="flex flex-1 flex-col pt-20 pb-10 px-4 w-full max-w-7xl mx-auto">
-          {children}
-          <Toaster />
-        </main>
+        {children}
+        <Toaster />
       </body>
     </html>
   );

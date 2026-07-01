@@ -3,7 +3,7 @@
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
-import { katanaSchema, KatanaInput } from "./katana-schema";
+import { katanaSchema, KatanaInput } from "./schema";
 
 /**
  * 刀剣の登録・変更・削除申請を作成するサーバーアクション

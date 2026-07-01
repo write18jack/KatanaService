@@ -1,35 +1,35 @@
 import { auth } from "@/auth";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
+import { getTranslations } from "next-intl/server";
 
 // ユーザーが最初にアクセスする「看板」の役割。
 export default async function HomePage() {
+  const t = await getTranslations("Home");
   const session = await auth();
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-gray-50 p-24">
-      <div className="z-10 flex w-full max-w-5xl flex-col items-center justify-center gap-8 text-center font-mono text-sm">
+    <main className="min-h-[calc(100vh-56px)] w-full bg-blue-200 pt-14">
+      <div className="flex h-full w-full flex-col p-8">
         <h1 className="text-4xl font-bold tracking-tight text-gray-900 sm:text-6xl">
-          刀剣管理システム
+          {t("title")}
         </h1>
-        <p className="text-lg leading-8 text-gray-600">
-          刀剣の登録申請、修正、在庫管理を効率的に行うためのプラットフォームです。
-        </p>
+        <p className="mt-8 text-lg text-gray-600">{t("description")}</p>
 
-        <div className="flex items-center gap-4">
+        <div className="mt-8 items-center gap-4">
           {session ? (
-            <Button asChild size="lg">
+            <Button asChild>
               <Link href="/dashboard">ダッシュボードへ（ログイン済み）</Link>
             </Button>
           ) : (
             <>
               {/* ログイン画面へのリンク */}
-              <Button asChild variant="outline" size="lg">
+              <Button asChild variant="outline">
                 <Link href="/login">ログイン</Link>
               </Button>
 
               {/* 新規登録画面へのリンク（app/(auth)/register/page.tsx に対応） */}
-              <Button asChild size="lg">
+              <Button asChild>
                 <Link href="/register">新規アカウント登録</Link>
               </Button>
             </>

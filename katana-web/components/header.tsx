@@ -6,16 +6,16 @@ export default async function Header() {
   const session = await auth();
 
   return (
-    <header className="fixed top-0 z-50 w-full border-b bg-white/80 backdrop-blur-md">
-      <div className="container mx-auto flex h-14 items-center justify-between px-4">
-        <Link href="/" className="font-bold text-lg">
+    <header className="fixed top-0 z-50 h-14 w-full bg-yellow-500/30">
+      <div className="flex h-full w-full items-center justify-between px-8">
+        <Link href="/" className="text-lg font-bold">
           Great App
         </Link>
 
         <div className="flex items-center gap-4">
           {session ? (
             <>
-              <span className="text-sm text-neutral-600 hidden sm:inline">
+              <span className="hidden text-sm text-neutral-600 sm:inline">
                 {session.user?.name}
               </span>
               <LogoutButton />
@@ -23,7 +23,7 @@ export default async function Header() {
           ) : (
             <Link
               href="/login"
-              className="text-sm font-medium hover:underline underline-offset-4"
+              className="text-sm font-medium underline-offset-4 hover:underline"
             >
               ログイン
             </Link>

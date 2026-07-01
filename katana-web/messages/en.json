@@ -1,0 +1,80 @@
+{
+  "Home": {
+    "title": "Katana Data",
+    "description": "A platform for analyzing the katana market, allowing you to compare prices and trends.",
+    "getStarted": "Get Started"
+  },
+  "Dashboard": {
+    "title": "Katana Market Dashboard",
+    "summary": {
+      "totalListings": "Total Listings",
+      "averagePrice": "Average Price",
+      "maxPrice": "Highest Price",
+      "minPrice": "Lowest Price"
+    },
+    "filters": {
+      "all": "All",
+      "katana": "Katana",
+      "wakizashi": "Wakizashi",
+      "tanto": "Tanto"
+    },
+    "searchPlaceholder": "Search sword name...",
+    "sort": {
+      "latest": "Latest",
+      "priceDesc": "Price: High to Low",
+      "priceAsc": "Price: Low to High"
+    },
+    "table": {
+      "name": "Name",
+      "type": "Type",
+      "era": "Era",
+      "price": "Price",
+      "source": "Source"
+    },
+    "pagination": {
+      "previous": "Previous",
+      "next": "Next"
+    },
+    "loading": "Loading..."
+  },
+
+  "Auth": {
+    "logout": "Logout"
+  },
+
+  "Login": {
+    "title": "Login",
+    "username": "Username",
+    "password": "Password",
+    "submit": "Sign In",
+    "backToTop": "Back to Top",
+    "description": "Please enter your username and password to log in.",
+    "authenticating": "Authenticating...",
+    "noAccount": "Don't have an account?",
+    "registerHere": "Register here",
+    "error": {
+      "invalidCredentials": "Invalid username or password"
+    }
+  },
+
+  "Register": {
+    "title": "Create Account",
+    "username": "Username",
+    "password": "Password",
+    "confirmPassword": "Confirm Password",
+    "submit": "Register"
+  },
+
+  "Header": {
+    "dashboard": "Dashboard",
+    "login": "Login",
+    "register": "Register",
+    "logout": "Logout"
+  },
+
+  "Error": {
+    "notFound": "Page Not Found",
+    "serverError": "An Internal Server Error Occurred",
+    "goBack": "Go Back"
+  }
+}

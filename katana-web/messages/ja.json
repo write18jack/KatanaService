@@ -1,0 +1,80 @@
+{
+  "Home": {
+    "title": "刀剣データ",
+    "description": "相場、価格比較ができる 刀市場分析プラットフォーム",
+    "getStarted": "始める"
+  },
+  "Dashboard": {
+    "title": "刀市場ダッシュボード",
+    "summary": {
+      "totalListings": "登録数",
+      "averagePrice": "平均価格",
+      "maxPrice": "最高価格",
+      "minPrice": "最低価格"
+    },
+    "filters": {
+      "all": "すべて",
+      "katana": "刀",
+      "wakizashi": "脇差",
+      "tanto": "短刀"
+    },
+    "searchPlaceholder": "刀名を検索...",
+    "sort": {
+      "latest": "新着順",
+      "priceDesc": "価格が高い順",
+      "priceAsc": "価格が安い順"
+    },
+    "table": {
+      "name": "名称",
+      "type": "種類",
+      "era": "時代",
+      "price": "価格",
+      "source": "出典"
+    },
+    "pagination": {
+      "previous": "前へ",
+      "next": "次へ"
+    },
+    "loading": "読み込み中..."
+  },
+
+  "Auth": {
+    "logout": "ログアウト"
+  },
+
+  "Login": {
+    "title": "ログイン",
+    "username": "ユーザー名",
+    "password": "パスワード",
+    "submit": "ログイン",
+    "backToTop": "トップページに戻る",
+    "description": "ログインするには、ユーザー名とパスワードを入力してください。",
+    "authenticating": "認証中...",
+    "noAccount": "アカウントをお持ちでないですか？",
+    "registerHere": "新規登録はこちら",
+    "error": {
+      "invalidCredentials": "ユーザー名またはパスワードが正しくありません"
+    }
+  },
+
+  "Register": {
+    "title": "新規登録",
+    "username": "ユーザー名",
+    "password": "パスワード",
+    "confirmPassword": "パスワードの確認",
+    "submit": "登録"
+  },
+
+  "Header": {
+    "dashboard": "ダッシュボード",
+    "login": "ログイン",
+    "register": "新規登録",
+    "logout": "ログアウト"
+  },
+
+  "Error": {
+    "notFound": "ページが見つかりません",
+    "serverError": "サーバーエラーが発生しました",
+    "goBack": "戻る"
+  }
+}

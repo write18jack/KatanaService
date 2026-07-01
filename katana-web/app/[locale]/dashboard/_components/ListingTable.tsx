@@ -1,5 +1,6 @@
 "use client";
 
+import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 
 type Listing = {
@@ -12,9 +13,18 @@ type Listing = {
   sourceUrl: string;
 };
 
-const FILTERS = ["ALL", "KATANA", "WAKIZASHI", "TANTO"];
+const FILTERS = [
+  { value: "ALL", label: "filters.all" },
+  { value: "KATANA", label: "filters.katana" },
+  { value: "WAKIZASHI", label: "filters.wakizashi" },
+  { value: "TANTO", label: "filters.tanto" },
+];
 
 export default function ListingTable() {
+  const t = useTranslations("Dashboard");
+
+  const locale = useLocale();
+
   const [listings, setListings] = useState<Listing[]>([]);
 
   const [loading, setLoading] = useState(true);
@@ -89,13 +99,13 @@ export default function ListingTable() {
       <div className="mb-4 flex gap-2">
         {FILTERS.map((item) => (
           <button
-            key={item}
-            onClick={() => setFilter(item)}
+            key={item.value}
+            onClick={() => setFilter(item.value)}
             className={`rounded border px-4 py-2 ${
-              filter === item ? "bg-black text-white" : "bg-white"
+              filter === item.value ? "bg-black text-white" : "bg-white"
             }`}
           >
-            {item}
+            {t(item.label)}
           </button>
         ))}
       </div>
@@ -108,10 +118,10 @@ export default function ListingTable() {
 
         <input
           type="text"
-          placeholder="Search sword name..."
+          placeholder={t("searchPlaceholder")}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="w-full rounded-lg border-2 border-slate-300 bg-white py-3 pl-10 pr-4 shadow-sm focus:border-slate-700 focus:outline-none"
+          className="w-full rounded-lg border-2 border-slate-300 bg-white py-3 pr-4 pl-10 shadow-sm focus:border-slate-700 focus:outline-none"
         />
       </div>
 
@@ -123,25 +133,25 @@ export default function ListingTable() {
             sort === "latest" ? "bg-black text-white" : "bg-white"
           }`}
         >
-          Latest
+          {t("sort.latest")}
         </button>
 
         <button
-          onClick={() => setSort("price_desc")}
+          onClick={() => setSort("priceDesc")}
           className={`rounded border px-4 py-2 ${
-            sort === "price_desc" ? "bg-black text-white" : "bg-white"
+            sort === "priceDesc" ? "bg-black text-white" : "bg-white"
           }`}
         >
-          Price ↓
+          {t("sort.priceDesc")}
         </button>
 
         <button
-          onClick={() => setSort("price_asc")}
+          onClick={() => setSort("priceAsc")}
           className={`rounded border px-4 py-2 ${
-            sort === "price_asc" ? "bg-black text-white" : "bg-white"
+            sort === "priceAsc" ? "bg-black text-white" : "bg-white"
           }`}
         >
-          Price ↑
+          {t("sort.priceAsc")}
         </button>
       </div>
 
@@ -150,22 +160,22 @@ export default function ListingTable() {
         <table className="w-full">
           <thead className="bg-gray-100">
             <tr>
-              <th className="p-4 text-left">Name</th>
+              <th className="p-4 text-left">{t("table.name")}</th>
 
-              <th className="p-4 text-left">Type</th>
+              <th className="p-4 text-left">{t("table.type")}</th>
 
-              <th className="p-4 text-left">Era</th>
+              <th className="p-4 text-left">{t("table.era")}</th>
 
-              <th className="p-4 text-left">Price</th>
+              <th className="p-4 text-left">{t("table.price")}</th>
 
-              <th className="p-4 text-left">Source</th>
+              <th className="p-4 text-left">{t("table.source")}</th>
             </tr>
           </thead>
 
           <tbody>
             {loading ? (
               <tr>
-                <td className="p-4">Loading...</td>
+                <td className="p-4">{t("loading")}</td>
               </tr>
             ) : (
               listings.map((item) => (
@@ -186,7 +196,13 @@ export default function ListingTable() {
                   <td className="p-4">{item.era ?? "-"}</td>
 
                   <td className="p-4">
-                    ¥{item.price?.toLocaleString() ?? "-"}
+                    {item.price == null
+                      ? "-"
+                      : new Intl.NumberFormat(locale, {
+                          style: "currency",
+                          currency: "JPY",
+                          maximumFractionDigits: 0,
+                        }).format(item.price)}
                   </td>
 
                   <td className="p-4">{item.source}</td>
@@ -204,7 +220,7 @@ export default function ListingTable() {
           disabled={page === 1}
           className="rounded border px-4 py-2 disabled:opacity-50"
         >
-          Previous
+          {t("pagination.previous")}
         </button>
 
         <span>
@@ -216,7 +232,7 @@ export default function ListingTable() {
           disabled={page >= totalPages}
           className="rounded border px-4 py-2 disabled:opacity-50"
         >
-          Next
+          {t("pagination.next")}
         </button>
       </div>
     </div>
