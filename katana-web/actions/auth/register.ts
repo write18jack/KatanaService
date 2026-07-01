@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import bcrypt from "bcryptjs";
-import { RegisterInput, registerSchema } from "./auth-schema";
+import { RegisterInput, registerSchema } from "@/actions/validation/auth-schema";
 
 export async function registerUser(values: RegisterInput) {
   // Zodによるバリデーション

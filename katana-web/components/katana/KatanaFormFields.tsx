@@ -23,8 +23,8 @@ import {
 } from "@/components/ui/select";
 
 import { Button } from "@/components/ui/button";
-import { katanaSchema, type KatanaInput } from "@/actions/katana-schema";
-import { createKatanaRequest } from "@/actions/user-katana";
+import { katanaSchema, type KatanaInput } from "@/actions/katana/schema";
+import { createKatanaRequest } from "@/actions/katana/user";
 import { toast } from "sonner";
 
 interface KatanaFormFieldsProps {

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
-import { createKatanaRequest } from "@/actions/user-katana";
+import { createKatanaRequest } from "@/actions/katana/user";
 
 /**
  * モバイルアプリから新規登録、変更、削除の申請を送信するためのエンドポイント

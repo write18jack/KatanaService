@@ -1,38 +1,68 @@
-import NextAuth from "next-auth";
-import authConfig from "./auth.config";
 import { NextResponse } from "next/server";
+import createMiddleware from "next-intl/middleware";
+import { auth } from "@/auth";
+import { routing } from "@/i18n/routing";
 
-// middleware.ts: /dashboard などの保護されたページを守る「門番」の役割。
-// proxy.ts は古い形式や特定のライブラリの推奨?
-
-const { auth } = NextAuth(authConfig);
+const intlMiddleware = createMiddleware(routing);
 
 export default auth((req) => {
-  const { nextUrl } = req;
-  const isLoggedIn = !!req.auth;
-  // const role = req.auth?.user?.role;
+  const response = intlMiddleware(req);
 
-  // 1. そもそもログインしていない場合、ログイン画面へ強制リダイレクト
-  if (!isLoggedIn && nextUrl.pathname.startsWith("/dashboard")) {
-    return NextResponse.redirect(new URL("/login", nextUrl));
+  const pathname = req.nextUrl.pathname;
+
+  const locale =
+    routing.locales.find((l) => pathname.startsWith(`/${l}`)) ??
+    routing.defaultLocale;
+
+  const pathnameWithoutLocale = pathname.replace(
+    new RegExp(`^/(${routing.locales.join("|")})`),
+    "",
+  ) || "/";
+
+  console.log({
+    pathname: pathname,
+    locale: locale,
+    pathnameWithoutLocale: pathnameWithoutLocale,
+  });
+
+  const isLoggedIn = !!req.auth;
+  const role = req.auth?.user?.role;
+
+  // 認証不要ページ
+  const publicRoutes = ["/", "/login", "/register", "/403"];
+
+  const isPublicRoute = publicRoutes.some(
+    (route) =>
+      pathnameWithoutLocale === route ||
+      pathnameWithoutLocale.startsWith(`${route}/`),
+  );
+
+  // 未ログインで保護ページへアクセス
+  if (!isLoggedIn && !isPublicRoute) {
+    return NextResponse.redirect(new URL(`/${locale}/login`, req.url));
   }
 
-  // 2. /dashboard 直下にアクセスした場合の振り分け
-  // if (nextUrl.pathname === "/dashboard") {
-  //   const path =
-  //     role === "admin" ? "/dashboard/admin/requests" : "/dashboard/user";
-  //   return NextResponse.redirect(new URL(path, nextUrl));
-  // }
+  // ログイン済みで login/register にアクセス
+  if (isLoggedIn && ["/login", "/register"].includes(pathnameWithoutLocale)) {
+    return NextResponse.redirect(new URL(`/${locale}/dashboard`, req.url));
+  }
 
-  // 3. 管理者専用ページのガード ((/dashboard/admin/...) へのアクセス制限)
-  // if (nextUrl.pathname.startsWith("/dashboard/admin") && role !== "admin") {
-  //   return NextResponse.redirect(new URL("/403", nextUrl));
-  // }
-
-  return NextResponse.next();
+  // 管理者専用
+  if (
+    pathnameWithoutLocale.startsWith("/dashboard/admin") &&
+    role !== "admin"
+  ) {
+    return NextResponse.redirect(new URL(`/${locale}/403`, req.url));
+  }
+  return response;
 });
 
 export const config = {
-  // ダッシュボード以下のすべてのページにこの Middleware を適用
-  matcher: ["/dashboard/:path*"],
+  matcher: [
+    "/",
+    "/(ja|en)/:path*",
+
+    // next-intl 推奨設定
+    "/((?!api|trpc|_next|_vercel|.*\\..*).*)",
+  ],
 };

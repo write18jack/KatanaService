@@ -10,7 +10,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { createKatanaRequest } from "@/actions/user-katana";
+import { createKatanaRequest } from "@/actions/katana/user";
 import { toast } from "sonner";
 import { KatanaFormFields } from "./KatanaFormFields";
 
