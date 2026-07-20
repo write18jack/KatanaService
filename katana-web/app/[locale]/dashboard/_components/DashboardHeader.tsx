@@ -1,7 +1,5 @@
 "use client";
 
-import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher";
-
 export function DashboardHeader() {
   return (
     <header className="flex items-center justify-between border-b px-6 py-4">

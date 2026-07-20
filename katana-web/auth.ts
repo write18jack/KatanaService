@@ -13,8 +13,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       async authorize(credentials) {
         const validated = loginSchema.safeParse(credentials);
         if (validated.success) {
-          const { username, password } = validated.data;
-          const user = await getUserFromDb(username, password);
+          const { email, password } = validated.data;
+          const user = await getUserFromDb(email, password);
           if (user) return user;
         }
         return null;

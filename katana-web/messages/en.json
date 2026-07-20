@@ -44,16 +44,16 @@
 
   "Login": {
     "title": "Login",
-    "username": "Username",
+    "email": "Email",
     "password": "Password",
     "submit": "Sign In",
     "backToTop": "Back to Top",
-    "description": "Please enter your username and password to log in.",
+    "description": "Please enter your email and password to log in.",
     "authenticating": "Authenticating...",
     "noAccount": "Don't have an account?",
     "registerHere": "Register here",
     "error": {
-      "invalidCredentials": "Invalid username or password"
+      "invalidCredentials": "Invalid email or password"
     }
   },
 

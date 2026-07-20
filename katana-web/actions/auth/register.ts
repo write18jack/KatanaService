@@ -2,53 +2,67 @@
 
 import { prisma } from "@/lib/prisma";
 import bcrypt from "bcryptjs";
-import { RegisterInput, registerSchema } from "@/actions/validation/auth-schema";
+import {
+  RegisterInput,
+  registerSchema,
+} from "@/actions/validation/auth-schema";
+import { UserRole } from "@prisma/client";
 
 export async function registerUser(values: RegisterInput) {
-  // Zodによるバリデーション
+  // バリデーション
   const validatedFields = registerSchema.safeParse(values);
 
   if (!validatedFields.success) {
-    return { error: "入力内容が正しくありません。" };
+    return {
+      error: "入力内容が正しくありません。",
+    };
   }
 
-  const { name, email, password } = validatedFields.data;
+  const { shopName, name, email, password } = validatedFields.data;
 
   try {
-    // スキーマの整合性チェック (nameは @unique なので重複不可 )
-    const existingUserByName = await prisma.user.findUnique({
-      where: { name },
+    // メールアドレス重複チェック
+    const existingUser = await prisma.user.findUnique({
+      where: { email },
     });
-    if (existingUserByName) {
-      return { error: "このユーザー名は既に既に使用されています。" };
+
+    if (existingUser) {
+      return {
+        error: "このメールアドレスは既に登録されています。",
+      };
     }
 
-    // emailも @unique なので重複チェック
-    if (email) {
-      const existingUserByEmail = await prisma.user.findUnique({
-        where: { email },
-      });
-      if (existingUserByEmail) {
-        return { error: "このメールアドレスは既に登録されています。" };
-      }
-    }
-
-    // パスワードのハッシュ化 (保存時の安全性を確保 )
+    // パスワードハッシュ化
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // ユーザーの作成
-    await prisma.user.create({
-      data: {
-        name,
-        email,
-        password: hashedPassword, // ハッシュ化したパスワードを保存
-        role: "user", // デフォルトロールは一般ユーザー
-      },
+    // Shop作成 + User作成
+    await prisma.$transaction(async (tx) => {
+      const shop = await tx.shop.create({
+        data: {
+          name: shopName,
+          email,
+        },
+      });
+
+      await tx.user.create({
+        data: {
+          name,
+          email,
+          password: hashedPassword,
+          role: UserRole.ADMIN,
+          shopId: shop.id,
+        },
+      });
     });
 
-    return { success: "ユーザー登録が完了しました。ログインしてください。" };
+    return {
+      success: "ユーザー登録が完了しました。ログインしてください。",
+    };
   } catch (error) {
     console.error("Registration error:", error);
-    return { error: "登録中にエラーが発生しました。" };
+
+    return {
+      error: "登録中にエラーが発生しました。",
+    };
   }
 }
