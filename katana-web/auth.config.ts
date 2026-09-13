@@ -2,6 +2,7 @@ import Credentials from "next-auth/providers/credentials";
 import type { NextAuthConfig } from "next-auth";
 import { loginSchema } from "@/types/login-form";
 import { getUserFromDb } from "@/data/user";
+import { UserRole } from "@prisma/client";
 
 // 認証ロジックだけをまとめる
 export default {
@@ -38,13 +39,15 @@ export default {
         // Prisma で KatanaRequest を作成する際、applicantId に
         // session.user.id を割り当てる必要があるためuser.id を token に持たせる
         token.id = user.id;
+        token.shopId = user.shopId; // token に shopId を持たせる
       }
       return token;
     },
     async session({ session, token }) {
       if (session.user) {
-        session.user.role = token.role as string;
+        session.user.role = token.role as UserRole;
         session.user.id = token.id as string; // token から session.user に id を渡す
+        session.user.shopId = token.shopId as string; // token から session.user に shopId を渡す
       }
       return session;
     },

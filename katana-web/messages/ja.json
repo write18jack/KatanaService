@@ -44,16 +44,16 @@
 
   "Login": {
     "title": "ログイン",
-    "username": "ユーザー名",
+    "email": "メールアドレス",
     "password": "パスワード",
     "submit": "ログイン",
     "backToTop": "トップページに戻る",
-    "description": "ログインするには、ユーザー名とパスワードを入力してください。",
+    "description": "ログインするには、メールアドレスとパスワードを入力してください。",
     "authenticating": "認証中...",
     "noAccount": "アカウントをお持ちでないですか？",
     "registerHere": "新規登録はこちら",
     "error": {
-      "invalidCredentials": "ユーザー名またはパスワードが正しくありません"
+      "invalidCredentials": "メールアドレスまたはパスワードが正しくありません"
     }
   },
 

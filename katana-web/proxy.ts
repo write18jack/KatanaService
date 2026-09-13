@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import createMiddleware from "next-intl/middleware";
 import { auth } from "@/auth";
 import { routing } from "@/i18n/routing";
+import { UserRole } from "@prisma/client";
 
 const intlMiddleware = createMiddleware(routing);
 
@@ -14,10 +15,8 @@ export default auth((req) => {
     routing.locales.find((l) => pathname.startsWith(`/${l}`)) ??
     routing.defaultLocale;
 
-  const pathnameWithoutLocale = pathname.replace(
-    new RegExp(`^/(${routing.locales.join("|")})`),
-    "",
-  ) || "/";
+  const pathnameWithoutLocale =
+    pathname.replace(new RegExp(`^/(${routing.locales.join("|")})`), "") || "/";
 
   console.log({
     pathname: pathname,
@@ -50,7 +49,7 @@ export default auth((req) => {
   // 管理者専用
   if (
     pathnameWithoutLocale.startsWith("/dashboard/admin") &&
-    role !== "admin"
+    role !== UserRole.ADMIN
   ) {
     return NextResponse.redirect(new URL(`/${locale}/403`, req.url));
   }

@@ -2,7 +2,10 @@
 
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { registerSchema, RegisterInput } from "@/actions/validation/auth-schema";
+import {
+  registerSchema,
+  RegisterInput,
+} from "@/actions/validation/auth-schema";
 import { registerUser } from "@/actions/auth/register";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
@@ -37,6 +40,7 @@ export default function RegisterPage() {
   const form = useForm<RegisterInput>({
     resolver: zodResolver(registerSchema),
     defaultValues: {
+      shopName: "",
       name: "",
       email: "",
       password: "",
@@ -45,16 +49,18 @@ export default function RegisterPage() {
 
   const onSubmit = async (values: RegisterInput) => {
     setError("");
-    startTransition(async () => {
-      const res = await registerUser(values);
-      if (res.error) {
-        setError(res.error);
-        toast.error(res.error);
-      } else {
-        toast.success(res.success);
-        router.push("/login");
-      }
-    });
+
+    const res = await registerUser(values);
+    console.log(res);
+
+    if (res.error) {
+      setError(res.error);
+      toast.error(res.error);
+    } else {
+      console.log("Register Success");
+      toast.success(res.success);
+      router.push("/login");
+    }
   };
 
   return (
@@ -85,13 +91,31 @@ export default function RegisterPage() {
                   必要事項を入力して登録してください
                 </CardDescription>
               </CardHeader>
+              <FormField
+                control={form.control}
+                name="shopName"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>店舗名</FormLabel>
+                    <FormControl>
+                      <Input
+                        placeholder="〇〇刀剣店"
+                        disabled={isPending}
+                        {...field}
+                        value={field.value ?? ""}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
               <CardContent className="space-y-4">
                 <FormField
                   control={form.control}
                   name="name"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>ユーザー名</FormLabel>
+                      <FormLabel>担当者名</FormLabel>
                       <FormControl>
                         <Input
                           placeholder="山田太郎"

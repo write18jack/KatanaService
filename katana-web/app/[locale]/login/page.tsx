@@ -42,7 +42,7 @@ const Page: NextPage = () => {
   const form = useForm<LoginForm>({
     resolver: zodResolver(loginSchema),
     defaultValues: {
-      username: "",
+      email: "",
       password: "",
     },
   });
@@ -88,12 +88,17 @@ const Page: NextPage = () => {
               <CardContent className="space-y-4">
                 <FormField
                   control={form.control}
-                  name="username"
+                  name="email"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t("username")}</FormLabel>
+                      <FormLabel>{t("email")}</FormLabel>
                       <FormControl>
-                        <Input disabled={isPending} {...field} />
+                        <Input
+                          type="email"
+                          placeholder="example@mail.com"
+                          disabled={isPending}
+                          {...field}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>

@@ -6,153 +6,425 @@ datasource db {
   provider = "postgresql"
 }
 
+/**
+ * |------------------------------------------------------------------Ï--------
+ * | ENUM
+ * |--------------------------------------------------------------------------
+ */
+
+enum UserRole {
+  ADMIN
+  STORE
+}
+
+enum ProductStatus {
+  ACTIVE
+  SOLD
+}
+
+enum ImportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum ProductHistoryAction {
+  CREATE
+  UPDATE
+  DELETE
+  IMPORT
+  PRICE_CHANGE
+  STATUS_CHANGE
+}
+
+enum ImportRowStatus {
+  SUCCESS
+  ERROR
+  SKIPPED
+}
+
+/**
+ * |--------------------------------------------------------------------------
+ * | USER
+ * |--------------------------------------------------------------------------
+ */
+
 model User {
-  id             String          @id @default(uuid())
-  name           String          @unique
-  email          String?         @unique
-  emailVerified  DateTime?
-  image          String?
-  password       String
-  role           String          @default("user")
-  katanaRequests KatanaRequest[] // 逆リレーションを追加
+  id            String    @id @default(uuid())
+  name          String
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  password      String
+
+  role UserRole @default(STORE)
+
+  shopId String
+  shop   Shop   @relation(fields: [shopId], references: [id])
+
+  // 作成した商品
+  createdProducts Product[] @relation("ProductCreatedUser")
+
+  // 更新した商品
+  updatedProducts Product[] @relation("ProductUpdatedUser")
+
+  // 削除した商品
+  deletedProducts Product[] @relation("ProductDeletedUser")
+
+  // 商品履歴
+  productHistories ProductHistory[] @relation("ProductHistoryUser")
+
+  // Excel取込
+  importJobs ImportJob[] @relation("ImportExecutedUser")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * |--------------------------------------------------------------------------
+ * | SHOP
+ * |--------------------------------------------------------------------------
+ */
+
+model Shop {
+  id String @id @default(uuid())
+
+  name    String
+  email   String?
+  phone   String?
+  address String?
+
+  isActive Boolean @default(true)
+
+  users User[]
+
+  products Product[]
+
+  importJobs ImportJob[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * |--------------------------------------------------------------------------
+ * | PRODUCT
+ * |--------------------------------------------------------------------------
+ */
+
+model Product {
+  id String @id @default(uuid())
+
+  // -------------------------
+  // 店舗
+  // -------------------------
+  shopId String
+  shop   Shop   @relation(fields: [shopId], references: [id])
+
+  // -------------------------
+  // 作成者・更新者・削除者
+  // -------------------------
+  createdById String?
+  createdBy   User?   @relation("ProductCreatedUser", fields: [createdById], references: [id])
+
+  updatedById String?
+  updatedBy   User?   @relation("ProductUpdatedUser", fields: [updatedById], references: [id])
+
+  deletedById String?
+  deletedBy User? @relation("ProductDeletedUser", fields: [deletedById], references: [id])
+
+  // -------------------------
+  // 商品情報
+  // -------------------------
+  productCode String
+  title       String
+
+  makerId String
+  maker   Maker  @relation(fields: [makerId], references: [id])
+
+  gradeId String?
+  grade   Grade?  @relation(fields: [gradeId], references: [id])
+
+  rankId String?
+  rank   Rank?   @relation(fields: [rankId], references: [id])
+
+  periodId String?
+  period   Period? @relation(fields: [periodId], references: [id])
+
+  traditionId String?
+  tradition   Tradition? @relation(fields: [traditionId], references: [id])
+
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  appraiserId String?
+  appraiser   Appraiser? @relation(fields: [appraiserId], references: [id])
+
+  price Int
+
+  bladeLength Decimal? @db.Decimal(5, 2)
+  curvature   Decimal? @db.Decimal(4, 2)
+
+  salesDestination String?
+
+  status ProductStatus @default(ACTIVE)
+
+  listedAt DateTime?
+  soldAt   DateTime?
+
+  histories      ProductHistory[]
+  priceHistories PriceHistory[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  katanas Katana[]
+  @@unique([shopId, productCode])
 }
 
-// -----------------------------
-// NEW: enum（normalizeと一致させる）
-// -----------------------------
-enum KatanaType {
-  KATANA
-  WAKIZASHI
-  TANTO
-  UNKNOWN
+/**
+ * |--------------------------------------------------------------------------
+ * | PRODUCT HISTORY
+ * |--------------------------------------------------------------------------
+ */
+
+model ProductHistory {
+  id String @id @default(uuid())
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  action ProductHistoryAction
+
+  changedById String?
+  changedBy   User?   @relation("ProductHistoryUser", fields: [changedById], references: [id])
+
+  oldValue Json?
+
+  newValue Json?
+
+  createdAt DateTime @default(now())
 }
 
-enum Era {
-  HEIAN
-  KAMAKURA
-  MUROMACHI
-  MOMOYAMA
-  EDO
-  MODERN
-  UNKNOWN
-}
+/**
+ * |--------------------------------------------------------------------------
+ * | PRICE HISTORY
+ * |--------------------------------------------------------------------------
+ */
 
-// -----------------------------
-// NEW: 市場データ（主役）
-// -----------------------------
-model KatanaListing {
-  id          String   @id @default(cuid())
-
-  name        String
-  price       Int?
-
-  katanaType  KatanaType
-  era         Era?
-
-  source      String
-  // 同じ商品を二重登録しないためのURL（ユニーク制約を付与）
-  sourceUrl   String   @unique
-
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  // relations
-  rawData      RawListing?
-  priceHistory PriceHistory[]
-
-  @@index([katanaType, era])
-  @@index([source])
-}
-
-// -----------------------------
-// NEW: 生データ（超重要）
-// -----------------------------
-model RawListing {
-  id          String   @id @default(cuid())
-
-  sourceUrl   String   @unique
-  rawJson     Json
-
-  createdAt   DateTime @default(now())
-
-  listingId   String   @unique
-  listing     KatanaListing @relation(fields: [listingId], references: [id])
-}
-
-// -----------------------------
-// NEW: 価格履歴（相場の核）
-// -----------------------------
 model PriceHistory {
-  id         String   @id @default(cuid())
+  id String @id @default(uuid())
 
-  listingId  String
-  listing    KatanaListing @relation(fields: [listingId], references: [id])
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
 
-  price      Int
-  recordedAt DateTime @default(now())
+  oldPrice Int?
 
-  @@index([listingId])
-  @@index([recordedAt])
+  newPrice Int
+
+  changedAt DateTime @default(now())
 }
 
-// 格付けの定義
-// enum Grade {
-//   JuyoBijutsu // 重要美術品
-//   TokubetsuJuyoToken // 特別重要刀剣
-//   JuyoToken // 重要刀剣
-//   TokubetsuHozonToken // 特別保存刀剣
-//   HozonToken // 保存刀剣
-// }
+/**
+ * |--------------------------------------------------------------------------
+ * | IMPORT JOB
+ * |--------------------------------------------------------------------------
+ */
 
-model Katana {
-  id String @id @default(cuid())
+model ImportJob {
+  id String @id @default(uuid())
 
-  // 基本情報
-  shopName   String // 店舗名
-  name       String // 銘
-  katanaType String // 種別 (打刀, 脇差, 短刀など)
-  era        String? // 時代
-  price      Int // 価格
-  status     String // 在庫状況 (例: 販売中, 売約済)
-  imageUrl   String?
+  shopId String
+  shop   Shop   @relation(fields: [shopId], references: [id])
 
-  // リレーション定義
-  dealerId String
-  dealer   User   @relation(fields: [dealerId], references: [id])
-  version  Int    @default(0) // 排他制御用
+  fileName String
 
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
-  katanaRequests KatanaRequest[]
+  status ImportStatus @default(PENDING)
+
+  totalRows Int @default(0)
+
+  successRows Int @default(0)
+
+  errorRows Int @default(0)
+
+  rows ImportRow[]
+
+  executedById String
+  executedBy   User   @relation("ImportExecutedUser", fields: [executedById], references: [id])
+
+  startedAt DateTime?
+
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
 }
 
-// 申請データ（追加・編集・削除のすべてをここで管理）
-model KatanaRequest {
-  id       String @id @default(uuid())
-  status   String @default("PENDING") // PENDING, APPROVED, REJECTED
-  crudType String // "CREATE", "UPDATE", "DELETE"
+/**
+ * |--------------------------------------------------------------------------
+ * | IMPORT ROW
+ * |--------------------------------------------------------------------------
+ */
 
-  // 申請内容（カラムとして定義）
-  shopName   String
-  name       String
-  katanaType String
-  era        String
-  price      Int
-  imageUrl   String?
+model ImportRow {
+  id String @id @default(uuid())
 
-  // リレーション定義
-  applicantId    String
-  applicant      User    @relation(fields: [applicantId], references: [id])
-  targetKatanaId String?
-  targetKatana   Katana? @relation(fields: [targetKatanaId], references: [id])
+  importJobId String
+  importJob   ImportJob @relation(fields: [importJobId], references: [id])
 
-  // 更新時の整合性チェック用（オプション）
-  // targetVersion Int?  // 更新申請時のKatana.versionを記録しておくとより厳密です
+  rowNumber Int
+
+  productCode String?
+
+  status ImportRowStatus @default(SKIPPED)
+
+  message String?
+
+  createdAt DateTime @default(now())
+}
+
+/**
+ * |--------------------------------------------------------------------------
+ * | MAKER
+ * |--------------------------------------------------------------------------
+ */
+
+model Maker {
+  id String @id @default(uuid())
+
+  name String @unique
+
+  displayOrder Int @default(0)
+
+  isActive Boolean @default(true)
+
+  products Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * |--------------------------------------------------------------------------
+ * | GRADE
+ * |--------------------------------------------------------------------------
+ */
+
+model Grade {
+  id String @id @default(uuid())
+
+  name String @unique
+
+  displayOrder Int @default(0)
+
+  isActive Boolean @default(true)
+
+  products Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * |--------------------------------------------------------------------------
+ * | RANK
+ * |--------------------------------------------------------------------------
+ */
+
+model Rank {
+  id String @id @default(uuid())
+
+  name String @unique
+
+  displayOrder Int @default(0)
+
+  isActive Boolean @default(true)
+
+  products Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * |--------------------------------------------------------------------------
+ * | PERIOD
+ * |--------------------------------------------------------------------------
+ */
+
+model Period {
+  id String @id @default(uuid())
+
+  name String @unique
+
+  displayOrder Int @default(0)
+
+  isActive Boolean @default(true)
+
+  products Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * |--------------------------------------------------------------------------
+ * | TRADITION
+ * |--------------------------------------------------------------------------
+ */
+
+model Tradition {
+  id String @id @default(uuid())
+
+  name String @unique
+
+  displayOrder Int @default(0)
+
+  isActive Boolean @default(true)
+
+  products Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * |--------------------------------------------------------------------------
+ * | CATEGORY
+ * |--------------------------------------------------------------------------
+ */
+
+model Category {
+  id String @id @default(uuid())
+
+  name String @unique
+
+  displayOrder Int @default(0)
+
+  isActive Boolean @default(true)
+
+  products Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * |--------------------------------------------------------------------------
+ * | APPRAISER
+ * |--------------------------------------------------------------------------
+ */
+
+model Appraiser {
+  id String @id @default(uuid())
+
+  name String @unique
+
+  displayOrder Int @default(0)
+
+  isActive Boolean @default(true)
+
+  products Product[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
