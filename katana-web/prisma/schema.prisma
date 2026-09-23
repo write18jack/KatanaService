@@ -98,6 +98,8 @@ model Shop {
 
   isActive Boolean @default(true)
 
+  nextProductSequence Int @default(1)
+
   users User[]
 
   products Product[]
@@ -133,7 +135,7 @@ model Product {
   updatedBy   User?   @relation("ProductUpdatedUser", fields: [updatedById], references: [id])
 
   deletedById String?
-  deletedBy User? @relation("ProductDeletedUser", fields: [deletedById], references: [id])
+  deletedBy   User?   @relation("ProductDeletedUser", fields: [deletedById], references: [id])
 
   // -------------------------
   // 商品情報
@@ -153,11 +155,14 @@ model Product {
   periodId String?
   period   Period? @relation(fields: [periodId], references: [id])
 
-  traditionId String?
-  tradition   Tradition? @relation(fields: [traditionId], references: [id])
+  provinceId String?
+  province   Province? @relation(fields: [provinceId], references: [id])
 
   categoryId String
   category   Category @relation(fields: [categoryId], references: [id])
+
+  swordEraId String
+  swordEra   SwordEra @relation(fields: [swordEraId], references: [id])
 
   appraiserId String?
   appraiser   Appraiser? @relation(fields: [appraiserId], references: [id])
@@ -276,6 +281,8 @@ model ImportRow {
 
   productCode String?
 
+  rawData Json?
+
   status ImportRowStatus @default(SKIPPED)
 
   message String?
@@ -369,11 +376,32 @@ model Period {
 
 /**
  * |--------------------------------------------------------------------------
- * | TRADITION
+ * | PROVINCE（製作場所：旧国名）
  * |--------------------------------------------------------------------------
  */
 
-model Tradition {
+model Province {
+  id String @id @default(uuid())
+
+  name String @unique
+
+  displayOrder Int @default(0)
+
+  isActive Boolean @default(true)
+
+  products Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * |--------------------------------------------------------------------------
+ * | SWORD ERA（区分：古刀・新刀・新々刀）
+ * |--------------------------------------------------------------------------
+ */
+
+model SwordEra {
   id String @id @default(uuid())
 
   name String @unique

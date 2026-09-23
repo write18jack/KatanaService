@@ -4,8 +4,9 @@ import { makers } from "./makers";
 import { grades } from "./grades";
 import { ranks } from "./ranks";
 import { periods } from "./periods";
-import { traditions } from "./traditions";
+import { provinces } from "./provinces";
 import { categories } from "./categories";
+import { swordEras } from "./swordEras";
 import { appraisers } from "./appraisers";
 
 export async function seedMaster(prisma: PrismaClient) {
@@ -29,13 +30,18 @@ export async function seedMaster(prisma: PrismaClient) {
     skipDuplicates: true,
   });
 
-  await prisma.tradition.createMany({
-    data: traditions,
+  await prisma.province.createMany({
+    data: provinces,
     skipDuplicates: true,
   });
 
   await prisma.category.createMany({
     data: categories,
+    skipDuplicates: true,
+  });
+
+  await prisma.swordEra.createMany({
+    data: swordEras,
     skipDuplicates: true,
   });
 
