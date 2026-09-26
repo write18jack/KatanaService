@@ -143,8 +143,8 @@ model Product {
   productCode String
   title       String
 
-  makerId String
-  maker   Maker  @relation(fields: [makerId], references: [id])
+  makerId String?
+  maker   Maker?  @relation(fields: [makerId], references: [id])
 
   gradeId String?
   grade   Grade?  @relation(fields: [gradeId], references: [id])
@@ -167,7 +167,7 @@ model Product {
   appraiserId String?
   appraiser   Appraiser? @relation(fields: [appraiserId], references: [id])
 
-  price Int
+  price Int?
 
   bladeLength Decimal? @db.Decimal(5, 2)
   curvature   Decimal? @db.Decimal(4, 2)
