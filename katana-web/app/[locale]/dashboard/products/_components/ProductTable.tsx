@@ -8,19 +8,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-import ProductRow from "./ProductRow";
+import ProductRow, { type ProductRowData } from "./ProductRow";
 import EmptyState from "./EmptyState";
 
-type Product = {
-  id: string;
-  managementNumber: string;
-  name: string;
-  price: number | null;
-  status: string;
-};
-
 type ProductTableProps = {
-  products: Product[];
+  products: ProductRowData[];
 };
 
 export default function ProductTable({ products }: ProductTableProps) {

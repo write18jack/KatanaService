@@ -16,10 +16,12 @@ export default async function ProductsPage() {
     orderBy: {
       createdAt: "desc",
     },
-    include: {
-      maker: true,
-      grade: true,
-      period: true,
+    select: {
+      id: true,
+      productCode: true,
+      title: true,
+      price: true,
+      status: true,
     },
   });
 

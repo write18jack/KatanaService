@@ -38,3 +38,9 @@ file_paths.txt
 doc-filelist.js
 doc-script.js
 doc-style.css
+
+# Local-only session notes (not shared via git)
+docs/sessions/
+
+# TypeScript incremental build cache
+*.tsbuildinfo

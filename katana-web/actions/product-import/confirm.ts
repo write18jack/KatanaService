@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { loadMasterCaches } from "@/lib/product-import/masterCache";
+import { shouldRecordPriceChange } from "@/lib/product-import/priceHistory";
 import { validateRow, type ValidatedRowData } from "@/lib/product-import/validateRow";
 
 type ConfirmImportResult = { success?: string; error?: string };
@@ -117,7 +118,7 @@ export async function confirmImport(importJobId: string): Promise<ConfirmImportR
 
             productId = existing.id;
 
-            if (data.price !== null && data.price !== existing.price) {
+            if (shouldRecordPriceChange(existing.price, data.price)) {
               await tx.priceHistory.create({
                 data: {
                   productId,
@@ -151,7 +152,7 @@ export async function confirmImport(importJobId: string): Promise<ConfirmImportR
 
             productId = created.id;
 
-            if (data.price !== null) {
+            if (shouldRecordPriceChange(null, data.price)) {
               await tx.priceHistory.create({
                 data: {
                   productId,
