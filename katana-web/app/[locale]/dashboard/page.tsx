@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { Package, Upload } from "lucide-react";
 import { getTranslations } from "next-intl/server";
 
@@ -12,6 +13,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { MarketFilterBar } from "./_components/MarketFilterBar";
 import { MarketMetricCard } from "./_components/MarketMetricCard";
+import { MarketPriceTrendSection, MarketPriceTrendSkeleton } from "./_components/MarketPriceTrendSection";
 
 type DashboardPageProps = {
   searchParams: Promise<RawSearchParams>;
@@ -76,6 +78,22 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
           <MarketMetricCard label="中央値" value={formatYen(medianPrice)} description={disclosedRatio} />
           <MarketMetricCard label="直近30日SOLD" value={formatCount(soldCount)} />
         </div>
+      </section>
+
+      <section className="space-y-4">
+        <div>
+          <h2 className="text-xl font-semibold">相場推移</h2>
+          <p className="text-muted-foreground mt-1 text-sm">過去12か月（月末時点）・上の市場条件を適用</p>
+        </div>
+
+        <Suspense fallback={<MarketPriceTrendSkeleton />}>
+          <MarketPriceTrendSection filters={filters} />
+        </Suspense>
+
+        <p className="text-muted-foreground text-xs">
+          ※参加店舗がKatanaServiceに登録した掲載価格の履歴に基づく参考指標です。実際の成約価格を示すものではありません。
+          店舗の参加状況と商品の分類は現在の登録内容で集計し、価格の変更時点はKatanaServiceへの登録・更新時刻です。
+        </p>
       </section>
 
       <section className="space-y-4">

@@ -1,7 +1,10 @@
 import { prisma } from "@/lib/prisma";
 import { getAveragePrice, getMarketInventoryCount, getMedianPrice } from "@/lib/market-analytics/currentMetrics";
+import { getPriceTrend } from "@/lib/market-analytics/priceTrend";
 import { getSoldCount } from "@/lib/market-analytics/soldMetrics";
 import type { MarketAverageResult, MarketFilters } from "@/lib/market-analytics/types";
+import { toPriceTrendChartData, type PriceTrendChartPoint } from "./priceTrendChart";
+import { getLastCompletedMonthEnds } from "./trendPeriod";
 
 export type DashboardMarketSummary = {
   inventoryCount: number;
@@ -26,6 +29,27 @@ export async function getDashboardMarketSummary(
   ]);
 
   return { inventoryCount, average, medianPrice, soldCount };
+}
+
+/**
+ * 相場推移チャート用に、直近12か月の確定済み月末Snapshot（JST基準）を取得する。
+ * 4 KPIと同じ検証済みMarketFiltersを受け取り、集計はPhase 2のgetPriceTrendへ委譲する
+ * （Snapshot SQLや平均・中央値の計算をDashboard側で再実装しない）。
+ */
+export async function getDashboardPriceTrend(
+  filters: MarketFilters,
+  now: Date = new Date(),
+): Promise<PriceTrendChartPoint[]> {
+  const monthEnds = getLastCompletedMonthEnds(now);
+  const points = await getPriceTrend(
+    filters,
+    monthEnds.map((monthEnd) => monthEnd.asOf),
+  );
+
+  return toPriceTrendChartData(
+    points,
+    monthEnds.map((monthEnd) => monthEnd.label),
+  );
 }
 
 /**
