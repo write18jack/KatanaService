@@ -14,6 +14,12 @@ import { Button } from "@/components/ui/button";
 import { MarketFilterBar } from "./_components/MarketFilterBar";
 import { MarketMetricCard } from "./_components/MarketMetricCard";
 import { MarketPriceTrendSection, MarketPriceTrendSkeleton } from "./_components/MarketPriceTrendSection";
+import {
+  RecentImportsError,
+  RecentImportsSection,
+  RecentImportsSkeleton,
+} from "./_components/RecentImportsSection";
+import { SectionErrorBoundary } from "./_components/SectionErrorBoundary";
 
 type DashboardPageProps = {
   searchParams: Promise<RawSearchParams>;
@@ -45,7 +51,7 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
   const disclosedRatio = `価格公開 ${average.disclosedPriceCount.toLocaleString("ja-JP")} / ${average.totalInventoryCount.toLocaleString("ja-JP")}件`;
 
   return (
-    <main className="space-y-8 p-8">
+    <main className="space-y-8 py-4 sm:p-8">
       <div>
         <h1 className="text-3xl font-bold">{t("title")}</h1>
         <p className="text-muted-foreground mt-1">市場動向と自店舗の商品状況</p>
@@ -118,6 +124,19 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
             </Link>
           </Button>
         </div>
+      </section>
+
+      <section className="space-y-4">
+        <div>
+          <h2 className="text-xl font-semibold">最近のファイル取り込み</h2>
+          <p className="text-muted-foreground mt-1 text-sm">自店の最新5件（他店には表示されません）</p>
+        </div>
+
+        <SectionErrorBoundary fallback={<RecentImportsError />}>
+          <Suspense fallback={<RecentImportsSkeleton />}>
+            <RecentImportsSection shopId={shopId} />
+          </Suspense>
+        </SectionErrorBoundary>
       </section>
     </main>
   );

@@ -22,3 +22,19 @@ export function formatYen(value: number | null): string {
 export function formatCount(value: number): string {
   return `${value.toLocaleString("ja-JP")}振`;
 }
+
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+
+/**
+ * 日時を日本時間（JST, UTC+9固定）の "YYYY/MM/DD HH:mm" へ整形する。
+ * サーバーのローカルタイムゾーンに依存しないよう、固定オフセットとUTC getterのみを使う。
+ * null/undefined/Invalid Dateはnullを返し、呼び出し側で「未記録」として扱う。
+ */
+export function formatJstDateTime(value: Date | null | undefined): string | null {
+  if (!value || Number.isNaN(value.getTime())) return null;
+
+  const jst = new Date(value.getTime() + JST_OFFSET_MS);
+  const pad = (n: number) => String(n).padStart(2, "0");
+
+  return `${jst.getUTCFullYear()}/${pad(jst.getUTCMonth() + 1)}/${pad(jst.getUTCDate())} ${pad(jst.getUTCHours())}:${pad(jst.getUTCMinutes())}`;
+}

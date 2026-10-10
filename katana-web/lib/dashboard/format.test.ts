@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { formatCount, formatYen, roundToYen } from "./format";
+import { afterEach, describe, expect, it } from "vitest";
+import { formatCount, formatYen, roundToYen, formatJstDateTime } from "./format";
 
 describe("roundToYen", () => {
   it("小数点以下第1位が4以下は切り下げる", () => {
@@ -40,5 +40,41 @@ describe("formatCount", () => {
 
   it("0件も正常な状態として表示する", () => {
     expect(formatCount(0)).toBe("0振");
+  });
+});
+
+describe("formatJstDateTime", () => {
+  it("UTCをJST（+9時間）へ変換して YYYY/MM/DD HH:mm で返す", () => {
+    expect(formatJstDateTime(new Date("2026-10-08T05:30:00Z"))).toBe("2026/10/08 14:30");
+  });
+
+  it("日付をまたぐケース（UTC 15:00以降はJSTで翌日）", () => {
+    expect(formatJstDateTime(new Date("2026-10-08T15:00:00Z"))).toBe("2026/10/09 00:00");
+    expect(formatJstDateTime(new Date("2026-10-08T14:59:59Z"))).toBe("2026/10/08 23:59");
+  });
+
+  it("年をまたぐケース", () => {
+    expect(formatJstDateTime(new Date("2025-12-31T18:05:00Z"))).toBe("2026/01/01 03:05");
+  });
+
+  it("null / undefined / Invalid Date はnullを返す（Invalid Dateを表示しない）", () => {
+    expect(formatJstDateTime(null)).toBeNull();
+    expect(formatJstDateTime(undefined)).toBeNull();
+    expect(formatJstDateTime(new Date("not a date"))).toBeNull();
+  });
+
+  describe("システムタイムゾーンに依存しない", () => {
+    const originalTz = process.env.TZ;
+    afterEach(() => {
+      process.env.TZ = originalTz;
+    });
+
+    it("TZがUTC / Asia/Tokyo / America/Los_Angeles でも同じ結果", () => {
+      const results = ["UTC", "Asia/Tokyo", "America/Los_Angeles"].map((tz) => {
+        process.env.TZ = tz;
+        return formatJstDateTime(new Date("2026-10-08T15:00:00Z"));
+      });
+      expect(results).toEqual(["2026/10/09 00:00", "2026/10/09 00:00", "2026/10/09 00:00"]);
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { getImportStatusDisplay } from "@/lib/dashboard/importStatus";
 import ImportPreviewTable from "../_components/ImportPreviewTable";
 import ImportConfirmButton from "../_components/ImportConfirmButton";
 
@@ -47,7 +48,7 @@ export default async function ImportJobPage({
         </div>
         <div className="rounded-lg border p-4">
           <p className="text-muted-foreground text-sm">状態</p>
-          <p className="text-2xl font-bold">{importJob.status}</p>
+          <p className="text-2xl font-bold">{getImportStatusDisplay(importJob.status).label}</p>
         </div>
       </div>
 
