@@ -44,3 +44,4 @@ docs/sessions/
 
 # TypeScript incremental build cache
 *.tsbuildinfo
+next-env.d.ts
