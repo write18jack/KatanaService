@@ -27,7 +27,7 @@ vi.mock("@/lib/prisma", () => ({
 
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { JOB_A, JOB_B, MISSING_ID, ROW_A, ROW_B, SESSION_A, SESSION_B, USER_A } from "@/lib/testing/tenantFixtures";
+import { JOB_A, JOB_B, MISSING_ID, ROW_A, ROW_B, SESSION_A, SESSION_B, SHOP_A, SHOP_B, USER_A } from "@/lib/testing/tenantFixtures";
 import ImportJobPage from "./page";
 
 type AuthMock = (...args: never[]) => Promise<unknown>;
@@ -69,33 +69,65 @@ function jobRecord(job: typeof JOB_A | typeof JOB_B) {
   } as never;
 }
 
+/**
+ * 実DBと同じく where の id と shopId の両方を評価する簡易DB。
+ * shopId条件に合わないジョブは（includeされる行ごと）null になる。
+ */
+function seedBothShopJobs() {
+  const jobs = [jobRecord(JOB_A), jobRecord(JOB_B)] as Array<{ id: string; shopId: string }>;
+  mockedFindUnique.mockImplementation((async (args: { where: { id?: string; shopId?: string } }) => {
+    const { id, shopId } = args.where;
+    return jobs.find((job) => job.id === id && (shopId === undefined || job.shopId === shopId)) ?? null;
+  }) as never);
+}
+
+const INCLUDE_ROWS = { rows: { orderBy: { rowNumber: "asc" } } };
+
 function render(jobId: string) {
   return ImportJobPage({ params: Promise.resolve({ jobId }) });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockedFindUnique.mockReset();
 });
 
 describe("ImportJob詳細ページ: 店舗間の認可", () => {
   it("ケースA: 店舗Aのユーザーは店舗Aのジョブを表示できる", async () => {
     mockedAuth.mockResolvedValue(SESSION_A);
-    mockedFindUnique.mockResolvedValue(jobRecord(JOB_A));
+    seedBothShopJobs();
 
     const html = renderToStaticMarkup(await render(JOB_A.id));
 
     expect(mockedFindUnique).toHaveBeenCalledWith({
-      where: { id: JOB_A.id },
-      include: { rows: { orderBy: { rowNumber: "asc" } } },
+      where: { id: JOB_A.id, shopId: SHOP_A.id },
+      include: INCLUDE_ROWS,
     });
     expect(html).toContain(JOB_A.fileName);
     expect(html).toContain(SECRETS[JOB_A.id].productCode);
     expect(html).toContain(SECRETS[JOB_A.id].message);
+    expect(html).not.toContain(JOB_B.fileName);
+  });
+
+  it("店舗Bのユーザーは店舗Bのジョブを表示できる", async () => {
+    mockedAuth.mockResolvedValue(SESSION_B);
+    seedBothShopJobs();
+
+    const html = renderToStaticMarkup(await render(JOB_B.id));
+
+    expect(mockedFindUnique).toHaveBeenCalledWith({
+      where: { id: JOB_B.id, shopId: SHOP_B.id },
+      include: INCLUDE_ROWS,
+    });
+    expect(html).toContain(JOB_B.fileName);
+    expect(html).toContain(SECRETS[JOB_B.id].productCode);
+    expect(html).toContain(SECRETS[JOB_B.id].message);
+    expect(html).not.toContain(JOB_A.fileName);
   });
 
   it("rawData（取り込み原本）は自店のジョブでも画面に描画しない", async () => {
     mockedAuth.mockResolvedValue(SESSION_A);
-    mockedFindUnique.mockResolvedValue(jobRecord(JOB_A));
+    seedBothShopJobs();
 
     const html = renderToStaticMarkup(await render(JOB_A.id));
 
@@ -107,24 +139,44 @@ describe("ImportJob詳細ページ: 店舗間の認可", () => {
     ["ケースC: 店舗B → 店舗AのジョブID", SESSION_B, JOB_A],
   ])("%s は notFound() になり、何も描画しない", async (_label, session, otherJob) => {
     mockedAuth.mockResolvedValue(session);
-    mockedFindUnique.mockResolvedValue(jobRecord(otherJob));
+    seedBothShopJobs();
 
     await expect(render(otherJob.id)).rejects.toBe(NOT_FOUND);
+    // F-06: 取得条件はセッションのshopIdで絞られ、他店舗のジョブとImportRowはDB取得の時点でnullになる
+    // （ファイル名・状態・件数・行・rawData・エラーメッセージのいずれも取得されない）
+    expect(mockedFindUnique).toHaveBeenCalledTimes(1);
+    expect(mockedFindUnique).toHaveBeenCalledWith({
+      where: { id: otherJob.id, shopId: session.user.shopId },
+      include: INCLUDE_ROWS,
+    });
+    expect(session.user.shopId).not.toBe(otherJob.shopId);
+    await expect(mockedFindUnique.mock.results[0].value).resolves.toBeNull();
+  });
+
+  it("多層防御: 取得結果に他店舗のジョブが混入しても notFound() になる", async () => {
+    // 取得条件が将来誤って緩められた場合を想定し、DB層がshopIdを無視して返すケースを再現する
+    mockedAuth.mockResolvedValue(SESSION_A);
+    mockedFindUnique.mockResolvedValue(jobRecord(JOB_B));
+
+    await expect(render(JOB_B.id)).rejects.toBe(NOT_FOUND);
   });
 
   it("ケースE: 存在しないジョブIDは notFound() になる", async () => {
     mockedAuth.mockResolvedValue(SESSION_A);
-    mockedFindUnique.mockResolvedValue(null);
+    seedBothShopJobs();
 
     await expect(render(MISSING_ID)).rejects.toBe(NOT_FOUND);
+    expect(mockedFindUnique).toHaveBeenCalledWith({
+      where: { id: MISSING_ID, shopId: SHOP_A.id },
+      include: INCLUDE_ROWS,
+    });
   });
 
   it("他店舗のジョブと存在しないジョブで同じ応答になる（存在を推測できない）", async () => {
     mockedAuth.mockResolvedValue(SESSION_A);
+    seedBothShopJobs();
 
-    mockedFindUnique.mockResolvedValueOnce(jobRecord(JOB_B));
     const otherShop = await render(JOB_B.id).catch((error: unknown) => error);
-    mockedFindUnique.mockResolvedValueOnce(null);
     const missing = await render(MISSING_ID).catch((error: unknown) => error);
 
     expect(otherShop).toBe(NOT_FOUND);
@@ -144,7 +196,7 @@ describe("ImportJob詳細ページ: 店舗間の認可", () => {
 
   it("このページはジョブや行を更新しない", async () => {
     mockedAuth.mockResolvedValue(SESSION_A);
-    mockedFindUnique.mockResolvedValue(jobRecord(JOB_A));
+    seedBothShopJobs();
 
     await render(JOB_A.id);
 

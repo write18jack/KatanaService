@@ -10,6 +10,9 @@ import { validateRow, type ValidatedRowData } from "@/lib/product-import/validat
 
 type ConfirmImportResult = { success?: string; error?: string };
 
+/** 条件付き更新でジョブの実行権（PENDING → PROCESSING）を取得できなかったことを示す */
+class ImportJobNotClaimableError extends Error {}
+
 // Product upsertで比較・記録する対象フィールド（インポートフォーマットが制御する範囲のみ）
 function toSnapshot(data: {
   title: string;
@@ -52,8 +55,9 @@ export async function confirmImport(importJobId: string): Promise<ConfirmImportR
     return { error: "認証が必要です。" };
   }
 
+  // 他店舗のジョブはDB取得の時点で除外する（存在しないジョブと同じ扱いになる）
   const importJob = await prisma.importJob.findUnique({
-    where: { id: importJobId },
+    where: { id: importJobId, shopId: session.user.shopId },
     include: { rows: true },
   });
 
@@ -65,17 +69,25 @@ export async function confirmImport(importJobId: string): Promise<ConfirmImportR
     return { error: "このジョブはすでに処理済みです。" };
   }
 
-  const shopId = importJob.shopId;
+  const shopId = session.user.shopId;
   const executedById = session.user.id;
   const masters = await loadMasterCaches();
+  // 実行権を取得したか。rollback後はDB上の実行権を失っているため、FAILED記録の可否判断にだけ使う
+  let claimed = false;
 
   try {
     await prisma.$transaction(
       async (tx) => {
-        await tx.importJob.update({
-          where: { id: importJobId },
+        // 同時確定対策: PENDINGのジョブだけを条件付きでPROCESSINGにし、1件取れたリクエストだけが反映する。
+        // 先行リクエストが確定済みなら条件に一致せず0件になる。
+        const claim = await tx.importJob.updateMany({
+          where: { id: importJobId, shopId, status: "PENDING" },
           data: { status: "PROCESSING" },
         });
+        if (claim.count !== 1) {
+          throw new ImportJobNotClaimableError();
+        }
+        claimed = true;
 
         for (const row of importJob.rows) {
           if (row.status !== "SUCCESS") continue;
@@ -174,19 +186,29 @@ export async function confirmImport(importJobId: string): Promise<ConfirmImportR
           }
         }
 
-        await tx.importJob.update({
-          where: { id: importJobId },
+        const completed = await tx.importJob.updateMany({
+          where: { id: importJobId, shopId, status: "PROCESSING" },
           data: { status: "COMPLETED", completedAt: new Date() },
         });
+        if (completed.count !== 1) {
+          throw new Error("ImportJob was not in PROCESSING state at completion");
+        }
       },
       { timeout: 30000 },
     );
   } catch (error) {
+    if (error instanceof ImportJobNotClaimableError) {
+      return { error: "このジョブはすでに処理済みです。" };
+    }
     console.error("Import confirm error:", error);
-    await prisma.importJob.update({
-      where: { id: importJobId },
-      data: { status: "FAILED", completedAt: new Date() },
-    });
+    if (claimed) {
+      // rollbackでPENDINGへ戻っている場合だけFAILEDにする。
+      // 他リクエストが確定済み（COMPLETED）・処理中（PROCESSING）のジョブは上書きしない。
+      await prisma.importJob.updateMany({
+        where: { id: importJobId, shopId, status: "PENDING" },
+        data: { status: "FAILED", completedAt: new Date() },
+      });
+    }
     return { error: "取込の確定処理に失敗しました。" };
   }
 

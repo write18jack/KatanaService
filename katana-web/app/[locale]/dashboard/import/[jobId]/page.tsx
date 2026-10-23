@@ -17,8 +17,9 @@ export default async function ImportJobPage({
     return <div>店舗情報がありません。</div>;
   }
 
+  // 他店舗のジョブ（と紐づく行）はDB取得の時点で除外する
   const importJob = await prisma.importJob.findUnique({
-    where: { id: jobId },
+    where: { id: jobId, shopId: session.user.shopId },
     include: { rows: { orderBy: { rowNumber: "asc" } } },
   });
 
