@@ -2,7 +2,7 @@
 
 import { Prisma } from "@prisma/client";
 import { revalidatePath } from "next/cache";
-import { auth } from "@/auth";
+import { getAuthContext } from "@/lib/auth/context";
 import { prisma } from "@/lib/prisma";
 import { loadMasterCaches } from "@/lib/product-import/masterCache";
 import { shouldRecordPriceChange } from "@/lib/product-import/priceHistory";
@@ -50,18 +50,20 @@ function toSnapshot(data: {
  * 1トランザクションで保証する。
  */
 export async function confirmImport(importJobId: string): Promise<ConfirmImportResult> {
-  const session = await auth();
-  if (!session?.user?.id || !session.user.shopId) {
+  // 認可はDBの最新状態で行う（JWTの shopId・role はログイン時点の値のため使わない）
+  const authResult = await getAuthContext();
+  if (!authResult.ok) {
     return { error: "認証が必要です。" };
   }
+  const { userId, shopId } = authResult.context;
 
   // 他店舗のジョブはDB取得の時点で除外する（存在しないジョブと同じ扱いになる）
   const importJob = await prisma.importJob.findUnique({
-    where: { id: importJobId, shopId: session.user.shopId },
+    where: { id: importJobId, shopId },
     include: { rows: true },
   });
 
-  if (!importJob || importJob.shopId !== session.user.shopId) {
+  if (!importJob || importJob.shopId !== shopId) {
     return { error: "取込ジョブが見つかりません。" };
   }
 
@@ -69,8 +71,7 @@ export async function confirmImport(importJobId: string): Promise<ConfirmImportR
     return { error: "このジョブはすでに処理済みです。" };
   }
 
-  const shopId = session.user.shopId;
-  const executedById = session.user.id;
+  const executedById = userId;
   const masters = await loadMasterCaches();
   // 実行権を取得したか。rollback後はDB上の実行権を失っているため、FAILED記録の可否判断にだけ使う
   let claimed = false;

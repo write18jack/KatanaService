@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { auth } from "@/auth";
+import { getAuthContext } from "@/lib/auth/context";
 import { prisma } from "@/lib/prisma";
 
 type MarkSoldResult = { success?: string; error?: string };
@@ -15,17 +15,19 @@ class ProductNotActiveError extends Error {}
  * 同一transactionで行い、自店舗の商品のみ操作可能とする。
  */
 export async function markProductAsSold(productId: string): Promise<MarkSoldResult> {
-  const session = await auth();
-  if (!session?.user?.id || !session.user.shopId) {
+  // 認可はDBの最新状態で行う（JWTの shopId・role はログイン時点の値のため使わない）
+  const authResult = await getAuthContext();
+  if (!authResult.ok) {
     return { error: "認証が必要です。" };
   }
+  const { userId, shopId } = authResult.context;
 
   // 他店舗の商品はDB取得の時点で除外する（存在しない商品と同じ扱いになる）
   const product = await prisma.product.findUnique({
-    where: { id: productId, shopId: session.user.shopId },
+    where: { id: productId, shopId },
   });
 
-  if (!product || product.shopId !== session.user.shopId) {
+  if (!product || product.shopId !== shopId) {
     return { error: "商品が見つかりません。" };
   }
 
@@ -33,7 +35,7 @@ export async function markProductAsSold(productId: string): Promise<MarkSoldResu
     return { error: "この商品はすでに販売済み、または対象外の状態です。" };
   }
 
-  const changedById = session.user.id;
+  const changedById = userId;
   const soldAt = new Date();
 
   try {
@@ -41,7 +43,7 @@ export async function markProductAsSold(productId: string): Promise<MarkSoldResu
       // 同時リクエスト対策: ACTIVEの行だけを条件付きで更新する。
       // 先行リクエストがSOLDにした後は条件に一致せず0件となり、soldAtも上書きされない。
       const { count } = await tx.product.updateMany({
-        where: { id: productId, shopId: session.user.shopId, status: "ACTIVE" },
+        where: { id: productId, shopId, status: "ACTIVE" },
         data: {
           status: "SOLD",
           soldAt,

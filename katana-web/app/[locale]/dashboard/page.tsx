@@ -2,7 +2,6 @@ import { Suspense } from "react";
 import { Package, Upload } from "lucide-react";
 import { getTranslations } from "next-intl/server";
 
-import { auth } from "@/auth";
 import { Link } from "@/i18n/navigation";
 import { getDashboardMarketSummary, getOwnShopProductCounts } from "@/lib/dashboard/dashboardData";
 import { formatCount, formatYen } from "@/lib/dashboard/format";
@@ -20,6 +19,7 @@ import {
   RecentImportsSkeleton,
 } from "./_components/RecentImportsSection";
 import { SectionErrorBoundary } from "./_components/SectionErrorBoundary";
+import { requireDashboardContext } from "./_lib/requireDashboardContext";
 
 type DashboardPageProps = {
   searchParams: Promise<RawSearchParams>;
@@ -27,13 +27,8 @@ type DashboardPageProps = {
 
 export default async function DashboardPage({ searchParams }: DashboardPageProps) {
   const t = await getTranslations("Dashboard");
-  const session = await auth();
-
-  if (!session?.user.shopId) {
-    return <div>店舗情報がありません。</div>;
-  }
-
-  const shopId = session.user.shopId;
+  // 業務データ（市場分析・自店データ）の取得前に、DBの最新状態で認可する
+  const { shopId } = await requireDashboardContext();
 
   const [masters, rawSearchParams, ownCounts] = await Promise.all([
     getMarketFilterMasters(),

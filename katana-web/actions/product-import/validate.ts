@@ -1,6 +1,6 @@
 "use server";
 
-import { auth } from "@/auth";
+import { getAuthContext } from "@/lib/auth/context";
 import { prisma } from "@/lib/prisma";
 import { parseImportFile } from "@/lib/product-import/parseFile";
 import { loadMasterCaches, normalizeMasterValue } from "@/lib/product-import/masterCache";
@@ -19,10 +19,12 @@ type ValidateImportResult = { importJobId?: string; error?: string };
  * この時点ではProduct/PriceHistory/ProductHistoryには一切書き込まない。
  */
 export async function validateImport(formData: FormData): Promise<ValidateImportResult> {
-  const session = await auth();
-  if (!session?.user?.id || !session.user.shopId) {
+  // 認可はDBの最新状態で行う（JWTの shopId・role はログイン時点の値のため使わない）
+  const authResult = await getAuthContext();
+  if (!authResult.ok) {
     return { error: "認証が必要です。" };
   }
+  const { userId, shopId } = authResult.context;
 
   const file = formData.get("file");
   if (!(file instanceof File) || file.size === 0) {
@@ -117,13 +119,13 @@ export async function validateImport(formData: FormData): Promise<ValidateImport
 
   const importJob = await prisma.importJob.create({
     data: {
-      shopId: session.user.shopId,
+      shopId,
       fileName: file.name,
       status: "PENDING",
       totalRows,
       successRows,
       errorRows,
-      executedById: session.user.id,
+      executedById: userId,
       startedAt: new Date(),
       rows: {
         create: rowResults.map((r) => ({

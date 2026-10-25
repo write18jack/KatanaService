@@ -8,6 +8,12 @@ vi.mock("@/auth", () => ({
   auth: vi.fn(),
 }));
 
+// 認可はDB由来のコンテキストで行う。Actionのテストでは結果をモックし、DB照合そのものは lib/auth/context.test.ts で検証する
+vi.mock("@/lib/auth/context", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/auth/context")>();
+  return { ...actual, getAuthContext: vi.fn() };
+});
+
 // トランザクション内（tx）とトランザクション外（prisma）の書き込みを分けて観測する
 const tx = vi.hoisted(() => ({
   importJob: { update: vi.fn(), updateMany: vi.fn() },
@@ -19,6 +25,7 @@ const tx = vi.hoisted(() => ({
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
+    user: { findUnique: vi.fn() },
     importJob: { findUnique: vi.fn(), findFirst: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
     importRow: { findMany: vi.fn(), update: vi.fn() },
     product: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
@@ -34,7 +41,9 @@ vi.mock("@/lib/product-import/masterCache", async (importOriginal) => {
 });
 
 import { Prisma } from "@prisma/client";
+import type { UserRole } from "@prisma/client";
 import { auth } from "@/auth";
+import { getAuthContext } from "@/lib/auth/context";
 import { prisma } from "@/lib/prisma";
 import { loadMasterCaches } from "@/lib/product-import/masterCache";
 import {
@@ -55,6 +64,38 @@ import { confirmImport } from "./confirm";
 
 type AuthMock = (...args: never[]) => Promise<unknown>;
 const mockedAuth = auth as unknown as ReturnType<typeof vi.fn<AuthMock>>;
+const mockedAuthContext = vi.mocked(getAuthContext);
+const mockedUserFindUnique = vi.mocked(prisma.user.findUnique);
+const actualAuthContext = await vi.importActual<typeof import("@/lib/auth/context")>("@/lib/auth/context");
+
+type SessionLike = { user: { id: string; shopId: string; role: string } };
+
+/** DB照合に成功した認可コンテキスト（DB上の値がセッションと一致している場合） */
+function contextOf(session: SessionLike) {
+  return {
+    ok: true as const,
+    context: { userId: session.user.id, shopId: session.user.shopId, role: session.user.role as UserRole },
+  };
+}
+
+function signInAs(session: SessionLike) {
+  mockedAuthContext.mockResolvedValue(contextOf(session));
+}
+
+function signInOnceAs(session: SessionLike) {
+  mockedAuthContext.mockResolvedValueOnce(contextOf(session));
+}
+
+function denyAuth(reason: "UNAUTHENTICATED" | "USER_NOT_FOUND" | "SHOP_INACTIVE") {
+  mockedAuthContext.mockResolvedValue({ ok: false, reason });
+}
+
+/** 実際の認可ヘルパーを通す（auth() が返すJWTと、DB上のUserだけをモックする） */
+function useRealAuthContext(jwt: unknown, dbUser: unknown) {
+  mockedAuthContext.mockImplementation(actualAuthContext.getAuthContext);
+  mockedAuth.mockResolvedValue(jwt);
+  mockedUserFindUnique.mockResolvedValue(dbUser as never);
+}
 const mockedJobFindUnique = vi.mocked(prisma.importJob.findUnique);
 const outerJobUpdateMany = vi.mocked(prisma.importJob.updateMany);
 const mockedTransaction = vi.mocked(prisma.$transaction);
@@ -291,7 +332,7 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 /** n件の確定要求を、全員がPENDINGを読み取った後に同時に進める */
 async function confirmConcurrently(sessions: unknown[], jobId = JOB_A.id) {
-  for (const session of sessions) mockedAuth.mockResolvedValueOnce(session);
+  for (const session of sessions) signInOnceAs(session as SessionLike);
   holdReads = true;
   const requests = sessions.map(() => confirmImport(jobId));
   await flush();
@@ -340,6 +381,9 @@ let consoleError: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockedAuth.mockReset();
+  mockedAuthContext.mockReset();
+  mockedUserFindUnique.mockReset();
   for (const mock of [mockedJobFindUnique, outerJobUpdateMany, mockedTransaction, ...Object.values(tx).flatMap((m) => Object.values(m))]) {
     vi.mocked(mock).mockReset();
   }
@@ -363,7 +407,7 @@ afterEach(() => {
 
 describe("confirmImport: 店舗間の認可", () => {
   it("ケースA: 店舗Aのユーザーは店舗AのPENDINGジョブを確定でき、書き込みはすべて店舗Aに限られる", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShopJobs();
 
     const result = await confirmImport(JOB_A.id);
@@ -401,7 +445,7 @@ describe("confirmImport: 店舗間の認可", () => {
     ["ケースB: 店舗A → 店舗BのジョブID", SESSION_A, JOB_B],
     ["ケースC: 店舗B → 店舗AのジョブID", SESSION_B, JOB_A],
   ])("%s は拒否され、ジョブ・商品・履歴・行のいずれも更新されない", async (_label, session, otherJob) => {
-    mockedAuth.mockResolvedValue(session);
+    signInAs(session);
     seedBothShopJobs();
 
     const result = await confirmImport(otherJob.id);
@@ -424,7 +468,7 @@ describe("confirmImport: 店舗間の認可", () => {
   });
 
   it("ケースD: 未ログインではジョブを検索せず拒否され、副作用がない", async () => {
-    mockedAuth.mockResolvedValue(null);
+    denyAuth("UNAUTHENTICATED");
     seedBothShopJobs();
 
     const result = await confirmImport(JOB_A.id);
@@ -434,8 +478,8 @@ describe("confirmImport: 店舗間の認可", () => {
     expectNoWrites();
   });
 
-  it("ケースD': shopIdを持たないセッションも拒否され、副作用がない", async () => {
-    mockedAuth.mockResolvedValue({ user: { id: USER_A.id }, expires: SESSION_A.expires } as never);
+  it.each(["USER_NOT_FOUND", "SHOP_INACTIVE"] as const)("ケースD': DB照合が %s なら拒否され、副作用がない", async (reason) => {
+    denyAuth(reason);
     seedBothShopJobs();
 
     const result = await confirmImport(JOB_A.id);
@@ -446,7 +490,7 @@ describe("confirmImport: 店舗間の認可", () => {
   });
 
   it("ケースE: 存在しないジョブIDは拒否され、副作用がない", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShopJobs();
 
     const result = await confirmImport(MISSING_ID);
@@ -457,7 +501,7 @@ describe("confirmImport: 店舗間の認可", () => {
   });
 
   it("他店舗のジョブと存在しないジョブで応答が同一（存在を推測できない）", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShopJobs();
 
     const otherShop = await confirmImport(JOB_B.id);
@@ -469,7 +513,7 @@ describe("confirmImport: 店舗間の認可", () => {
 
   it("多層防御: 取得結果に他店舗のジョブが混入しても、shopId照合で拒否され副作用がない", async () => {
     // 取得条件が将来誤って緩められた場合を想定し、DB層がshopIdを無視して返すケースを再現する
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShopJobs();
     mockedJobFindUnique.mockResolvedValue(structuredClone(job(JOB_B.id)) as never);
 
@@ -481,7 +525,7 @@ describe("confirmImport: 店舗間の認可", () => {
   });
 
   it.each(["COMPLETED", "PROCESSING", "FAILED"])("ケースF: 自店の%sジョブは再確定できず、副作用がない", async (status) => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShopJobs(status);
 
     const result = await confirmImport(JOB_A.id);
@@ -494,7 +538,7 @@ describe("confirmImport: 店舗間の認可", () => {
 
 describe("confirmImport: 同じproduct_codeが両店舗にある場合の分離", () => {
   it("店舗BにだけTEST-001があるとき、店舗Aの確定は店舗Aに新規作成し、店舗Bの商品を更新しない", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShopJobs();
     seedProducts([existingProduct(PRODUCT_B, 900000)]);
 
@@ -512,7 +556,7 @@ describe("confirmImport: 同じproduct_codeが両店舗にある場合の分離"
   });
 
   it("両店舗にTEST-001があるとき、店舗Aの確定は店舗Aの商品だけを更新し、履歴も店舗Aの商品に作る", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShopJobs();
     seedProducts([existingProduct(PRODUCT_A, 1200000), existingProduct(PRODUCT_B, 900000)]);
 
@@ -530,7 +574,7 @@ describe("confirmImport: 同じproduct_codeが両店舗にある場合の分離"
   });
 
   it("店舗Bの確定でも同じ規則: 店舗Bの商品だけを更新し、店舗Aの商品に触れない", async () => {
-    mockedAuth.mockResolvedValue(SESSION_B);
+    signInAs(SESSION_B);
     seedBothShopJobs();
     seedProducts([existingProduct(PRODUCT_A, 1200000), existingProduct(PRODUCT_B, 900000)]);
 
@@ -548,7 +592,7 @@ describe("confirmImport: 同じproduct_codeが両店舗にある場合の分離"
 
 describe("confirmImport: 既存の確定処理の回帰", () => {
   it("CSV部分成功: ERROR行は反映せず、確定時の再検証で不正になった行はERRORへ更新し、正常行だけ反映する", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A, {
       rows: [
         { ...successRow(JOB_A, { ...RAW_ROW, product_code: "ERR-001" }, "row-error", 2), status: "ERROR", message: "検証エラー" },
@@ -573,7 +617,7 @@ describe("confirmImport: 既存の確定処理の回帰", () => {
   });
 
   it("新規商品: ACTIVEで作成し、価格ありならPriceHistory(old=null)とProductHistory(IMPORT, old=null)を作る", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A);
 
     await confirmImport(JOB_A.id);
@@ -594,7 +638,7 @@ describe("confirmImport: 既存の確定処理の回帰", () => {
   });
 
   it("既存商品: 項目と価格を更新し、変更前後をProductHistoryに記録する", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A);
     seedProducts([existingProduct(PRODUCT_A, 1200000)]);
 
@@ -612,7 +656,7 @@ describe("confirmImport: 既存の確定処理の回帰", () => {
   });
 
   it("SOLD商品: statusはSOLDのまま、既存仕様どおり項目・価格を更新しPriceHistoryも作る", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A);
     seedProducts([{ ...existingProduct(PRODUCT_A, 1200000), status: "SOLD" }]);
 
@@ -628,7 +672,7 @@ describe("confirmImport: 既存の確定処理の回帰", () => {
     ["既存商品で価格が変わる", 1200000, "1500000", 1],
     ["既存商品で価格がnullになる", 1200000, "", 1],
   ])("PriceHistoryの価格変更判定: %s → %i件", async (_label, oldPrice, newPriceRaw, expected) => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A, { rows: [successRow(JOB_A, { ...RAW_ROW, price: newPriceRaw })] });
     seedProducts([existingProduct(PRODUCT_A, oldPrice)]);
 
@@ -640,7 +684,7 @@ describe("confirmImport: 既存の確定処理の回帰", () => {
   });
 
   it("PriceHistoryの価格変更判定: 価格なしの新規商品は価格履歴を作らない", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A, { rows: [successRow(JOB_A, { ...RAW_ROW, price: "" })] });
 
     await confirmImport(JOB_A.id);
@@ -651,7 +695,7 @@ describe("confirmImport: 既存の確定処理の回帰", () => {
   });
 
   it("トランザクションのtimeout設定（30000ms）を維持する", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A);
 
     await confirmImport(JOB_A.id);
@@ -662,7 +706,7 @@ describe("confirmImport: 既存の確定処理の回帰", () => {
 
 describe("confirmImport: 実行権の取得（F-04）", () => {
   it("実行権の取得条件に id・セッションのshopId・status: PENDING がすべて含まれ、最初の書き込みである", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A);
 
     await confirmImport(JOB_A.id);
@@ -680,7 +724,7 @@ describe("confirmImport: 実行権の取得（F-04）", () => {
   });
 
   it("事前確認後に別リクエストが確定済み（実行権取得0件）なら、CSVを反映せず「すでに処理済み」を返し、FAILEDにしない", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A);
     const completedAt = new Date("2026-10-01T00:00:00Z");
     // 事前確認（findUnique）ではPENDINGを返すが、実行権取得の時点では別リクエストがCOMPLETEDにしている状態
@@ -698,7 +742,7 @@ describe("confirmImport: 実行権の取得（F-04）", () => {
   });
 
   it("実行権の取得件数が想定外（2件以上）なら、CSVを反映せず拒否し、更新はrollbackされる", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A);
     tx.importJob.updateMany.mockImplementationOnce(async (args: { where: Record<string, unknown>; data: Partial<JobState> }) => {
       applyJobUpdateMany(current(), args);
@@ -715,7 +759,7 @@ describe("confirmImport: 実行権の取得（F-04）", () => {
 
 describe("confirmImport: 失敗時の状態遷移（F-04）", () => {
   it("実行権取得後に途中で失敗すると、商品・履歴・行の反映がすべてrollbackされ、ジョブはFAILEDになる", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A, {
       rows: [
         successRow(JOB_A, { ...RAW_ROW, product_code: "STALE-001", category: "削除済み種類" }, "row-stale", 2),
@@ -753,7 +797,7 @@ describe("confirmImport: 失敗時の状態遷移（F-04）", () => {
     ["PriceHistory作成", () => tx.priceHistory.create.mockRejectedValueOnce(new Error("price history failed"))],
     ["Product作成", () => tx.product.create.mockRejectedValueOnce(new Error("create failed"))],
   ])("実行権取得後の%sの失敗でもrollbackされ、ジョブはFAILEDになる", async (_label, inject) => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A);
     inject();
 
@@ -767,7 +811,7 @@ describe("confirmImport: 失敗時の状態遷移（F-04）", () => {
   });
 
   it("COMPLETEDへの更新が0件（ジョブがPROCESSINGでなくなった）なら、トランザクション全体をrollbackしてFAILEDにする", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A);
     // 反映中にジョブの状態が想定外に変わった状況を、トランザクション内の状態で再現する
     tx.productHistory.create.mockImplementationOnce(async (args: { data: ProductHistoryState }) => {
@@ -787,7 +831,7 @@ describe("confirmImport: 失敗時の状態遷移（F-04）", () => {
   });
 
   it("実行権取得前の失敗（ロック待ちのtimeoutなど）ではFAILEDにせず、一般エラーを返す", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A);
     tx.importJob.updateMany.mockRejectedValueOnce(new Error("Transaction already closed: timeout"));
 
@@ -800,7 +844,7 @@ describe("confirmImport: 失敗時の状態遷移（F-04）", () => {
 
   it("COMPLETED済みのジョブを、実行権を取得できなかった後続リクエストの失敗でFAILEDに上書きしない", async () => {
     seedJob(JOB_A);
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     await confirmImport(JOB_A.id);
     const completedAt = job(JOB_A.id).completedAt;
     expect(job(JOB_A.id).status).toBe("COMPLETED");
@@ -809,7 +853,7 @@ describe("confirmImport: 失敗時の状態遷移（F-04）", () => {
     // 後続リクエスト: 事前確認ではPENDINGを読んでいたが、ロック待ちの間にtimeoutした
     mockedJobFindUnique.mockResolvedValueOnce({ ...structuredClone(job(JOB_A.id)), status: "PENDING" } as never);
     tx.importJob.updateMany.mockRejectedValueOnce(new Error("Transaction already closed: timeout"));
-    mockedAuth.mockResolvedValue(SESSION_A2);
+    signInAs(SESSION_A2);
     const result = await confirmImport(JOB_A.id);
 
     expect(result).toEqual(CONFIRM_FAILED);
@@ -819,7 +863,7 @@ describe("confirmImport: 失敗時の状態遷移（F-04）", () => {
   });
 
   it("FAILEDへの更新自体が失敗した場合は、既存どおり例外をそのまま投げ、再試行しない（ジョブはPENDINGのまま）", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedJob(JOB_A);
     tx.productHistory.create.mockRejectedValueOnce(new Error("history failed"));
     outerJobUpdateMany.mockRejectedValueOnce(new Error("failed to record FAILED"));
@@ -901,7 +945,8 @@ describe("confirmImport: 同時確定（F-04、モック上の再現）", () => 
 
   it("ケース1: Aの失敗後、AのFAILED記録が先に完了すると、待機していたBは実行権を取得できない", async () => {
     seedJob(JOB_A);
-    mockedAuth.mockResolvedValueOnce(SESSION_A).mockResolvedValueOnce(SESSION_A2);
+    signInOnceAs(SESSION_A);
+    signInOnceAs(SESSION_A2);
     holdReads = true;
     const requestA = confirmImport(JOB_A.id);
     const requestB = confirmImport(JOB_A.id);
@@ -926,7 +971,8 @@ describe("confirmImport: 同時確定（F-04、モック上の再現）", () => 
 
   it("ケース2: Aの失敗後、Bの確定が先にCOMPLETEDになると、AのFAILED記録は0件でCOMPLETEDが維持される", async () => {
     seedJob(JOB_A);
-    mockedAuth.mockResolvedValueOnce(SESSION_A).mockResolvedValueOnce(SESSION_A2);
+    signInOnceAs(SESSION_A);
+    signInOnceAs(SESSION_A2);
     let failA!: () => void;
     tx.productHistory.create.mockImplementationOnce(async () => {
       await new Promise<void>((resolve) => (failA = resolve));
@@ -962,7 +1008,8 @@ describe("confirmImport: 同時確定（F-04、モック上の再現）", () => 
 
   it("他店舗のユーザーが同時に確定しても、自店の1件だけが成功し他店舗の要求は何も書き込まない", async () => {
     seedBothShopJobs();
-    mockedAuth.mockResolvedValueOnce(SESSION_A).mockResolvedValueOnce(SESSION_B);
+    signInOnceAs(SESSION_A);
+    signInOnceAs(SESSION_B);
     holdReads = true;
     const requests = Promise.all([confirmImport(JOB_A.id), confirmImport(JOB_A.id)]);
     await flush();
@@ -974,5 +1021,98 @@ describe("confirmImport: 同時確定（F-04、モック上の再現）", () => 
     expect(mockedTransaction).toHaveBeenCalledTimes(1);
     expect(db.state.productHistories).toHaveLength(1);
     expect(job(JOB_B.id).status).toBe("PENDING");
+  });
+});
+
+describe("confirmImport: DB由来の認可コンテキスト（F-01-C）", () => {
+  it("DB上の所属が店舗Bなら、店舗Bのジョブを店舗Bのスコープで確定し、店舗Aのジョブは見つからない", async () => {
+    seedBothShopJobs();
+    mockedAuthContext.mockResolvedValue({ ok: true, context: { userId: USER_A.id, shopId: SHOP_B.id, role: "STORE" } });
+
+    const former = await confirmImport(JOB_A.id);
+    const own = await confirmImport(JOB_B.id);
+
+    expect(former).toEqual(NOT_FOUND);
+    expect(mockedJobFindUnique).toHaveBeenCalledWith({ where: { id: JOB_A.id, shopId: SHOP_B.id }, include: { rows: true } });
+    expect(own).toEqual({ success: "取込を確定しました。" });
+    // F-04の条件付き更新は維持したまま、shopIdだけがDB由来になる
+    expect(tx.importJob.updateMany.mock.calls.map(([args]) => args.where)).toEqual([
+      { id: JOB_B.id, shopId: SHOP_B.id, status: "PENDING" },
+      { id: JOB_B.id, shopId: SHOP_B.id, status: "PROCESSING" },
+    ]);
+    expect(tx.product.findUnique).toHaveBeenCalledWith({
+      where: { shopId_productCode: { shopId: SHOP_B.id, productCode: "TEST-001" } },
+    });
+    expect(tx.product.create.mock.calls[0][0].data).toMatchObject({ shopId: SHOP_B.id, createdById: USER_A.id });
+    expect(tx.productHistory.create.mock.calls[0][0].data.changedById).toBe(USER_A.id);
+    expect(job(JOB_A.id).status).toBe("PENDING");
+    expect(job(JOB_B.id).status).toBe("COMPLETED");
+  });
+
+  it("claim後の失敗時のFAILED記録も、DB由来のshopIdを条件にする", async () => {
+    seedBothShopJobs();
+    mockedAuthContext.mockResolvedValue({ ok: true, context: { userId: USER_A.id, shopId: SHOP_B.id, role: "STORE" } });
+    tx.productHistory.create.mockRejectedValueOnce(new Error("history failed"));
+
+    const result = await confirmImport(JOB_B.id);
+
+    expect(result).toEqual(CONFIRM_FAILED);
+    expect(outerJobUpdateMany).toHaveBeenCalledWith({
+      where: { id: JOB_B.id, shopId: SHOP_B.id, status: "PENDING" },
+      data: { status: "FAILED", completedAt: expect.any(Date) },
+    });
+    expect(job(JOB_B.id).status).toBe("FAILED");
+  });
+
+  it("実際の認可ヘルパー経由: JWTは店舗A・ADMIN、DBは店舗B・STOREなら店舗Bのジョブだけ確定できる", async () => {
+    seedBothShopJobs();
+    useRealAuthContext(SESSION_A, { id: USER_A.id, shopId: SHOP_B.id, role: "STORE", shop: { isActive: true } });
+
+    const former = await confirmImport(JOB_A.id);
+    const own = await confirmImport(JOB_B.id);
+
+    expect(former).toEqual(NOT_FOUND);
+    expect(own.success).toBeDefined();
+    expect(mockedUserFindUnique.mock.calls[0][0]).toMatchObject({ where: { id: USER_A.id } });
+    expect(job(JOB_A.id).status).toBe("PENDING");
+    expect(job(JOB_B.id).status).toBe("COMPLETED");
+    expect(JSON.stringify(tx.importJob.updateMany.mock.calls)).not.toContain(SHOP_A.id);
+  });
+
+  it.each([
+    ["店舗が無効", { id: USER_A.id, shopId: SHOP_A.id, role: "ADMIN", shop: { isActive: false } }],
+    ["ユーザーが削除済み", null],
+  ])("実際の認可ヘルパー経由: DB上で%sなら、JWTが有効でも拒否し、ジョブを検索せず書き込まない", async (_label, dbUser) => {
+    seedBothShopJobs();
+    useRealAuthContext(SESSION_A, dbUser);
+
+    const result = await confirmImport(JOB_A.id);
+
+    expect(result).toEqual({ error: "認証が必要です。" });
+    expect(mockedJobFindUnique).not.toHaveBeenCalled();
+    expect(loadMasterCaches).not.toHaveBeenCalled();
+    expectNoWrites();
+    expect(job(JOB_A.id).status).toBe("PENDING");
+  });
+
+  it("getAuthContext() が例外（DB障害など）なら伝播し、古いJWTで処理を続けない", async () => {
+    seedBothShopJobs();
+    mockedAuth.mockResolvedValue(SESSION_A);
+    mockedAuthContext.mockRejectedValue(new Error("db down"));
+
+    await expect(confirmImport(JOB_A.id)).rejects.toThrow("db down");
+    expect(mockedJobFindUnique).not.toHaveBeenCalled();
+    expectNoWrites();
+    expect(job(JOB_A.id).status).toBe("PENDING");
+  });
+
+  it("入口で getAuthContext() を1回だけ呼び、auth() を直接呼ばない", async () => {
+    seedBothShopJobs();
+    signInAs(SESSION_A);
+
+    await confirmImport(JOB_A.id);
+
+    expect(mockedAuthContext).toHaveBeenCalledTimes(1);
+    expect(mockedAuth).not.toHaveBeenCalled();
   });
 });

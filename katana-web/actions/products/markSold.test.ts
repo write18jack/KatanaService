@@ -8,8 +8,15 @@ vi.mock("@/auth", () => ({
   auth: vi.fn(),
 }));
 
+// 認可はDB由来のコンテキストで行う。Actionのテストでは結果をモックし、DB照合そのものは lib/auth/context.test.ts で検証する
+vi.mock("@/lib/auth/context", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/auth/context")>();
+  return { ...actual, getAuthContext: vi.fn() };
+});
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
+    user: { findUnique: vi.fn() },
     product: {
       findUnique: vi.fn(),
       update: vi.fn(),
@@ -25,7 +32,9 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
+import type { UserRole } from "@prisma/client";
 import { auth } from "@/auth";
+import { getAuthContext } from "@/lib/auth/context";
 import { prisma } from "@/lib/prisma";
 import { MISSING_ID, PRODUCT_A, PRODUCT_B, SESSION_A, SESSION_B, SHOP_A, SHOP_B, USER_A, USER_B } from "@/lib/testing/tenantFixtures";
 import { markProductAsSold } from "./markSold";
@@ -33,6 +42,38 @@ import { markProductAsSold } from "./markSold";
 type AuthMock = (...args: never[]) => Promise<unknown>;
 
 const mockedAuth = auth as unknown as ReturnType<typeof vi.fn<AuthMock>>;
+const mockedAuthContext = vi.mocked(getAuthContext);
+const mockedUserFindUnique = vi.mocked(prisma.user.findUnique);
+const actualAuthContext = await vi.importActual<typeof import("@/lib/auth/context")>("@/lib/auth/context");
+
+type SessionLike = { user: { id: string; shopId: string; role: string } };
+
+/** DB照合に成功した認可コンテキスト（DB上の値がセッションと一致している場合） */
+function contextOf(session: SessionLike) {
+  return {
+    ok: true as const,
+    context: { userId: session.user.id, shopId: session.user.shopId, role: session.user.role as UserRole },
+  };
+}
+
+function signInAs(session: SessionLike) {
+  mockedAuthContext.mockResolvedValue(contextOf(session));
+}
+
+function signInOnceAs(session: SessionLike) {
+  mockedAuthContext.mockResolvedValueOnce(contextOf(session));
+}
+
+function denyAuth(reason: "UNAUTHENTICATED" | "USER_NOT_FOUND" | "SHOP_INACTIVE") {
+  mockedAuthContext.mockResolvedValue({ ok: false, reason });
+}
+
+/** 実際の認可ヘルパーを通す（auth() が返すJWTと、DB上のUserだけをモックする） */
+function useRealAuthContext(jwt: unknown, dbUser: unknown) {
+  mockedAuthContext.mockImplementation(actualAuthContext.getAuthContext);
+  mockedAuth.mockResolvedValue(jwt);
+  mockedUserFindUnique.mockResolvedValue(dbUser as never);
+}
 const mockedFindUnique = vi.mocked(prisma.product.findUnique);
 const mockedTransaction = vi.mocked(prisma.$transaction);
 
@@ -175,6 +216,9 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockedAuth.mockReset();
+  mockedAuthContext.mockReset();
+  mockedUserFindUnique.mockReset();
   mockedFindUnique.mockReset();
   installDb();
 });
@@ -185,7 +229,7 @@ afterEach(() => {
 
 describe("markProductAsSold", () => {
   it("未認証の場合はエラーを返す", async () => {
-    mockedAuth.mockResolvedValue(null);
+    denyAuth("UNAUTHENTICATED");
 
     const result = await markProductAsSold("product-1");
 
@@ -194,7 +238,7 @@ describe("markProductAsSold", () => {
   });
 
   it("他店舗の商品は操作できない", async () => {
-    mockedAuth.mockResolvedValue(SESSION);
+    signInAs(SESSION);
     seedProducts([{ id: "product-1", shopId: "other-shop", status: "ACTIVE" }]);
 
     const result = await markProductAsSold("product-1");
@@ -204,7 +248,7 @@ describe("markProductAsSold", () => {
   });
 
   it("すでにSOLDの商品は再度SOLDにできない", async () => {
-    mockedAuth.mockResolvedValue(SESSION);
+    signInAs(SESSION);
     seedProducts([{ id: "product-1", shopId: "shop-1", status: "SOLD" }]);
 
     const result = await markProductAsSold("product-1");
@@ -214,7 +258,7 @@ describe("markProductAsSold", () => {
   });
 
   it("自店舗のACTIVE商品はSOLDへ遷移できる", async () => {
-    mockedAuth.mockResolvedValue(SESSION);
+    signInAs(SESSION);
     seedProducts([{ id: "product-1", shopId: "shop-1", status: "ACTIVE" }]);
 
     const result = await markProductAsSold("product-1");
@@ -227,7 +271,7 @@ describe("markProductAsSold", () => {
 
 describe("markProductAsSold: 店舗間の認可（双方向）", () => {
   it("ケースA: 店舗Aのユーザーは店舗Aの商品をSOLDにでき、更新・履歴は店舗Aの商品だけに作られる", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShops();
 
     const result = await markProductAsSold(PRODUCT_A.id);
@@ -262,7 +306,7 @@ describe("markProductAsSold: 店舗間の認可（双方向）", () => {
   });
 
   it("ケースB: 店舗Aのユーザーが店舗Bの商品IDを指定すると拒否され、副作用がない", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShops();
 
     const result = await markProductAsSold(PRODUCT_B.id);
@@ -277,7 +321,7 @@ describe("markProductAsSold: 店舗間の認可（双方向）", () => {
   });
 
   it("ケースC: 店舗Bのユーザーが店舗Aの商品IDを指定すると拒否され、副作用がない", async () => {
-    mockedAuth.mockResolvedValue(SESSION_B);
+    signInAs(SESSION_B);
     seedBothShops();
 
     const result = await markProductAsSold(PRODUCT_A.id);
@@ -290,7 +334,7 @@ describe("markProductAsSold: 店舗間の認可（双方向）", () => {
   });
 
   it("ケースD: 未ログインでは商品を検索せず拒否され、副作用がない", async () => {
-    mockedAuth.mockResolvedValue(null);
+    denyAuth("UNAUTHENTICATED");
     seedBothShops();
 
     const result = await markProductAsSold(PRODUCT_A.id);
@@ -300,18 +344,18 @@ describe("markProductAsSold: 店舗間の認可（双方向）", () => {
     expectNoWrites();
   });
 
-  it("ケースD': shopIdを持たないセッションも拒否される", async () => {
-    mockedAuth.mockResolvedValue({ user: { id: USER_A.id }, expires: SESSION_A.expires } as never);
+  it.each(["USER_NOT_FOUND", "SHOP_INACTIVE"] as const)("ケースD': DB照合が %s なら拒否され、副作用がない", async (reason) => {
+    denyAuth(reason);
 
     const result = await markProductAsSold(PRODUCT_A.id);
 
-    expect(result.error).toBeDefined();
+    expect(result).toEqual({ error: "認証が必要です。" });
     expect(mockedFindUnique).not.toHaveBeenCalled();
     expectNoWrites();
   });
 
   it("ケースE: 存在しない商品IDは拒否され、副作用がない", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShops();
 
     const result = await markProductAsSold(MISSING_ID);
@@ -322,7 +366,7 @@ describe("markProductAsSold: 店舗間の認可（双方向）", () => {
   });
 
   it("他店舗の商品と存在しない商品で応答が同一（存在を推測できない）", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShops();
 
     const otherShop = await markProductAsSold(PRODUCT_B.id);
@@ -334,7 +378,7 @@ describe("markProductAsSold: 店舗間の認可（双方向）", () => {
 
   it("多層防御: 取得結果に他店舗の商品が混入しても、shopId照合で拒否され副作用がない", async () => {
     // 取得条件が将来誤って緩められた場合を想定し、DB層がshopIdを無視して返すケースを再現する
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     mockedFindUnique.mockResolvedValue(productRecord(PRODUCT_B) as never);
 
     const result = await markProductAsSold(PRODUCT_B.id);
@@ -344,7 +388,7 @@ describe("markProductAsSold: 店舗間の認可（双方向）", () => {
   });
 
   it("ケースF: すでにSOLDの自店商品は更新も履歴追加もされない", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShops("SOLD");
 
     const result = await markProductAsSold(PRODUCT_A.id);
@@ -354,7 +398,7 @@ describe("markProductAsSold: 店舗間の認可（双方向）", () => {
   });
 
   it("店舗Bでも同じ規則: 自店の商品だけ更新され、店舗Aの商品には触れない", async () => {
-    mockedAuth.mockResolvedValue(SESSION_B);
+    signInAs(SESSION_B);
     seedBothShops();
 
     const result = await markProductAsSold(PRODUCT_B.id);
@@ -371,7 +415,7 @@ describe("markProductAsSold: 店舗間の認可（双方向）", () => {
 
 describe("markProductAsSold: 条件付き更新（F-05）", () => {
   it("更新条件に id・セッションのshopId・status: ACTIVE がすべて含まれる", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShops();
 
     await markProductAsSold(PRODUCT_A.id);
@@ -383,7 +427,7 @@ describe("markProductAsSold: 条件付き更新（F-05）", () => {
   });
 
   it("更新件数が1件のときだけ履歴を1件作成する", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShops();
 
     const result = await markProductAsSold(PRODUCT_A.id);
@@ -395,7 +439,7 @@ describe("markProductAsSold: 条件付き更新（F-05）", () => {
   });
 
   it("事前確認後にSOLDへ変わっていた（更新件数0件）場合は履歴を作らず、SOLD済みと同じ拒否結果を返す", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShops();
     const soldEarlier = new Date("2026-10-01T00:00:00Z");
     // 事前確認（findUnique）ではACTIVEを返すが、更新時点では別リクエストがSOLDにしている状態
@@ -412,7 +456,7 @@ describe("markProductAsSold: 条件付き更新（F-05）", () => {
   });
 
   it("更新件数が想定外（2件以上）の場合も履歴を作らず拒否し、更新はrollbackされる", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShops();
     tx.product.updateMany.mockImplementationOnce(async (args: { data: Partial<ProductRow> }) => {
       Object.assign(working!.products.get(PRODUCT_A.id)!, args.data);
@@ -427,7 +471,7 @@ describe("markProductAsSold: 条件付き更新（F-05）", () => {
   });
 
   it("ProductHistoryの作成に失敗するとトランザクション全体が失敗し、商品はACTIVEのまま残る", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShops();
     db.failHistoryCreate = true;
 
@@ -440,7 +484,7 @@ describe("markProductAsSold: 条件付き更新（F-05）", () => {
   });
 
   it("PriceHistoryは作成しない", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShops();
 
     await markProductAsSold(PRODUCT_A.id);
@@ -452,7 +496,7 @@ describe("markProductAsSold: 条件付き更新（F-05）", () => {
 
 describe("markProductAsSold: 同時実行（F-05、モック上の再現）", () => {
   it("Promise.allで並行した2つのSOLD変更は、両方がACTIVEを確認しても成功は1回・履歴は1件だけ", async () => {
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShops();
     holdReads = true;
 
@@ -487,7 +531,7 @@ describe("markProductAsSold: 同時実行（F-05、モック上の再現）", ()
     vi.useFakeTimers({ toFake: ["Date"] });
     const first = new Date("2026-10-17T01:00:00.000Z");
     const second = new Date("2026-10-17T01:00:05.000Z");
-    mockedAuth.mockResolvedValue(SESSION_A);
+    signInAs(SESSION_A);
     seedBothShops();
     holdReads = true;
 
@@ -516,7 +560,8 @@ describe("markProductAsSold: 同時実行（F-05、モック上の再現）", ()
   });
 
   it("他店舗のユーザーが同時にSOLD変更しても、自店の1回だけが成功し他店舗の要求は何も書き込まない", async () => {
-    mockedAuth.mockResolvedValueOnce(SESSION_A).mockResolvedValueOnce(SESSION_B);
+    signInOnceAs(SESSION_A);
+    signInOnceAs(SESSION_B);
     seedBothShops();
     holdReads = true;
 
@@ -530,5 +575,85 @@ describe("markProductAsSold: 同時実行（F-05、モック上の再現）", ()
     expect(mockedTransaction).toHaveBeenCalledTimes(1);
     expect(db.histories).toHaveLength(1);
     expect(db.histories[0].changedById).toBe(USER_A.id);
+  });
+});
+
+describe("markProductAsSold: DB由来の認可コンテキスト（F-01-C）", () => {
+  it("DB上の所属が店舗Bなら、JWTの店舗Aではなく店舗Bのスコープで処理し、店舗Aの商品は見つからない", async () => {
+    seedBothShops();
+    mockedAuthContext.mockResolvedValue({ ok: true, context: { userId: USER_A.id, shopId: SHOP_B.id, role: "STORE" } });
+
+    const former = await markProductAsSold(PRODUCT_A.id);
+    const own = await markProductAsSold(PRODUCT_B.id);
+
+    expect(former).toEqual(NOT_FOUND);
+    expect(mockedFindUnique).toHaveBeenCalledWith({ where: { id: PRODUCT_A.id, shopId: SHOP_B.id } });
+    expect(own).toEqual({ success: "商品を販売済みにしました。" });
+    expect(tx.product.updateMany).toHaveBeenCalledTimes(1);
+    expect(tx.product.updateMany.mock.calls[0][0]).toMatchObject({
+      where: { id: PRODUCT_B.id, shopId: SHOP_B.id, status: "ACTIVE" },
+      data: { status: "SOLD", updatedById: USER_A.id },
+    });
+    expect(tx.productHistory.create.mock.calls[0][0].data.changedById).toBe(USER_A.id);
+    expect(product(PRODUCT_A.id)).toMatchObject({ status: "ACTIVE", soldAt: null });
+  });
+
+  it("DB上のロールがSTORE（JWTはADMIN）でも、ロールに依存しない既存の処理はDB由来の値で進む", async () => {
+    seedBothShops();
+    mockedAuthContext.mockResolvedValue({ ok: true, context: { userId: USER_A.id, shopId: SHOP_A.id, role: "STORE" } });
+
+    const result = await markProductAsSold(PRODUCT_A.id);
+
+    expect(result.success).toBeDefined();
+    expect(product(PRODUCT_A.id)).toMatchObject({ status: "SOLD", updatedById: USER_A.id });
+  });
+
+  it("実際の認可ヘルパー経由: JWTは店舗A・ADMIN、DBは店舗B・STOREなら店舗Bで処理する", async () => {
+    seedBothShops();
+    useRealAuthContext(SESSION_A, { id: USER_A.id, shopId: SHOP_B.id, role: "STORE", shop: { isActive: true } });
+
+    const former = await markProductAsSold(PRODUCT_A.id);
+    const own = await markProductAsSold(PRODUCT_B.id);
+
+    expect(former).toEqual(NOT_FOUND);
+    expect(own.success).toBeDefined();
+    expect(mockedUserFindUnique.mock.calls[0][0]).toMatchObject({ where: { id: USER_A.id } });
+    expect(tx.product.updateMany.mock.calls[0][0].where).toEqual({ id: PRODUCT_B.id, shopId: SHOP_B.id, status: "ACTIVE" });
+    expect(JSON.stringify(tx.product.updateMany.mock.calls)).not.toContain(SHOP_A.id);
+  });
+
+  it.each([
+    ["店舗が無効", { id: USER_A.id, shopId: SHOP_A.id, role: "ADMIN", shop: { isActive: false } }],
+    ["ユーザーが削除済み", null],
+  ])("実際の認可ヘルパー経由: DB上で%sなら、JWTが有効でも拒否し、商品を検索せず書き込まない", async (_label, dbUser) => {
+    seedBothShops();
+    useRealAuthContext(SESSION_A, dbUser);
+
+    const result = await markProductAsSold(PRODUCT_A.id);
+
+    expect(result).toEqual({ error: "認証が必要です。" });
+    expect(mockedFindUnique).not.toHaveBeenCalled();
+    expectNoWrites();
+    expect(product(PRODUCT_A.id)).toMatchObject({ status: "ACTIVE", soldAt: null });
+  });
+
+  it("getAuthContext() が例外（DB障害など）なら伝播し、古いJWTで処理を続けない", async () => {
+    seedBothShops();
+    mockedAuth.mockResolvedValue(SESSION_A);
+    mockedAuthContext.mockRejectedValue(new Error("db down"));
+
+    await expect(markProductAsSold(PRODUCT_A.id)).rejects.toThrow("db down");
+    expect(mockedFindUnique).not.toHaveBeenCalled();
+    expectNoWrites();
+  });
+
+  it("入口で getAuthContext() を1回だけ呼び、auth() を直接呼ばない", async () => {
+    seedBothShops();
+    signInAs(SESSION_A);
+
+    await markProductAsSold(PRODUCT_A.id);
+
+    expect(mockedAuthContext).toHaveBeenCalledTimes(1);
+    expect(mockedAuth).not.toHaveBeenCalled();
   });
 });

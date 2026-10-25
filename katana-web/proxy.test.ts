@@ -60,3 +60,27 @@ describe("proxy: 未ログインでの保護ページアクセス", () => {
     expect(response.headers.get("location")).not.toBe("http://localhost:3000/ja/login");
   });
 });
+
+describe("proxy: アクセス停止画面とリダイレクトループ（F-01-D）", () => {
+  it.each(["/ja/access-suspended", "/en/access-suspended"])(
+    "ログイン済み（JWTが残っている）なら %s へそのまま到達でき、/dashboard へ戻されない",
+    async (path) => {
+      const response = await run(path, SESSION_A);
+
+      expect(response.status).not.toBe(307);
+      expect(response.headers.get("location")).toBeNull();
+    },
+  );
+
+  it("ログイン済みで /login へ行くと /dashboard へ戻される（停止時にログイン画面へ送るとループするため、停止画面を使う）", async () => {
+    const response = await run("/ja/login", SESSION_A);
+
+    expect(response.headers.get("location")).toBe("http://localhost:3000/ja/dashboard");
+  });
+
+  it("未ログインでアクセス停止画面へ来た場合はログイン画面へ送られる（停止画面は認証済みユーザー向け）", async () => {
+    const response = await run("/en/access-suspended");
+
+    expect(response.headers.get("location")).toBe("http://localhost:3000/en/login");
+  });
+});

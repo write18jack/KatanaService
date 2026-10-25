@@ -1,17 +1,14 @@
-import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { requireDashboardContext } from "../_lib/requireDashboardContext";
 import ProductTable from "./_components/ProductTable";
 
 export default async function ProductsPage() {
-  const session = await auth();
-
-  if (!session?.user.shopId) {
-    return <div>店舗情報がありません。</div>;
-  }
+  // 商品の取得前に、DBの最新状態で認可する（shopIdはDB由来）
+  const { shopId } = await requireDashboardContext();
 
   const products = await prisma.product.findMany({
     where: {
-      shopId: session.user.shopId,
+      shopId,
     },
     orderBy: {
       createdAt: "desc",

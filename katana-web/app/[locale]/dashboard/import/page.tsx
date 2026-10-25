@@ -1,12 +1,9 @@
-import { auth } from "@/auth";
+import { requireDashboardContext } from "../_lib/requireDashboardContext";
 import ImportUploadForm from "./_components/ImportUploadForm";
 
 export default async function ImportPage() {
-  const session = await auth();
-
-  if (!session?.user?.shopId) {
-    return <div>店舗情報がありません。</div>;
-  }
+  // 無効店舗・削除済みユーザーには取り込み画面も表示しない
+  await requireDashboardContext();
 
   return (
     <main className="space-y-6 p-8">
