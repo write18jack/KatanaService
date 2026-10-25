@@ -9,7 +9,7 @@ export default async function HomePage() {
   const session = await auth();
 
   return (
-    <main className="min-h-[calc(100vh-56px)] w-full bg-blue-200 pt-14">
+    <main className="min-h-[calc(100vh-56px)] w-full bg-blue-200">
       <div className="flex h-full w-full flex-col p-8">
         <h1 className="text-4xl font-bold tracking-tight text-gray-900 sm:text-6xl">
           {t("title")}

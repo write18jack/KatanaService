@@ -55,6 +55,17 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
       <section className="space-y-4">
         <h2 className="text-xl font-semibold">市場サマリー</h2>
 
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <MarketMetricCard label="市場在庫数" value={formatCount(inventoryCount)} />
+          <MarketMetricCard
+            label="平均価格"
+            value={formatYen(average.averagePrice)}
+            description={disclosedRatio}
+          />
+          <MarketMetricCard label="中央値" value={formatYen(medianPrice)} description={disclosedRatio} />
+          <MarketMetricCard label="直近30日SOLD" value={formatCount(soldCount)} />
+        </div>
+
         <div className="space-y-3">
           <h3 className="text-muted-foreground text-sm font-medium">市場条件</h3>
 
@@ -67,17 +78,6 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
           )}
 
           <MarketFilterBar masters={masters} filters={filters} />
-        </div>
-
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <MarketMetricCard label="市場在庫数" value={formatCount(inventoryCount)} />
-          <MarketMetricCard
-            label="平均価格"
-            value={formatYen(average.averagePrice)}
-            description={disclosedRatio}
-          />
-          <MarketMetricCard label="中央値" value={formatYen(medianPrice)} description={disclosedRatio} />
-          <MarketMetricCard label="直近30日SOLD" value={formatCount(soldCount)} />
         </div>
       </section>
 

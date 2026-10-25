@@ -1,7 +1,6 @@
 import { NextIntlClientProvider } from "next-intl";
 import { notFound } from "next/navigation";
 import { routing } from "@/i18n/routing";
-import Header from "@/components/header";
 
 export default async function LocaleLayout({
   children,
@@ -20,8 +19,7 @@ export default async function LocaleLayout({
 
   return (
     <NextIntlClientProvider messages={messages}>
-      <Header />
-      <main className="min-h-screen w-full pt-14">
+      <main className="min-h-screen w-full">
         <div className="w-full p-6">{children}</div>
       </main>
     </NextIntlClientProvider>
