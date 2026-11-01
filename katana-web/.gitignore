@@ -13,7 +13,6 @@ out/
 
 # Prisma
 prisma/*.db
-prisma/migrations/
 lib/generated/prisma
 
 # Logs
