@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// recentImports.test.ts は実DBの統合テスト。こちらはPrismaをモックし、DBなしで問い合わせ条件を検証する。
+// recentImports.integration.test.ts は実DBの統合テスト。こちらはPrismaをモックし、DBなしで問い合わせ条件を検証する。
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     importJob: { findMany: vi.fn() },
