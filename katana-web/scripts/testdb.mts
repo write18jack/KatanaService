@@ -1,13 +1,20 @@
 /**
  * テスト専用DB（docker-compose.test.yml）の Docker ラッパー（2-5）。
  *
- *   npm run testdb:check   … .env.test・Compose の環境変数・`docker compose config` の結果を検証する（コンテナは操作しない）
- *   npm run testdb:status  … katana-test プロジェクトのコンテナと、開発用ボリュームの状態を読み取るだけ
+ *   npm run testdb:check            … .env.test・Compose の環境変数・`docker compose config` の結果を検証する（コンテナは操作しない）
+ *   npm run testdb:status           … katana-test プロジェクトのコンテナと、開発用ボリュームの状態を読み取るだけ
+ *   npm run testdb:up               … 起動前の確認だけを行い、実行する予定のコマンドを表示する（コンテナは操作しない）
+ *   npm run testdb:up -- --apply    … 確認がすべて通った場合だけ、テストDBのコンテナを作成・起動し、起動後の確認を行う
+ *   npm run testdb:down             … 停止前の確認だけを行い、実行する予定のコマンドを表示する（コンテナは操作しない）
+ *   npm run testdb:down -- --apply  … 確認がすべて通った場合だけ、katana-test プロジェクトのコンテナを停止・削除する
+ *                                     （データは tmpfs にあるので失われる。ボリューム・イメージは削除しない）
  *
  * - docker compose には、必ず `--project-name katana-test --file <絶対パス> --project-directory <katana-web>
  *   --env-file <katana-web/.env.test>` を付ける。外部から Docker・Compose の引数を渡す経路はない。
- * - 実行できる Docker のコマンドは、読み取り専用のものだけ（READ_ONLY_COMMANDS）。up・down・reset などの、
- *   コンテナを作成・起動・停止・削除するモードは、必要な安全条件がそろうまで実装しない（未対応の引数として拒否する）。
+ * - 実行できる Docker のコマンドは、読み取り専用の許可リスト（isReadOnlyDockerCommand）と、変更操作の2つ
+ *   （UP_SUBCOMMAND・DOWN_SUBCOMMAND。`--apply` があるときだけ）に完全一致するものだけ。reset は実装しない。
+ * - 変更操作では `--volumes`・`--remove-orphans`・`--rmi`・`--renew-anon-volumes`・`--force-recreate`・`--build` を使わない。
+ *   操作の後の確認で失敗しても、コンテナ・ボリュームを自動で削除・作り直ししない（報告して止まる）。
  * - 子プロセスは shell を使わずに起動し、環境変数は許可リストの変数と、検証済みの2つのパスワードだけを渡す。
  * - パスワード・接続URL・`docker compose config` の出力の全文は表示しない。失敗したときはエラーコードだけを表示する。
  *
@@ -73,7 +80,19 @@ export type TestDbErrorCode =
   | "DOCKER_CONTEXT_MISMATCH"
   | "COMPOSE_CONFIG_INVALID"
   | "COMPOSE_CONFIG_MISMATCH"
-  | "STATUS_UNEXPECTED_CONTAINER";
+  | "STATUS_UNEXPECTED_CONTAINER"
+  | "MUTATION_NOT_ALLOWED"
+  | "UNEXPECTED_CONTAINER"
+  | "UNEXPECTED_SERVICE"
+  | "UNEXPECTED_VOLUME"
+  | "CONTAINER_NAME_CONFLICT"
+  | "TEST_CONTAINER_EXISTS"
+  | "PORT_IN_USE"
+  | "IMAGE_MISSING"
+  | "DEVELOPMENT_VOLUME_IN_USE"
+  | "CONTAINER_INSPECT_INVALID"
+  | "CONTAINER_INSPECT_MISMATCH"
+  | "POST_CHECK_FAILED";
 
 export class TestDbError extends Error {
   readonly code: TestDbErrorCode;
@@ -86,7 +105,9 @@ export class TestDbError extends Error {
 }
 
 type EnvSource = Readonly<Record<string, string | undefined>>;
-export type TestDbMode = "check" | "status";
+export type TestDbMode = "check" | "status" | "up" | "down";
+/** apply が true のときだけ、up・down の変更操作を実行する */
+export type TestDbCommand = { mode: TestDbMode; apply: boolean };
 export type CommandResult = { code: number; stdout: string; stderr: string };
 export type RunOptions = { cwd: string; env: Record<string, string>; shell: false };
 
@@ -104,10 +125,21 @@ export type TestDbDeps = {
   log: (text: string) => void;
 };
 
-export function parseTestDbArgs(args: readonly string[]): TestDbMode {
-  if (args.length === 1 && args[0] === "--check") return "check";
-  if (args.length === 1 && args[0] === "--status") return "status";
-  throw new TestDbError("ARGUMENTS_INVALID", "the only accepted arguments are --check or --status.");
+/** 受け付ける引数の組み合わせ（順番も固定。これ以外はすべて拒否する） */
+const ACCEPTED_ARGS: ReadonlyArray<readonly [readonly string[], TestDbCommand]> = [
+  [["--check"], { mode: "check", apply: false }],
+  [["--status"], { mode: "status", apply: false }],
+  [["--up"], { mode: "up", apply: false }],
+  [["--up", "--apply"], { mode: "up", apply: true }],
+  [["--down"], { mode: "down", apply: false }],
+  [["--down", "--apply"], { mode: "down", apply: true }],
+];
+
+export function parseTestDbArgs(args: readonly string[]): TestDbCommand {
+  for (const [expected, command] of ACCEPTED_ARGS) {
+    if (expected.length === args.length && expected.every((value, i) => value === args[i])) return { ...command };
+  }
+  throw new TestDbError("ARGUMENTS_INVALID", "the only accepted arguments are --check, --status, --up [--apply] or --down [--apply].");
 }
 
 export type VerifiedTestDbEnv = {
@@ -200,20 +232,92 @@ export function composeArgs(root: string, subcommand: readonly string[]): string
   ];
 }
 
+/** テストDBのイメージ（verifyComposeConfig で照合した値）。存在しなければ取得せずに止まる */
+const TEST_IMAGE = "postgres:15";
+const TEST_HOST_IP = "127.0.0.1";
+const TEST_HOST_PORT = "5434";
+/** up の待ち時間（秒）。healthcheck が通るまで待つ */
+const UP_WAIT_TIMEOUT_SECONDS = "120";
+
+/**
+ * up のサブコマンド（固定）。対象のサービスを明示し、依存サービス・ビルド・作り直し・イメージの取得をしない。
+ * `--remove-orphans`・`--renew-anon-volumes`・`--force-recreate`・`--build` は使わない。
+ */
+export const UP_SUBCOMMAND = [
+  "up",
+  "--detach",
+  "--wait",
+  "--wait-timeout",
+  UP_WAIT_TIMEOUT_SECONDS,
+  "--no-deps",
+  "--no-build",
+  "--no-recreate",
+  "--pull",
+  "never",
+  TEST_SERVICE,
+] as const;
+/** down のサブコマンド（固定）。`--volumes`・`--remove-orphans`・`--rmi` は使わない */
+export const DOWN_SUBCOMMAND = ["down"] as const;
+/** 変更操作に含まれていてはいけない引数（固定のサブコマンドに対する、念のための再確認） */
+const FORBIDDEN_MUTATION_ARGS = [
+  "--volumes",
+  "-v",
+  "--remove-orphans",
+  "--rmi",
+  "--renew-anon-volumes",
+  "-V",
+  "--force-recreate",
+  "--always-recreate-deps",
+  "--build",
+  "always",
+  "missing",
+];
+
+/** 開発用コンテナ katana-db の比較に使う項目（名前・ID・状態）。経過時間を含む .Status は、比較が揺れるので使わない */
+const DEVELOPMENT_CONTAINER_FORMAT = "{{.Names}}\t{{.ID}}\t{{.State}}";
+/** 名前が katana-test-db のコンテナの、名前と Compose のプロジェクト（別のプロジェクトの同名コンテナを見つける） */
+const SAME_NAME_FORMAT = '{{.Names}}\t{{.Label "com.docker.compose.project"}}';
+/** テスト用コンテナの inspect で読む項目だけを、JSON の形で取り出す（Config.Env などのパスワードを含む項目は読まない） */
+export const CONTAINER_INSPECT_FORMAT =
+  '{"project":{{json (index .Config.Labels "com.docker.compose.project")}},' +
+  '"service":{{json (index .Config.Labels "com.docker.compose.service")}},' +
+  '"configFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},' +
+  '"workingDir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},' +
+  '"state":{{json .State.Status}},' +
+  '"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},' +
+  '"mounts":{{json .Mounts}},' +
+  '"tmpfs":{{json .HostConfig.Tmpfs}},' +
+  '"ports":{{json .HostConfig.PortBindings}}}';
+const INSPECT_ARGS = ["inspect", "--type", "container", TEST_CONTAINER, "--format", CONTAINER_INSPECT_FORMAT];
+const IMAGE_ARGS = ["image", "inspect", TEST_IMAGE, "--format", "{{.Id}}"];
+
+const sameArgs = (expected: readonly string[], args: readonly string[]) =>
+  expected.length === args.length && expected.every((value, i) => value === args[i]);
+
 /** 実行してよい Docker のコマンド（すべて読み取り専用） */
 function isReadOnlyDockerCommand(root: string, args: readonly string[]): boolean {
-  const same = (expected: readonly string[]) => expected.length === args.length && expected.every((value, i) => value === args[i]);
   return [
     ["context", "show"],
     composeArgs(root, ["config", "--quiet"]),
     composeArgs(root, ["config", "--format", "json"]),
     composeArgs(root, ["ps", "--all", "--format", "json"]),
     ["ps", "--all", "--filter", `label=com.docker.compose.project=${COMPOSE_PROJECT}`, "--format", "{{.Names}}"],
-    ["ps", "--all", "--filter", `name=^katana-db$`, "--format", "{{.Names}}\t{{.Status}}"],
+    ["ps", "--all", "--filter", `name=^${TEST_CONTAINER}$`, "--format", SAME_NAME_FORMAT],
+    ["ps", "--all", "--filter", "name=^katana-db$", "--format", DEVELOPMENT_CONTAINER_FORMAT],
     ["ps", "--all", "--filter", `volume=${DEVELOPMENT_VOLUME}`, "--format", "{{.Names}}"],
-    ["volume", "ls", "--filter", `name=^${DEVELOPMENT_VOLUME}$`, "--format", "{{.Name}}"],
+    ["ps", "--all", "--filter", `publish=${TEST_HOST_PORT}`, "--format", "{{.Names}}"],
+    ["volume", "ls", "--format", "{{.Name}}"],
+    ["volume", "ls", "--filter", `label=com.docker.compose.project=${COMPOSE_PROJECT}`, "--format", "{{.Name}}"],
     ["volume", "inspect", DEVELOPMENT_VOLUME, "--format", DEVELOPMENT_VOLUME_FORMAT],
-  ].some(same);
+    IMAGE_ARGS,
+    INSPECT_ARGS,
+  ].some((expected) => sameArgs(expected, args));
+}
+
+/** 実行してよい変更操作（up・down の2つだけ）。どちらも katana-test プロジェクトの固定の引数 */
+export function isAllowedMutation(root: string, args: readonly string[]): boolean {
+  if (args.some((arg) => FORBIDDEN_MUTATION_ARGS.includes(arg))) return false;
+  return [composeArgs(root, UP_SUBCOMMAND), composeArgs(root, DOWN_SUBCOMMAND)].some((expected) => sameArgs(expected, args));
 }
 
 /** 表示する前に、パスワードと接続URLを伏せる */
@@ -223,19 +327,45 @@ function redact(text: string, verified: VerifiedTestDbEnv): string {
   return result.replace(/postgres(ql)?:\/\/\S+/g, "(hidden)");
 }
 
-type Docker = (args: readonly string[]) => Promise<string>;
+type Docker = {
+  /** 読み取り専用のコマンド。終了コードが0でなければ止まる */
+  read: (args: readonly string[]) => Promise<string>;
+  /** 読み取り専用のコマンドを実行し、成功したかだけを返す（イメージの有無の確認に使う） */
+  probe: (args: readonly string[]) => Promise<boolean>;
+  /** 変更操作（up・down）。apply が true で、固定の引数と完全に一致するときだけ実行する */
+  mutate: (args: readonly string[]) => Promise<void>;
+};
 
-function makeDocker(deps: TestDbDeps, childEnv: Record<string, string>, verified: VerifiedTestDbEnv): Docker {
-  return async (args) => {
+function makeDocker(deps: TestDbDeps, childEnv: Record<string, string>, verified: VerifiedTestDbEnv, apply: boolean): Docker {
+  const options: RunOptions = { cwd: deps.root, env: childEnv, shell: false };
+  const failed = (args: readonly string[], result: CommandResult) => {
+    const stderr = redact(result.stderr.trim(), verified).slice(0, 500);
+    return new TestDbError("DOCKER_COMMAND_FAILED", `docker ${args.includes("compose") ? "compose" : args[0]} exited with ${result.code}${stderr ? `: ${stderr}` : ""}`);
+  };
+  const assertReadOnly = (args: readonly string[]) => {
     if (!isReadOnlyDockerCommand(deps.root, args)) {
       throw new TestDbError("DOCKER_COMMAND_NOT_ALLOWED", "only read-only docker commands are allowed.");
     }
-    const result = await deps.run("docker", args, { cwd: deps.root, env: childEnv, shell: false });
-    if (result.code !== 0) {
-      const stderr = redact(result.stderr.trim(), verified).slice(0, 500);
-      throw new TestDbError("DOCKER_COMMAND_FAILED", `docker ${args.includes("compose") ? "compose" : args[0]} exited with ${result.code}${stderr ? `: ${stderr}` : ""}`);
-    }
-    return result.stdout;
+  };
+  return {
+    read: async (args) => {
+      assertReadOnly(args);
+      const result = await deps.run("docker", args, options);
+      if (result.code !== 0) throw failed(args, result);
+      return result.stdout;
+    },
+    probe: async (args) => {
+      assertReadOnly(args);
+      return (await deps.run("docker", args, options)).code === 0;
+    },
+    mutate: async (args) => {
+      if (!apply) throw new TestDbError("MUTATION_NOT_ALLOWED", "changing operations require --apply.");
+      if (!isAllowedMutation(deps.root, args)) {
+        throw new TestDbError("DOCKER_COMMAND_NOT_ALLOWED", "only the fixed up and down commands of the katana-test project are allowed.");
+      }
+      const result = await deps.run("docker", args, options);
+      if (result.code !== 0) throw failed(args, result);
+    },
   };
 }
 
@@ -325,13 +455,208 @@ export function parseComposePs(stdout: string): any[] {
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 const lines = (stdout: string) => stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+const sameList = (a: readonly string[], b: readonly string[]) => JSON.stringify(a) === JSON.stringify(b);
+
+/** コンテナの一覧の1件（`docker compose ps --format json` から、使う項目だけ） */
+export type ComposeContainer = { name: string; service: string; state: string; health: string };
+
+/** 操作の前後に比べる Docker の状態（読み取り専用のコマンドだけで集める）。パスワードを含む項目は読まない */
+export type DockerSnapshot = {
+  /** katana-test プロジェクトのコンテナ（docker compose ps） */
+  projectContainers: ComposeContainer[];
+  /** ラベル com.docker.compose.project=katana-test のコンテナの名前 */
+  labeledContainers: string[];
+  /** 名前が katana-test-db のコンテナ（名前とプロジェクトのラベル） */
+  sameNameContainers: string[];
+  /** ラベル com.docker.compose.project=katana-test のボリューム */
+  projectVolumes: string[];
+  /** すべてのボリュームの名前（名前順。無名のボリュームが増えていないかの比較に使う） */
+  volumes: string[];
+  /** 5434番を公開しているコンテナの名前 */
+  portPublishers: string[];
+  /** 開発用コンテナ katana-db（名前・ID・状態）。存在しなければ空 */
+  developmentContainer: string[];
+  /** 開発用ボリュームの名前・作成日時・ラベル。存在しなければ空 */
+  developmentVolume: string[];
+  /** 開発用ボリュームを使っているコンテナの名前 */
+  developmentVolumeUsers: string[];
+};
+
+async function readSnapshot(root: string, docker: Docker): Promise<DockerSnapshot> {
+  const projectContainers = parseComposePs(await docker.read(composeArgs(root, ["ps", "--all", "--format", "json"]))).map((c) => ({
+    name: String(c?.Name ?? ""),
+    service: String(c?.Service ?? ""),
+    state: String(c?.State ?? ""),
+    health: String(c?.Health ?? ""),
+  }));
+  const labeledContainers = lines(await docker.read(["ps", "--all", "--filter", `label=com.docker.compose.project=${COMPOSE_PROJECT}`, "--format", "{{.Names}}"]));
+  const sameNameContainers = lines(await docker.read(["ps", "--all", "--filter", `name=^${TEST_CONTAINER}$`, "--format", SAME_NAME_FORMAT]));
+  const projectVolumes = lines(await docker.read(["volume", "ls", "--filter", `label=com.docker.compose.project=${COMPOSE_PROJECT}`, "--format", "{{.Name}}"]));
+  const volumes = lines(await docker.read(["volume", "ls", "--format", "{{.Name}}"])).sort();
+  const portPublishers = lines(await docker.read(["ps", "--all", "--filter", `publish=${TEST_HOST_PORT}`, "--format", "{{.Names}}"]));
+  const developmentContainer = lines(await docker.read(["ps", "--all", "--filter", "name=^katana-db$", "--format", DEVELOPMENT_CONTAINER_FORMAT]));
+  const developmentVolume = volumes.includes(DEVELOPMENT_VOLUME)
+    ? lines(await docker.read(["volume", "inspect", DEVELOPMENT_VOLUME, "--format", DEVELOPMENT_VOLUME_FORMAT]))
+    : [];
+  const developmentVolumeUsers = lines(await docker.read(["ps", "--all", "--filter", `volume=${DEVELOPMENT_VOLUME}`, "--format", "{{.Names}}"]));
+  return {
+    projectContainers,
+    labeledContainers,
+    sameNameContainers,
+    projectVolumes,
+    volumes,
+    portPublishers,
+    developmentContainer,
+    developmentVolume,
+    developmentVolumeUsers,
+  };
+}
+
+/** 開発用DBの記録（コンテナ・ボリューム・ボリュームを使うコンテナ）が同じか */
+function sameDevelopmentRecord(a: DockerSnapshot, b: DockerSnapshot): boolean {
+  return (
+    sameList(a.developmentContainer, b.developmentContainer) &&
+    sameList(a.developmentVolume, b.developmentVolume) &&
+    sameList(a.developmentVolumeUsers, b.developmentVolumeUsers)
+  );
+}
+
+/** テストDBのコンテナが（どの一覧にでも）存在するか */
+function testContainerExists(snapshot: DockerSnapshot): boolean {
+  return snapshot.projectContainers.length > 0 || snapshot.labeledContainers.length > 0 || snapshot.sameNameContainers.length > 0;
+}
+
+/**
+ * katana-test プロジェクトの中身が、テストDBのコンテナ（あれば）だけであることを確かめる（up・down の前に共通）。
+ * 想定外のコンテナ・サービス・ボリューム、同じ名前の別のコンテナ、開発用ボリュームを使うテスト用コンテナがあれば止まる。
+ */
+export function assertProjectContents(snapshot: DockerSnapshot): void {
+  const names = [...snapshot.projectContainers.map((c) => c.name), ...snapshot.labeledContainers];
+  if (names.some((name) => name !== TEST_CONTAINER)) {
+    throw new TestDbError("UNEXPECTED_CONTAINER", `the ${COMPOSE_PROJECT} project has containers other than ${TEST_CONTAINER}.`);
+  }
+  if (snapshot.projectContainers.some((c) => c.service !== TEST_SERVICE)) {
+    throw new TestDbError("UNEXPECTED_SERVICE", `the ${COMPOSE_PROJECT} project has a service other than ${TEST_SERVICE}.`);
+  }
+  if (snapshot.sameNameContainers.some((row) => row !== `${TEST_CONTAINER}\t${COMPOSE_PROJECT}`)) {
+    throw new TestDbError("CONTAINER_NAME_CONFLICT", `a container named ${TEST_CONTAINER} exists outside the ${COMPOSE_PROJECT} project.`);
+  }
+  if (snapshot.projectVolumes.length > 0) {
+    throw new TestDbError("UNEXPECTED_VOLUME", `the ${COMPOSE_PROJECT} project has volumes; the test database must not use volumes.`);
+  }
+  if (snapshot.developmentVolumeUsers.includes(TEST_CONTAINER)) {
+    throw new TestDbError("DEVELOPMENT_VOLUME_IN_USE", `${TEST_CONTAINER} uses the development volume.`);
+  }
+}
+
+/** up の前の確認：テストDBのコンテナが1つもなく、5434番を公開しているコンテナもないこと */
+export function assertReadyForUp(snapshot: DockerSnapshot): void {
+  assertProjectContents(snapshot);
+  if (testContainerExists(snapshot)) {
+    // 既存のコンテナは、起動し直したり作り直したりしない（--status で状態を確かめ、必要なら --down で片付ける）
+    throw new TestDbError("TEST_CONTAINER_EXISTS", `${TEST_CONTAINER} already exists; check it with --status and remove it with --down first.`);
+  }
+  if (snapshot.portPublishers.length > 0) {
+    throw new TestDbError("PORT_IN_USE", `a container already publishes port ${TEST_HOST_PORT}.`);
+  }
+}
+
+/* eslint-disable @typescript-eslint/no-explicit-any -- docker inspect の JSON を、形を確かめながら読む */
+/**
+ * テスト用コンテナの inspect（CONTAINER_INSPECT_FORMAT）を照合し、不一致の項目名を返す（値は含めない）。
+ * Compose のラベル（プロジェクト・サービス・Composeファイル・作業ディレクトリ）で、このラッパーが作ったコンテナであることを確かめる。
+ * running が true なら（up の後）、起動していて healthy であることも確かめる。false なら（down の前）、状態は問わない
+ * （起動途中・unhealthy・停止済みでも、同一性を確かめられれば down できる）。
+ */
+export function containerInspectMismatches(json: string, root: string, options: { running: boolean }): string[] {
+  let c: any;
+  try {
+    c = JSON.parse(json);
+  } catch {
+    throw new TestDbError("CONTAINER_INSPECT_INVALID", "docker inspect did not return JSON.");
+  }
+  const mismatches: string[] = [];
+  const expect = (name: string, ok: boolean) => {
+    if (!ok) mismatches.push(name);
+  };
+  expect("project label", c?.project === COMPOSE_PROJECT);
+  expect("service label", c?.service === TEST_SERVICE);
+  expect("compose file label", c?.configFiles === path.join(root, COMPOSE_FILE));
+  expect("working directory label", c?.workingDir === root);
+  const mounts = Array.isArray(c?.mounts) ? c.mounts : [];
+  expect("no volume mounts", mounts.every((m: any) => m?.Type !== "volume"));
+  expect(
+    "mounts",
+    mounts.length === 1 &&
+      mounts[0].Type === "bind" &&
+      mounts[0].Source === path.join(root, INIT_DIR) &&
+      mounts[0].Destination === INIT_TARGET &&
+      mounts[0].RW === false,
+  );
+  expect("tmpfs", c?.tmpfs !== null && typeof c?.tmpfs === "object" && Object.keys(c.tmpfs).includes(DATA_DIR));
+  const ports = c?.ports !== null && typeof c?.ports === "object" ? c.ports : {};
+  const bindings = Array.isArray(ports["5432/tcp"]) ? ports["5432/tcp"] : [];
+  expect(
+    "ports",
+    JSON.stringify(Object.keys(ports)) === JSON.stringify(["5432/tcp"]) &&
+      bindings.length === 1 &&
+      bindings[0].HostIp === TEST_HOST_IP &&
+      bindings[0].HostPort === TEST_HOST_PORT,
+  );
+  if (options.running) {
+    expect("state", c?.state === "running");
+    expect("health", c?.health === "healthy");
+  }
+  return mismatches;
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+/** up の後の確認。不一致の項目名を返す（値は含めない） */
+export function upPostCheckMismatches(before: DockerSnapshot, after: DockerSnapshot, inspectMismatches: readonly string[]): string[] {
+  const mismatches: string[] = [];
+  const c = after.projectContainers;
+  if (!(c.length === 1 && c[0].name === TEST_CONTAINER && c[0].service === TEST_SERVICE)) mismatches.push("project containers");
+  if (!(c.length === 1 && c[0].state === "running" && c[0].health === "healthy")) mismatches.push("container state");
+  if (!sameList(after.labeledContainers, [TEST_CONTAINER])) mismatches.push("labeled containers");
+  if (!sameList(after.sameNameContainers, [`${TEST_CONTAINER}\t${COMPOSE_PROJECT}`])) mismatches.push("container name");
+  if (after.projectVolumes.length > 0) mismatches.push("project volumes");
+  // R7：無名のボリュームを含め、ボリュームが1つも増減していないこと
+  if (!sameList(before.volumes, after.volumes)) mismatches.push("volumes (an anonymous volume may have been created)");
+  if (!sameList(after.portPublishers, [TEST_CONTAINER])) mismatches.push("port publishers");
+  if (!sameDevelopmentRecord(before, after)) mismatches.push("development database record");
+  return [...mismatches, ...inspectMismatches.map((name) => `inspect: ${name}`)];
+}
+
+/** down の後の確認。不一致の項目名を返す（値は含めない） */
+export function downPostCheckMismatches(before: DockerSnapshot, after: DockerSnapshot): string[] {
+  const mismatches: string[] = [];
+  if (testContainerExists(after)) mismatches.push("test container still exists");
+  if (after.projectVolumes.length > 0) mismatches.push("project volumes");
+  if (!sameList(before.volumes, after.volumes)) mismatches.push("volumes");
+  if (!sameDevelopmentRecord(before, after)) mismatches.push("development database record");
+  return mismatches;
+}
+
+function describeSnapshot(snapshot: DockerSnapshot): string[] {
+  const containers = snapshot.projectContainers;
+  const list = (values: readonly string[], empty: string) => (values.length === 0 ? empty : values.join(", "));
+  return [
+    `${COMPOSE_PROJECT} containers: ${containers.length === 0 ? "none" : containers.map((c) => `${c.name} (${c.state || "unknown"}${c.health ? `, ${c.health}` : ""})`).join(", ")}`,
+    `${COMPOSE_PROJECT} volumes: ${list(snapshot.projectVolumes, "none")}`,
+    `containers publishing port ${TEST_HOST_PORT}: ${list(snapshot.portPublishers, "none")}`,
+    `development container katana-db (name, id, state): ${list(snapshot.developmentContainer, "not present")}`,
+    `development volume (name, created, compose project, compose volume): ${list(snapshot.developmentVolume, "not present")}`,
+    `containers using the development volume: ${list(snapshot.developmentVolumeUsers, "none")}`,
+    `all volumes: ${snapshot.volumes.length}`,
+  ];
+}
 
 /** 手順どおりに検証し、成功したら0を返す。失敗したら TestDbError を投げる */
 export async function runTestDb(deps: TestDbDeps): Promise<number> {
   const { root } = deps;
 
   // 1. 引数  2. Node の起動オプション  3. Docker の接続先を変える変数
-  const mode = parseTestDbArgs(deps.argv);
+  const { mode, apply } = parseTestDbArgs(deps.argv);
   if (deps.execArgv.length > 0) throw new TestDbError("NODE_EXEC_ARGV_PRESENT", "Node.js options for this script are not allowed.");
   if (deps.parentEnv.NODE_OPTIONS !== undefined && deps.parentEnv.NODE_OPTIONS !== "") {
     throw new TestDbError("NODE_OPTIONS_PRESENT", "NODE_OPTIONS is set; unset it before running this script.");
@@ -341,7 +666,7 @@ export async function runTestDb(deps: TestDbDeps): Promise<number> {
     throw new TestDbError("DOCKER_TARGET_ENV_PRESENT", `unset ${dockerTarget.join(", ")} before running this script.`);
   }
 
-  // 4. .env.test・.env  5. 検証（R14）  6. 子プロセスの環境変数（R15）
+  // 4. .env.test・.env  5. 検証（接続先と、R14のパスワード）  6. 子プロセスの環境変数（R15）
   const verified = verifyTestDbEnv(deps.readEnvFile(path.join(root, TEST_ENV_FILE)), deps.readEnvFile(path.join(root, DEVELOPMENT_ENV_FILE)));
   const { childEnv, droppedKeys } = buildComposeEnv(deps.parentEnv, verified);
 
@@ -351,18 +676,17 @@ export async function runTestDb(deps: TestDbDeps): Promise<number> {
   }
 
   // 8. Docker のコンテキスト（ファイルを読むだけで、デーモンには接続しない）
-  const docker = makeDocker(deps, childEnv, verified);
-  const context = (await docker(["context", "show"])).trim();
+  const docker = makeDocker(deps, childEnv, verified, apply);
+  const context = (await docker.read(["context", "show"])).trim();
   if (context !== EXPECTED_DOCKER_CONTEXT) {
     throw new TestDbError("DOCKER_CONTEXT_MISMATCH", `the docker context is not ${EXPECTED_DOCKER_CONTEXT}.`);
   }
 
-  // 9. Compose の構成（変数展開を含む）。出力は表示せず、プログラムの中で照合する
-  await docker(composeArgs(root, ["config", "--quiet"]));
-  const summary = verifyComposeConfig(await docker(composeArgs(root, ["config", "--format", "json"])), root, verified);
+  // 9. Compose の構成（変数展開を含む）。出力は表示せず、プログラムの中で照合する（サービスが test-db の1つだけであることも確かめる）
+  await docker.read(composeArgs(root, ["config", "--quiet"]));
+  const summary = verifyComposeConfig(await docker.read(composeArgs(root, ["config", "--format", "json"])), root, verified);
 
-  const header = [
-    `[testdb] ${mode} mode: no container was created, started, stopped or removed, and no database connection was made.`,
+  const details = [
     "",
     `connection target: verified ${verified.target.host}:${verified.target.port}/${verified.target.database} as ${verified.target.user} (password hidden)`,
     `passwords: ${TEST_ENV_FILE} values verified (not placeholders, allowed characters, URL password matches, admin differs)`,
@@ -372,30 +696,113 @@ export async function runTestDb(deps: TestDbDeps): Promise<number> {
     "docker compose config:",
     ...summary.map((line) => `  ${line}`),
   ];
+  const untouched = "no container was created, started, stopped or removed, and no database connection was made.";
   if (mode === "check") {
-    deps.log(header.join("\n"));
+    deps.log([`[testdb] check mode: ${untouched}`, ...details].join("\n"));
     return 0;
   }
 
-  // --status：katana-test プロジェクトのコンテナと、開発用DBの記録を読むだけ
-  const containers = parseComposePs(await docker(composeArgs(root, ["ps", "--all", "--format", "json"])));
-  const labeled = lines(await docker(["ps", "--all", "--filter", `label=com.docker.compose.project=${COMPOSE_PROJECT}`, "--format", "{{.Names}}"]));
-  const unexpected = [...containers.map((c) => String(c?.Name)), ...labeled].filter((name) => name !== TEST_CONTAINER);
-  if (unexpected.length > 0) {
-    throw new TestDbError("STATUS_UNEXPECTED_CONTAINER", `the ${COMPOSE_PROJECT} project has containers other than ${TEST_CONTAINER}.`);
+  // 10. katana-test プロジェクトの状態  11. 開発用DBの記録（どちらも読み取りだけ）
+  const before = await readSnapshot(root, docker);
+
+  if (mode === "status") {
+    const names = [...before.projectContainers.map((c) => c.name), ...before.labeledContainers];
+    if (names.some((name) => name !== TEST_CONTAINER)) {
+      throw new TestDbError("STATUS_UNEXPECTED_CONTAINER", `the ${COMPOSE_PROJECT} project has containers other than ${TEST_CONTAINER}.`);
+    }
+    deps.log([`[testdb] status mode: ${untouched}`, ...details, "", ...describeSnapshot(before)].join("\n"));
+    return 0;
   }
-  const developmentContainer = lines(await docker(["ps", "--all", "--filter", "name=^katana-db$", "--format", "{{.Names}}\t{{.Status}}"]));
-  const volumeExists = lines(await docker(["volume", "ls", "--filter", `name=^${DEVELOPMENT_VOLUME}$`, "--format", "{{.Name}}"])).includes(DEVELOPMENT_VOLUME);
-  const developmentVolume = volumeExists ? lines(await docker(["volume", "inspect", DEVELOPMENT_VOLUME, "--format", DEVELOPMENT_VOLUME_FORMAT])) : [];
-  const volumeUsers = lines(await docker(["ps", "--all", "--filter", `volume=${DEVELOPMENT_VOLUME}`, "--format", "{{.Names}}"]));
+
+  if (mode === "up") {
+    assertReadyForUp(before);
+    // イメージは取得しない（--pull never）。なければ止まる
+    if (!(await docker.probe(IMAGE_ARGS))) {
+      throw new TestDbError("IMAGE_MISSING", `the image ${TEST_IMAGE} is not present locally; this script does not pull images.`);
+    }
+    const upArgs = composeArgs(root, UP_SUBCOMMAND);
+    if (!apply) {
+      deps.log(
+        [
+          `[testdb] up mode (dry run; --apply was not given): ${untouched}`,
+          ...details,
+          "",
+          ...describeSnapshot(before),
+          "",
+          `would run: docker compose (fixed project, file, directory and env file) ${UP_SUBCOMMAND.join(" ")} (no shell)`,
+        ].join("\n"),
+      );
+      return 0;
+    }
+
+    await docker.mutate(upArgs);
+    // 起動後の確認。失敗しても、コンテナ・ボリュームは削除しない
+    const after = await readSnapshot(root, docker);
+    const inspect = containerInspectMismatches(await docker.read(INSPECT_ARGS), root, { running: true });
+    const mismatches = upPostCheckMismatches(before, after, inspect);
+    if (mismatches.length > 0) {
+      throw new TestDbError(
+        "POST_CHECK_FAILED",
+        `the check after up failed: ${mismatches.join(", ")}. Nothing was removed; inspect the state with --status before doing anything else.`,
+      );
+    }
+    deps.log(
+      [
+        `[testdb] up: ${TEST_CONTAINER} was created and started. This script made no database connection.`,
+        ...details,
+        "",
+        ...describeSnapshot(after),
+        "",
+        "post-up checks: passed (only the read-only init bind mount, tmpfs data directory, port 127.0.0.1:5434 only, healthy, no new volumes, development record unchanged)",
+      ].join("\n"),
+    );
+    return 0;
+  }
+
+  // mode === "down"
+  assertProjectContents(before);
+  if (!testContainerExists(before)) {
+    deps.log([`[testdb] down mode: there is no ${TEST_CONTAINER} container, so there is nothing to do. ${untouched}`, ...details, "", ...describeSnapshot(before)].join("\n"));
+    return 0;
+  }
+  const inspect = containerInspectMismatches(await docker.read(INSPECT_ARGS), root, { running: false });
+  if (inspect.length > 0) {
+    throw new TestDbError("CONTAINER_INSPECT_MISMATCH", `${TEST_CONTAINER} does not match the expected test database container: ${inspect.join(", ")}.`);
+  }
+  const downArgs = composeArgs(root, DOWN_SUBCOMMAND);
+  if (!apply) {
+    deps.log(
+      [
+        `[testdb] down mode (dry run; --apply was not given): ${untouched}`,
+        ...details,
+        "",
+        ...describeSnapshot(before),
+        "",
+        `would run: docker compose (fixed project, file, directory and env file) ${DOWN_SUBCOMMAND.join(" ")} (no shell; no --volumes, --remove-orphans or --rmi)`,
+        "with --apply, the test data on tmpfs will be lost.",
+      ].join("\n"),
+    );
+    return 0;
+  }
+
+  await docker.mutate(downArgs);
+  // 停止後の確認。失敗しても、コンテナ・ボリュームを作り直さない
+  const after = await readSnapshot(root, docker);
+  const mismatches = downPostCheckMismatches(before, after);
+  if (mismatches.length > 0) {
+    throw new TestDbError(
+      "POST_CHECK_FAILED",
+      `the check after down failed: ${mismatches.join(", ")}. Nothing was recreated; inspect the state with --status before doing anything else.`,
+    );
+  }
   deps.log(
     [
-      ...header,
+      `[testdb] down: ${TEST_CONTAINER} was stopped and removed (the test data on tmpfs is gone). No volume or image was removed.`,
+      ...details,
       "",
-      `${COMPOSE_PROJECT} containers: ${containers.length === 0 ? "none" : containers.map((c) => `${c.Name} (${c.State ?? "unknown"}${c.Health ? `, ${c.Health}` : ""})`).join(", ")}`,
-      `development container katana-db: ${developmentContainer.length === 0 ? "not present" : developmentContainer.join(", ")}`,
-      `development volume (name, created, compose project, compose volume): ${developmentVolume.length === 0 ? "not present" : developmentVolume.join(", ")}`,
-      `containers using the development volume: ${volumeUsers.length === 0 ? "none" : volumeUsers.join(", ")}`,
+      ...describeSnapshot(after),
+      "",
+      "post-down checks: passed (no test container, no new or removed volumes, development record unchanged)",
     ].join("\n"),
   );
   return 0;

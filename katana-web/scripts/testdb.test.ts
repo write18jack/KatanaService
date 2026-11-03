@@ -5,11 +5,14 @@ import {
   buildComposeEnv,
   type CommandResult,
   composeArgs,
+  DOWN_SUBCOMMAND,
+  isAllowedMutation,
   parseTestDbArgs,
   runTestDb,
   type TestDbDeps,
   TestDbError,
   type TestDbErrorCode,
+  UP_SUBCOMMAND,
   verifyComposeConfig,
   verifyTestDbEnv,
 } from "./testdb.mts";
@@ -60,6 +63,62 @@ function expectCode(fn: () => unknown, code: TestDbErrorCode) {
   for (const secret of SECRETS) expect((caught as Error).message).not.toContain(secret);
 }
 
+/** 偽の Docker が返す状態（読み取り系のコマンドの出力）。変更操作（up・down）の後は、afterUp・afterDown に切り替わる */
+type DockerState = {
+  ps: string;
+  labeled: string;
+  sameName: string;
+  projectVolumes: string;
+  volumes: string;
+  port: string;
+  devContainer: string;
+  devVolume: string;
+  devUsers: string;
+  /** undefined なら、コンテナがない（inspect が失敗する） */
+  inspect: string | undefined;
+};
+
+const DEV_VOLUME_ROW = "katana-web_postgres_data\t2026-07-18T05:42:41Z\tkatana-web\tpostgres_data\n";
+/** テストDBのコンテナがない状態（開発用ボリュームと、無名のボリューム1つがある） */
+const EMPTY: DockerState = {
+  ps: "",
+  labeled: "",
+  sameName: "",
+  projectVolumes: "",
+  volumes: "0df3f60a\nkatana-web_postgres_data\n",
+  port: "",
+  devContainer: "",
+  devVolume: DEV_VOLUME_ROW,
+  devUsers: "",
+  inspect: undefined,
+};
+
+/** docker inspect（CONTAINER_INSPECT_FORMAT）の出力 */
+function inspectJson(overrides: Record<string, unknown> = {}) {
+  return JSON.stringify({
+    project: "katana-test",
+    service: "test-db",
+    configFiles: path.join(ROOT, "docker-compose.test.yml"),
+    workingDir: ROOT,
+    state: "running",
+    health: "healthy",
+    mounts: [{ Type: "bind", Source: path.join(ROOT, "docker/test-db/init"), Destination: "/docker-entrypoint-initdb.d", Mode: "ro", RW: false }],
+    tmpfs: { "/var/lib/postgresql/data": "" },
+    ports: { "5432/tcp": [{ HostIp: "127.0.0.1", HostPort: "5434" }] },
+    ...overrides,
+  });
+}
+
+/** テストDBのコンテナが起動している状態 */
+const RUNNING: DockerState = {
+  ...EMPTY,
+  ps: '{"Name":"katana-test-db","Service":"test-db","State":"running","Health":"healthy"}\n',
+  labeled: "katana-test-db\n",
+  sameName: "katana-test-db\tkatana-test\n",
+  port: "katana-test-db\n",
+  inspect: inspectJson(),
+};
+
 type FakeOptions = {
   argv?: string[];
   execArgv?: string[];
@@ -67,26 +126,44 @@ type FakeOptions = {
   testEnv?: Record<string, string> | undefined;
   config?: string;
   context?: string;
-  ps?: string;
-  labeled?: string;
   fail?: { match: string; result: CommandResult };
+  state?: Partial<DockerState>;
+  afterUp?: Partial<DockerState>;
+  afterDown?: Partial<DockerState>;
+  image?: boolean;
+  /** up の結果（失敗させる場合）。状態は afterUp に切り替わる（失敗してもコンテナが残る場合の再現） */
+  upResult?: CommandResult;
 };
+
+const isMutation = (args: readonly string[]) => args[0] === "compose" && ["up", "down"].includes(args[9]);
 
 function fake(options: FakeOptions = {}) {
   const logs: string[] = [];
+  let state: DockerState = { ...EMPTY, ...options.state };
   const run = vi.fn<TestDbDeps["run"]>(async (_command, args) => {
     const joined = args.join(" ");
     if (options.fail && joined.includes(options.fail.match)) return options.fail.result;
     const ok = (stdout: string): CommandResult => ({ code: 0, stdout, stderr: "" });
+    if (isMutation(args)) {
+      state = args[9] === "up" ? { ...RUNNING, ...options.afterUp } : { ...EMPTY, ...options.afterDown };
+      return args[9] === "up" && options.upResult ? options.upResult : ok("");
+    }
     if (joined === "context show") return ok(`${options.context ?? "desktop-linux"}\n`);
     if (joined.endsWith("config --quiet")) return ok("");
     if (joined.endsWith("config --format json")) return ok(options.config ?? composeConfig());
-    if (joined.endsWith("ps --all --format json")) return ok(options.ps ?? "");
-    if (joined.includes("label=com.docker.compose.project")) return ok(options.labeled ?? "");
-    if (joined.includes("name=^katana-db$")) return ok("");
-    if (joined.startsWith("volume ls")) return ok("katana-web_postgres_data\n");
-    if (joined.startsWith("volume inspect")) return ok("katana-web_postgres_data\t2026-07-18T05:42:41Z\tkatana-web\tpostgres_data\n");
-    if (joined.includes("volume=katana-web_postgres_data")) return ok("");
+    if (joined.endsWith("ps --all --format json")) return ok(state.ps);
+    if (joined.startsWith("volume ls --filter label=")) return ok(state.projectVolumes);
+    if (joined === "volume ls --format {{.Name}}") return ok(state.volumes);
+    if (joined.startsWith("volume inspect")) return ok(state.devVolume);
+    if (joined.startsWith("ps --all --filter label=com.docker.compose.project=katana-test")) return ok(state.labeled);
+    if (joined.includes("name=^katana-test-db$")) return ok(state.sameName);
+    if (joined.includes("name=^katana-db$")) return ok(state.devContainer);
+    if (joined.includes("volume=katana-web_postgres_data")) return ok(state.devUsers);
+    if (joined.includes("publish=5434")) return ok(state.port);
+    if (joined.startsWith("image inspect")) return options.image === false ? { code: 1, stdout: "", stderr: "No such image" } : ok("sha256:abc\n");
+    if (joined.startsWith("inspect --type container")) {
+      return state.inspect === undefined ? { code: 1, stdout: "", stderr: "No such container" } : ok(state.inspect);
+    }
     throw new Error(`unexpected docker call: ${joined}`);
   });
   const files: Record<string, Record<string, string> | undefined> = {
@@ -103,7 +180,8 @@ function fake(options: FakeOptions = {}) {
     run,
     log: (text) => logs.push(text),
   };
-  return { deps, run, logs };
+  const mutations = () => run.mock.calls.filter(([, args]) => isMutation(args)).map(([, args]) => [...args]);
+  return { deps, run, logs, mutations };
 }
 
 async function expectStopped(f: ReturnType<typeof fake>, code: TestDbErrorCode) {
@@ -131,9 +209,13 @@ function expectOnlyReadOnlyCalls(run: ReturnType<typeof fake>["run"]) {
 }
 
 describe("parseTestDbArgs", () => {
-  it("--check と --status だけを受け付ける", () => {
-    expect(parseTestDbArgs(["--check"])).toBe("check");
-    expect(parseTestDbArgs(["--status"])).toBe("status");
+  it("--check・--status・--up・--down と、--up --apply・--down --apply だけを受け付ける", () => {
+    expect(parseTestDbArgs(["--check"])).toEqual({ mode: "check", apply: false });
+    expect(parseTestDbArgs(["--status"])).toEqual({ mode: "status", apply: false });
+    expect(parseTestDbArgs(["--up"])).toEqual({ mode: "up", apply: false });
+    expect(parseTestDbArgs(["--up", "--apply"])).toEqual({ mode: "up", apply: true });
+    expect(parseTestDbArgs(["--down"])).toEqual({ mode: "down", apply: false });
+    expect(parseTestDbArgs(["--down", "--apply"])).toEqual({ mode: "down", apply: true });
   });
 
   it.each([
@@ -148,6 +230,21 @@ describe("parseTestDbArgs", () => {
     [["--check", "--file", "docker-compose.yml"]],
     [["--check", "--env-file", ".env"]],
     [["--check", "--", "down", "-v"]],
+    [["--reset"]],
+    [["--reset", "--apply"]],
+    [["--apply"]],
+    [["--apply", "--up"]],
+    [["--check", "--apply"]],
+    [["--status", "--apply"]],
+    [["--up", "--down"]],
+    [["--up", "--apply", "--apply"]],
+    [["--up", "--APPLY"]],
+    [["--up", "-p", "katana-web"]],
+    [["--up", "--apply", "-f", "docker-compose.yml"]],
+    [["--down", "--volumes"]],
+    [["--down", "-v", "--apply"]],
+    [["--down", "--apply", "--remove-orphans"]],
+    [["--down", "--apply", "--rmi", "all"]],
   ])("%j は拒否する（別のプロジェクト・Composeファイル・env ファイルを指定できない）", (args) => {
     expectCode(() => parseTestDbArgs(args), "ARGUMENTS_INVALID");
   });
@@ -374,17 +471,351 @@ describe("runTestDb：停止条件（docker を呼ばない）", () => {
 
 describe("runTestDb：--status", () => {
   it("読み取り専用のコマンドだけを実行し、開発用ボリュームの記録を表示する", async () => {
-    const f = fake({ argv: ["--status"], ps: '{"Name":"katana-test-db","State":"running","Health":"healthy"}\n', labeled: "katana-test-db\n" });
+    const f = fake({ argv: ["--status"], state: RUNNING });
     await expect(runTestDb(f.deps)).resolves.toBe(0);
     expectOnlyReadOnlyCalls(f.run);
     const output = f.logs.join("\n");
     expect(output).toContain("katana-test-db (running, healthy)");
-    expect(output).toContain("development container katana-db: not present");
+    expect(output).toContain("development container katana-db (name, id, state): not present");
     expect(output).toContain("katana-web_postgres_data\t2026-07-18T05:42:41Z\tkatana-web\tpostgres_data");
     for (const secret of SECRETS) expect(output).not.toContain(secret);
   });
 
   it("katana-test プロジェクトに別のコンテナがあれば止まる", async () => {
-    await expectStopped(fake({ argv: ["--status"], labeled: "katana-test-db\nkatana-db\n" }), "STATUS_UNEXPECTED_CONTAINER");
+    await expectStopped(fake({ argv: ["--status"], state: { labeled: "katana-test-db\nkatana-db\n" } }), "STATUS_UNEXPECTED_CONTAINER");
+  });
+});
+
+describe("up・down の固定のコマンド", () => {
+  it("up は、対象のサービスを明示し、依存・ビルド・作り直し・イメージの取得をしない", () => {
+    expect([...UP_SUBCOMMAND]).toEqual([
+      "up",
+      "--detach",
+      "--wait",
+      "--wait-timeout",
+      "120",
+      "--no-deps",
+      "--no-build",
+      "--no-recreate",
+      "--pull",
+      "never",
+      "test-db",
+    ]);
+    expect(isAllowedMutation(ROOT, composeArgs(ROOT, UP_SUBCOMMAND))).toBe(true);
+  });
+
+  it("down は、--volumes・--remove-orphans・--rmi を使わない", () => {
+    expect([...DOWN_SUBCOMMAND]).toEqual(["down"]);
+    expect(isAllowedMutation(ROOT, composeArgs(ROOT, DOWN_SUBCOMMAND))).toBe(true);
+  });
+
+  it.each([
+    [["down", "--volumes"]],
+    [["down", "-v"]],
+    [["down", "--remove-orphans"]],
+    [["down", "--rmi", "all"]],
+    [["up", "--detach", "--remove-orphans", "test-db"]],
+    [["up", "--detach", "--renew-anon-volumes", "test-db"]],
+    [["up", "--detach", "--force-recreate", "test-db"]],
+    [["up", "--detach", "--build", "test-db"]],
+    [["up", "--detach", "--pull", "always", "test-db"]],
+    [["up", "--detach"]],
+    [["up", "--detach", "--wait", "--wait-timeout", "120", "--no-deps", "--no-build", "--no-recreate", "--pull", "never", "other-service"]],
+    [["start"]],
+    [["stop"]],
+    [["rm", "--force"]],
+  ])("katana-test プロジェクトでも、%j は変更操作として許可しない", (subcommand) => {
+    expect(isAllowedMutation(ROOT, composeArgs(ROOT, subcommand))).toBe(false);
+  });
+
+  it("別のプロジェクト・Composeファイル・作業ディレクトリ・env ファイルの up・down は許可しない", () => {
+    const fixed = composeArgs(ROOT, DOWN_SUBCOMMAND);
+    const variants = [
+      fixed.map((arg) => (arg === "katana-test" ? "katana-web" : arg)),
+      fixed.map((arg) => (arg === path.join(ROOT, "docker-compose.test.yml") ? path.join(ROOT, "docker-compose.yml") : arg)),
+      fixed.map((arg) => (arg === path.join(ROOT, ".env.test") ? path.join(ROOT, ".env") : arg)),
+      composeArgs("/other/katana-web", DOWN_SUBCOMMAND),
+      ["compose", "down"],
+      ["compose", "-p", "katana-test", "down"],
+    ];
+    for (const args of variants) expect(isAllowedMutation(ROOT, args)).toBe(false);
+  });
+});
+
+describe("runTestDb：--up（--apply なし）", () => {
+  it("起動前の確認だけを行い、変更操作をしない", async () => {
+    const f = fake({ argv: ["--up"] });
+    await expect(runTestDb(f.deps)).resolves.toBe(0);
+    expect(f.mutations()).toEqual([]);
+    expectOnlyReadOnlyCalls(f.run);
+    const output = f.logs.join("\n");
+    expect(output).toContain("dry run; --apply was not given");
+    expect(output).toContain(`would run: docker compose (fixed project, file, directory and env file) ${UP_SUBCOMMAND.join(" ")}`);
+    expect(output).toContain("katana-web_postgres_data\t2026-07-18T05:42:41Z\tkatana-web\tpostgres_data");
+    for (const secret of SECRETS) expect(output).not.toContain(secret);
+  });
+});
+
+describe("runTestDb：--up --apply", () => {
+  it("すべての確認に通れば、固定のコマンドで1回だけ起動し、起動後の確認を行う", async () => {
+    const f = fake({ argv: ["--up", "--apply"] });
+    await expect(runTestDb(f.deps)).resolves.toBe(0);
+    expect(f.mutations()).toEqual([composeArgs(ROOT, UP_SUBCOMMAND)]);
+    for (const [command, , options] of f.run.mock.calls) {
+      expect(command).toBe("docker");
+      expect(options).toMatchObject({ cwd: ROOT, shell: false });
+    }
+    // 起動の前に、状態の記録とイメージの確認を終えている。起動の後に、状態の記録と inspect を行う
+    const calls = f.run.mock.calls.map(([, args]) => args.join(" "));
+    const upIndex = calls.findIndex((_call, i) => isMutation(f.run.mock.calls[i][1]));
+    expect(calls.slice(0, upIndex).some((call) => call.startsWith("image inspect"))).toBe(true);
+    expect(calls.slice(0, upIndex).some((call) => call === "volume ls --format {{.Name}}")).toBe(true);
+    expect(calls.slice(upIndex + 1).some((call) => call.startsWith("inspect --type container katana-test-db"))).toBe(true);
+    const output = f.logs.join("\n");
+    expect(output).toContain("post-up checks: passed");
+    for (const secret of SECRETS) expect(output).not.toContain(secret);
+  });
+
+  it.each([
+    ["不正な引数", { argv: ["--up", "--apply", "--remove-orphans"] }, "ARGUMENTS_INVALID"],
+    ["Node の起動オプション", { execArgv: ["--import", "x"] }, "NODE_EXEC_ARGV_PRESENT"],
+    ["NODE_OPTIONS", { parentEnv: { PATH: "/usr/bin", NODE_OPTIONS: "--require x" } }, "NODE_OPTIONS_PRESENT"],
+    ["DOCKER_HOST", { parentEnv: { PATH: "/usr/bin", DOCKER_HOST: "tcp://remote:2375" } }, "DOCKER_TARGET_ENV_PRESENT"],
+    ["DOCKER_CONTEXT", { parentEnv: { PATH: "/usr/bin", DOCKER_CONTEXT: "remote" } }, "DOCKER_TARGET_ENV_PRESENT"],
+    [".env.test がない", { testEnv: undefined }, "TEST_ENV_MISSING"],
+    ["見本の値", { testEnv: { ...GOOD_ENV, KATANA_TEST_DB_ADMIN_PASSWORD: "CHANGE_ME_admin_password" } }, "PASSWORD_PLACEHOLDER"],
+    ["パスワードの不一致", { testEnv: { ...GOOD_ENV, KATANA_TEST_DB_PASSWORD: "other_pass" } }, "URL_PASSWORD_MISMATCH"],
+    ["想定外のキー", { testEnv: { ...GOOD_ENV, COMPOSE_PROJECT_NAME: "katana-web" } }, "TEST_ENV_UNEXPECTED_KEY"],
+    ["開発用DBの接続先", { testEnv: { ...GOOD_ENV, DATABASE_URL: DEV_URL } }, "TARGET_REJECTED"],
+  ] as const)("%s なら、docker を呼ばずに止まる", async (_label, options, code) => {
+    const f = fake({ argv: ["--up", "--apply"], ...(options as FakeOptions) });
+    await expectStopped(f, code);
+    expect(f.run).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["別のコンテキスト", { context: "remote-server" }, "DOCKER_CONTEXT_MISMATCH"],
+    ["別のプロジェクト名", { config: composeConfig({ top: { name: "katana-web" } }) }, "COMPOSE_CONFIG_MISMATCH"],
+    ["開発用ボリュームのマウント", { config: composeConfig({ service: { volumes: [{ type: "volume", source: "katana-web_postgres_data", target: "/var/lib/postgresql/data" }] } }) }, "COMPOSE_CONFIG_MISMATCH"],
+    ["トップレベルの volumes", { config: composeConfig({ top: { volumes: { postgres_data: {} } } }) }, "COMPOSE_CONFIG_MISMATCH"],
+    ["全インターフェースへの公開", { config: composeConfig({ service: { ports: [{ host_ip: "0.0.0.0", target: 5432, published: "5434" }] } }) }, "COMPOSE_CONFIG_MISMATCH"],
+    ["tmpfs なし", { config: composeConfig({ service: { tmpfs: undefined } }) }, "COMPOSE_CONFIG_MISMATCH"],
+    [
+      "サービスが2つ（不明なサービス）",
+      { config: JSON.stringify({ ...JSON.parse(composeConfig()), services: { ...JSON.parse(composeConfig()).services, other: { image: "redis" } } }) },
+      "COMPOSE_CONFIG_MISMATCH",
+    ],
+    ["config の失敗", { fail: { match: "config --quiet", result: { code: 1, stdout: "", stderr: `bad ${ADMIN} ${TEST_URL}` } } }, "DOCKER_COMMAND_FAILED"],
+    ["既存のテスト用コンテナ（起動中）", { state: RUNNING }, "TEST_CONTAINER_EXISTS"],
+    ["既存のテスト用コンテナ（停止中）", { state: { ...RUNNING, ps: '{"Name":"katana-test-db","Service":"test-db","State":"exited","Health":""}\n', port: "" } }, "TEST_CONTAINER_EXISTS"],
+    ["別のプロジェクトの同名コンテナ", { state: { sameName: "katana-test-db\tkatana-web\n" } }, "CONTAINER_NAME_CONFLICT"],
+    ["Compose のラベルがない同名コンテナ", { state: { sameName: "katana-test-db\t\n" } }, "CONTAINER_NAME_CONFLICT"],
+    ["プロジェクトの別のコンテナ", { state: { labeled: "katana-test-other\n" } }, "UNEXPECTED_CONTAINER"],
+    ["不明なサービス", { state: { ps: '{"Name":"katana-test-db","Service":"other","State":"running"}\n', labeled: "katana-test-db\n" } }, "UNEXPECTED_SERVICE"],
+    ["プロジェクトのボリューム", { state: { projectVolumes: "katana-test_data\n" } }, "UNEXPECTED_VOLUME"],
+    ["5434番を公開している別のコンテナ", { state: { port: "sample-db\n" } }, "PORT_IN_USE"],
+    ["イメージがない（取得しない）", { image: false }, "IMAGE_MISSING"],
+  ] as const)("%s なら、変更操作に進まずに止まる", async (_label, options, code) => {
+    const f = fake({ argv: ["--up", "--apply"], ...(options as FakeOptions) });
+    await expectStopped(f, code);
+    expect(f.mutations()).toEqual([]);
+    expectOnlyReadOnlyCalls(f.run);
+  });
+
+  it("起動に失敗したら止まり、stderr のパスワードを伏せ、後片付けの操作をしない", async () => {
+    const f = fake({ argv: ["--up", "--apply"], fail: { match: " up --detach", result: { code: 1, stdout: "", stderr: `failed ${ADMIN} ${APP} ${TEST_URL}` } } });
+    const error = await expectStopped(f, "DOCKER_COMMAND_FAILED");
+    expect(error.message).toContain("(hidden)");
+    // 失敗した up の1回だけ（down などを続けて呼ばない）
+    expect(f.run.mock.calls.filter(([, args]) => args[0] === "compose" && ["up", "down"].includes(args[9]))).toHaveLength(1);
+  });
+
+  it.each([
+    ["無名のボリュームが増えた（R7）", { volumes: "0df3f60a\nb1c2d3e4\nkatana-web_postgres_data\n" }, "volumes"],
+    ["プロジェクトのボリュームができた", { projectVolumes: "katana-test_data\n" }, "project volumes"],
+    ["開発用ボリュームの記録が変わった", { devVolume: "katana-web_postgres_data\t2026-11-03T00:00:00Z\tkatana-web\tpostgres_data\n" }, "development database record"],
+    ["開発用コンテナが現れた", { devContainer: "katana-db\tabc123\trunning\n" }, "development database record"],
+    ["healthy でない", { ps: '{"Name":"katana-test-db","Service":"test-db","State":"running","Health":"starting"}\n' }, "container state"],
+    ["volume 型のマウントがある", { inspect: inspectJson({ mounts: [{ Type: "volume", Name: "b1c2d3e4", Destination: "/var/lib/postgresql/data", RW: true }] }) }, "inspect: no volume mounts"],
+    ["tmpfs がない", { inspect: inspectJson({ tmpfs: null }) }, "inspect: tmpfs"],
+    ["全インターフェースへの公開", { inspect: inspectJson({ ports: { "5432/tcp": [{ HostIp: "0.0.0.0", HostPort: "5434" }] } }) }, "inspect: ports"],
+    ["初期化ディレクトリが書き込み可能", { inspect: inspectJson({ mounts: [{ Type: "bind", Source: path.join(ROOT, "docker/test-db/init"), Destination: "/docker-entrypoint-initdb.d", RW: true }] }) }, "inspect: mounts"],
+    ["別のプロジェクトのラベル", { inspect: inspectJson({ project: "katana-web" }) }, "inspect: project label"],
+  ])("起動後の確認で %s なら、POST_CHECK_FAILED で止まり、何も削除しない", async (_label, afterUp, item) => {
+    const f = fake({ argv: ["--up", "--apply"], afterUp });
+    const error = await expectStopped(f, "POST_CHECK_FAILED");
+    expect(error.message).toContain(item);
+    expect(error.message).toContain("Nothing was removed");
+    expect(f.mutations()).toEqual([composeArgs(ROOT, UP_SUBCOMMAND)]);
+  });
+});
+
+describe("runTestDb：--down", () => {
+  it("--apply がなければ、停止前の確認だけを行い、変更操作をしない", async () => {
+    const f = fake({ argv: ["--down"], state: RUNNING });
+    await expect(runTestDb(f.deps)).resolves.toBe(0);
+    expect(f.mutations()).toEqual([]);
+    expectOnlyReadOnlyCalls(f.run);
+    const output = f.logs.join("\n");
+    expect(output).toContain("dry run; --apply was not given");
+    expect(output).toContain("no --volumes, --remove-orphans or --rmi");
+    for (const secret of SECRETS) expect(output).not.toContain(secret);
+  });
+
+  it("--apply があれば、固定の down を1回だけ実行し、停止後の確認を行う", async () => {
+    const f = fake({ argv: ["--down", "--apply"], state: RUNNING });
+    await expect(runTestDb(f.deps)).resolves.toBe(0);
+    expect(f.mutations()).toEqual([composeArgs(ROOT, DOWN_SUBCOMMAND)]);
+    const [downArgs] = f.mutations();
+    for (const flag of ["--volumes", "-v", "--remove-orphans", "--rmi"]) expect(downArgs).not.toContain(flag);
+    expect(f.logs.join("\n")).toContain("post-down checks: passed");
+  });
+
+  it("停止中のテスト用コンテナも、確認に通れば down できる", async () => {
+    const stopped = { ...RUNNING, ps: '{"Name":"katana-test-db","Service":"test-db","State":"exited","Health":""}\n', port: "", inspect: inspectJson({ state: "exited", health: null }) };
+    const f = fake({ argv: ["--down", "--apply"], state: stopped });
+    await expect(runTestDb(f.deps)).resolves.toBe(0);
+    expect(f.mutations()).toHaveLength(1);
+  });
+
+  it("テスト用コンテナがなければ、何もしない（--apply があっても）", async () => {
+    const f = fake({ argv: ["--down", "--apply"] });
+    await expect(runTestDb(f.deps)).resolves.toBe(0);
+    expect(f.mutations()).toEqual([]);
+    expect(f.logs.join("\n")).toContain("nothing to do");
+  });
+
+  it.each([
+    ["別のコンテキスト", { context: "remote-server" }, "DOCKER_CONTEXT_MISMATCH"],
+    ["別のプロジェクト名", { config: composeConfig({ top: { name: "katana-web" } }) }, "COMPOSE_CONFIG_MISMATCH"],
+    ["プロジェクトの別のコンテナ（孤立したコンテナ）", { state: { ...RUNNING, labeled: "katana-test-db\nkatana-test-old\n" } }, "UNEXPECTED_CONTAINER"],
+    ["開発用コンテナがプロジェクトにある", { state: { ...RUNNING, labeled: "katana-test-db\nkatana-db\n" } }, "UNEXPECTED_CONTAINER"],
+    ["不明なサービス", { state: { ...RUNNING, ps: '{"Name":"katana-test-db","Service":"db","State":"running"}\n' } }, "UNEXPECTED_SERVICE"],
+    ["別のプロジェクトの同名コンテナ", { state: { ...RUNNING, sameName: "katana-test-db\tkatana-web\n" } }, "CONTAINER_NAME_CONFLICT"],
+    ["プロジェクトのボリューム", { state: { ...RUNNING, projectVolumes: "katana-test_data\n" } }, "UNEXPECTED_VOLUME"],
+    ["テスト用コンテナが開発用ボリュームを使っている", { state: { ...RUNNING, devUsers: "katana-test-db\n" } }, "DEVELOPMENT_VOLUME_IN_USE"],
+    ["volume 型のマウントがある", { state: { ...RUNNING, inspect: inspectJson({ mounts: [{ Type: "volume", Name: "katana-web_postgres_data", Destination: "/var/lib/postgresql/data", RW: true }] }) } }, "CONTAINER_INSPECT_MISMATCH"],
+    ["別のプロジェクトのラベル", { state: { ...RUNNING, inspect: inspectJson({ project: "katana-web" }) } }, "CONTAINER_INSPECT_MISMATCH"],
+    ["inspect がJSONでない", { state: { ...RUNNING, inspect: "not json" } }, "CONTAINER_INSPECT_INVALID"],
+    ["見本の値", { state: RUNNING, testEnv: { ...GOOD_ENV, KATANA_TEST_DB_PASSWORD: "CHANGE_ME_test_password" } }, "PASSWORD_PLACEHOLDER"],
+  ] as const)("%s なら、down に進まずに止まる", async (_label, options, code) => {
+    const f = fake({ argv: ["--down", "--apply"], ...(options as FakeOptions) });
+    await expectStopped(f, code);
+    expect(f.mutations()).toEqual([]);
+  });
+
+  it.each([
+    ["テスト用コンテナが残っている", { ...RUNNING }, "test container still exists"],
+    ["ボリュームが減った", { volumes: "0df3f60a\n" }, "volumes"],
+    ["開発用ボリュームの記録が変わった", { devVolume: "" }, "development database record"],
+  ])("停止後の確認で %s なら、POST_CHECK_FAILED で止まり、何も作り直さない", async (_label, afterDown, item) => {
+    const f = fake({ argv: ["--down", "--apply"], state: RUNNING, afterDown });
+    const error = await expectStopped(f, "POST_CHECK_FAILED");
+    expect(error.message).toContain(item);
+    expect(error.message).toContain("Nothing was recreated");
+    expect(f.mutations()).toEqual([composeArgs(ROOT, DOWN_SUBCOMMAND)]);
+  });
+});
+
+describe("runTestDb：障害時の --down（状態を問わず、同一性を確かめられるコンテナだけを対象にする）", () => {
+  /** state・health だけを変えたテスト用コンテナ（ラベル・マウント・ポート・tmpfs は正しい） */
+  function testContainer(state: string, health: string | null): DockerState {
+    return {
+      ...RUNNING,
+      ps: JSON.stringify({ Name: "katana-test-db", Service: "test-db", State: state, Health: health ?? "" }) + "\n",
+      port: state === "running" ? "katana-test-db\n" : "",
+      inspect: inspectJson({ state, health }),
+    };
+  }
+
+  it.each([
+    ["A. 正常に起動済み（healthy）", testContainer("running", "healthy")],
+    ["B. 起動途中（starting）", testContainer("running", "starting")],
+    ["C. 初期化の失敗（unhealthy）", testContainer("running", "unhealthy")],
+    ["D. 停止済み（exited）", testContainer("exited", null)],
+    ["作成だけされた（created。ポートの割り当ての失敗など）", testContainer("created", null)],
+  ])("%s でも、同一性を確かめられれば down できる", async (_label, state) => {
+    const f = fake({ argv: ["--down", "--apply"], state });
+    await expect(runTestDb(f.deps)).resolves.toBe(0);
+    expect(f.mutations()).toEqual([composeArgs(ROOT, DOWN_SUBCOMMAND)]);
+  });
+
+  it("E. up がタイムアウトした後に残ったコンテナを認識し、--down で片付けられる（自動では削除しない）", async () => {
+    const remnant = testContainer("running", "unhealthy");
+    // up --apply：--wait がタイムアウトで失敗し、コンテナは残る。ラッパーは down を呼ばない
+    const up = fake({ argv: ["--up", "--apply"], afterUp: remnant, upResult: { code: 1, stdout: "", stderr: "container katana-test-db is unhealthy" } });
+    await expectStopped(up, "DOCKER_COMMAND_FAILED");
+    expect(up.mutations()).toEqual([composeArgs(ROOT, UP_SUBCOMMAND)]);
+
+    // 次の up は、残ったコンテナを作り直さずに止まる
+    await expectStopped(fake({ argv: ["--up", "--apply"], state: remnant }), "TEST_CONTAINER_EXISTS");
+
+    // --status で状態が見え、--down（--apply なし）は変更操作をしない
+    const status = fake({ argv: ["--status"], state: remnant });
+    await runTestDb(status.deps);
+    expect(status.logs.join("\n")).toContain("katana-test-db (running, unhealthy)");
+    const dryRun = fake({ argv: ["--down"], state: remnant });
+    await runTestDb(dryRun.deps);
+    expect(dryRun.mutations()).toEqual([]);
+
+    // --down --apply で片付けられる
+    const down = fake({ argv: ["--down", "--apply"], state: remnant });
+    await expect(runTestDb(down.deps)).resolves.toBe(0);
+    expect(down.mutations()).toEqual([composeArgs(ROOT, DOWN_SUBCOMMAND)]);
+  });
+
+  it("停止済みのコンテナも見えるように、コンテナの一覧はすべて --all で読む", async () => {
+    const f = fake({ argv: ["--down"], state: testContainer("exited", null) });
+    await runTestDb(f.deps);
+    const listCalls = f.run.mock.calls.map(([, args]) => args.slice(args[0] === "compose" ? 9 : 0)).filter((sub) => sub[0] === "ps");
+    expect(listCalls.length).toBeGreaterThan(0);
+    for (const sub of listCalls) expect(sub).toContain("--all");
+  });
+
+  it.each([
+    ["別のプロジェクトのラベル", { project: "katana-web" }],
+    ["プロジェクトのラベルがない", { project: null }],
+    ["別のサービスのラベル", { service: "db" }],
+    ["別の Compose ファイルから作られた", { configFiles: path.join(ROOT, "docker-compose.yml") }],
+    ["複数の Compose ファイルから作られた", { configFiles: `${path.join(ROOT, "docker-compose.test.yml")},${path.join(ROOT, "docker-compose.yml")}` }],
+    ["別の作業ディレクトリから作られた", { workingDir: "/other/katana-web" }],
+    ["開発用ボリュームをマウントしている", { mounts: [{ Type: "volume", Name: "katana-web_postgres_data", Destination: "/var/lib/postgresql/data", RW: true }] }],
+    ["tmpfs がない", { tmpfs: null }],
+    ["5433番を公開している", { ports: { "5432/tcp": [{ HostIp: "127.0.0.1", HostPort: "5433" }] } }],
+  ])("unhealthy のコンテナでも、%s なら down しない", async (_label, overrides) => {
+    const state = { ...testContainer("running", "unhealthy"), inspect: inspectJson({ state: "running", health: "unhealthy", ...overrides }) };
+    const f = fake({ argv: ["--down", "--apply"], state });
+    const error = await expectStopped(f, "CONTAINER_INSPECT_MISMATCH");
+    expect(error.message).not.toContain("/other");
+    expect(f.mutations()).toEqual([]);
+  });
+
+  it.each([
+    ["他のプロジェクトの同名コンテナ（停止済み）", { ...testContainer("exited", null), sameName: "katana-test-db\tkatana-web\n" }, "CONTAINER_NAME_CONFLICT"],
+    ["ラベルのない同名コンテナ（停止済み）", { ...EMPTY, sameName: "katana-test-db\t\n" }, "CONTAINER_NAME_CONFLICT"],
+    ["他のプロジェクトのコンテナが、ラベルの一覧に混ざっている", { ...testContainer("exited", null), labeled: "katana-test-db\nsample-db\n" }, "UNEXPECTED_CONTAINER"],
+    ["不明なサービス（unhealthy）", { ...testContainer("running", "unhealthy"), ps: '{"Name":"katana-test-db","Service":"cache","State":"running","Health":"unhealthy"}\n' }, "UNEXPECTED_SERVICE"],
+    ["開発用ボリュームを使っている（exited）", { ...testContainer("exited", null), devUsers: "katana-test-db\n" }, "DEVELOPMENT_VOLUME_IN_USE"],
+  ] as const)("%s なら、down を実行しない", async (_label, state, code) => {
+    const f = fake({ argv: ["--down", "--apply"], state: state as DockerState });
+    await expectStopped(f, code);
+    expect(f.mutations()).toEqual([]);
+  });
+
+  it("inspect が失敗したら（対象を特定できない）、down を実行しない", async () => {
+    const f = fake({ argv: ["--down", "--apply"], state: { ...testContainer("exited", null), inspect: undefined } });
+    await expectStopped(f, "DOCKER_COMMAND_FAILED");
+    expect(f.mutations()).toEqual([]);
+  });
+
+  it.each([
+    ["healthy", testContainer("running", "healthy")],
+    ["unhealthy", testContainer("running", "unhealthy")],
+    ["exited", testContainer("exited", null)],
+  ])("--apply がなければ、%s のコンテナでも変更操作をしない", async (_label, state) => {
+    const f = fake({ argv: ["--down"], state });
+    await expect(runTestDb(f.deps)).resolves.toBe(0);
+    expect(f.mutations()).toEqual([]);
+    expectOnlyReadOnlyCalls(f.run);
   });
 });

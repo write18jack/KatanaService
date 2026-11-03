@@ -1,8 +1,12 @@
 # テスト専用DB（docs/PLAN-test-db-isolation.md の 2-1・2-5）。開発用の docker-compose.yml とは別のプロジェクト。
 #
-# 操作は scripts/testdb.mts（npm run testdb:check・testdb:status。今は読み取り専用で、up・down・reset は未実装）からだけ行い、次の形で必ず -p・-f・--env-file を付ける:
-#   docker compose -p katana-test -f docker-compose.test.yml --env-file .env.test <config|ps|up -d --wait|down|logs>
-# `down -v`・`--remove-orphans`・volume の削除は使わない。
+# 操作は scripts/testdb.mts からだけ行う。ラッパーは、次の形で必ず -p・-f・--project-directory・--env-file を（絶対パスで）付ける:
+#   docker compose -p katana-test -f docker-compose.test.yml --project-directory . --env-file .env.test <config|ps|up|down>
+# - npm run testdb:check・testdb:status：読み取りだけ。
+# - npm run testdb:up -- --apply：実装済み（実際の起動は未検証）。`--apply` がなければ、確認と予定のコマンドの表示だけ。
+# - npm run testdb:down -- --apply：実装済み（実際の停止は未検証）。`--apply` がなければ、確認と予定のコマンドの表示だけ。
+# - reset：未実装。
+# `down -v`・`--remove-orphans`・`--rmi`・volume の削除は使わない。
 #
 # - データは tmpfs に置く。コンテナを作り直すと消える。名前付きボリュームは使わない（トップレベルに volumes を書かない）。
 # - パスワードはこのファイルに書かない。.env.test の値を Compose の変数展開で受け取る（未設定なら起動前にエラー）。

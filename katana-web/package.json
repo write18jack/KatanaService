@@ -14,7 +14,9 @@
     "testdb:migrate": "node scripts/testdb-migrate.mts",
     "testdb:migrate:check": "node scripts/testdb-migrate.mts --check",
     "testdb:check": "node scripts/testdb.mts --check",
-    "testdb:status": "node scripts/testdb.mts --status"
+    "testdb:status": "node scripts/testdb.mts --status",
+    "testdb:up": "node scripts/testdb.mts --up",
+    "testdb:down": "node scripts/testdb.mts --down"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
