@@ -105,14 +105,9 @@ export function prepareIntegrationEnv(input: {
     throw new IntegrationRunnerError("NODE_OPTIONS is set; unset it before running integration tests.");
   }
 
-  // NODE_ENV は親から引き継がず、Vitest が未設定時に使う値（test）を明示する
-  const childEnv: PreparedIntegrationEnv["childEnv"] = { NODE_ENV: "test" };
-  const droppedKeys: string[] = [];
-  for (const [key, value] of Object.entries(parentEnv)) {
-    if (value === undefined) continue;
-    if (INHERITED_ENV_KEYS.has(key) || INHERITED_ENV_PATTERN.test(key)) childEnv[key] = value;
-    else droppedKeys.push(key);
-  }
+  // NODE_ENV は親から引き継がず（許可リストにない）、Vitest が未設定時に使う値（test）を明示する
+  const { inherited, droppedKeys } = inheritAllowedEnv(parentEnv);
+  const childEnv: PreparedIntegrationEnv["childEnv"] = { NODE_ENV: "test", ...inherited };
 
   const databaseUrl = testEnv.DATABASE_URL;
   if (databaseUrl !== undefined) childEnv.DATABASE_URL = databaseUrl;
@@ -120,7 +115,22 @@ export function prepareIntegrationEnv(input: {
   childEnv.KATANA_TEST_RUNNER = "script";
 
   const target = verifyTarget(databaseUrl, childEnv, developmentEnv);
-  return { childEnv, target, droppedKeys: droppedKeys.sort() };
+  return { childEnv, target, droppedKeys };
+}
+
+/**
+ * 親の環境変数のうち、許可リストのものだけを取り出す。runner と testdb-migrate の子プロセスで共通に使う。
+ * PG*・DOTENV_*・NODE_OPTIONS・DATABASE_URL・PRISMA_* などは、すべて droppedKeys（名前順）に入る。
+ */
+export function inheritAllowedEnv(parentEnv: EnvSource): { inherited: Record<string, string>; droppedKeys: string[] } {
+  const inherited: Record<string, string> = {};
+  const droppedKeys: string[] = [];
+  for (const [key, value] of Object.entries(parentEnv)) {
+    if (value === undefined) continue;
+    if (INHERITED_ENV_KEYS.has(key) || INHERITED_ENV_PATTERN.test(key)) inherited[key] = value;
+    else droppedKeys.push(key);
+  }
+  return { inherited, droppedKeys: droppedKeys.sort() };
 }
 
 /**

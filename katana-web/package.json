@@ -10,7 +10,9 @@
     "test": "vitest run",
     "test:unit": "vitest run",
     "test:integration": "node scripts/test-integration.mts",
-    "test:integration:check": "node scripts/test-integration.mts --check"
+    "test:integration:check": "node scripts/test-integration.mts --check",
+    "testdb:migrate": "node scripts/testdb-migrate.mts",
+    "testdb:migrate:check": "node scripts/testdb-migrate.mts --check"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

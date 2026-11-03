@@ -1,7 +1,7 @@
 # 計画：専用テストDBの構築とVitest統合テストの分離
 
 作成日: 2026-10-26
-更新日: 2026-11-03（Step 3-8（接続後の本人確認と空DB検査）の実施結果を反映）
+更新日: 2026-11-03（Step 3-8Aのcommit `4b788e7` と、Step 3-8B（`prisma.config.ts` のガードとmigration用スクリプト）の実施結果・Prisma CLIによる設定読み込みの検証結果を反映）
 作業ブランチ: `chore/test-db-isolation`（`fix-dashboard` の `6168889` から作成）
 
 ## 状態
@@ -10,7 +10,7 @@
 |---|---|
 | Phase 1：読み取り専用の調査 | **実施済み**（結果は本ファイルの1章） |
 | Phase 2：安全設計 | **設計レビュー完了**（確定設計は本ファイルの2章） |
-| Phase 3：実装 | **実施中**（Step 3-0〜3-7B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712` でcommit。Step 3-8（接続後の本人確認と空DB検査。当初の3-8とは内容が違う）は**未commit**。次のStepはユーザーに確認する。結果は3章の「3-A. 実施結果」） |
+| Phase 3：実装 | **実施中**（Step 3-0〜3-8B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712`、Step 3-8A（接続後の本人確認と空DB検査）は `4b788e7` でcommit。Step 3-8B（当初の3-8：`prisma.config.ts` のガードとmigration用スクリプト）は、`prisma validate` による設定読み込みの検証の後、commit `test: guard Prisma CLI and add test DB migration runner` でcommit。次は **Step 3-9**（開始前にユーザーに確認する）。結果は3章の「3-A. 実施結果」） |
 | Phase 4：検証 | **未着手** |
 
 F-01の判定は **CONDITIONAL PASS のまま**。実DB・Cookie・HTTPでの検証は、Phase 4のE2Eで行う。
@@ -340,7 +340,7 @@ npm run test:integration ─► 専用runner
 
 ## 3. Phase 3：実装順序（実施中）
 
-### 3-A. 実施結果（2026-11-02時点）
+### 3-A. 実施結果（2026-11-03時点）
 
 | Step | 状態 | commit |
 |---|---|---|
@@ -355,7 +355,8 @@ npm run test:integration ─► 専用runner
 | 3-6 | 完了（`npm test` を2回実行し、すべて成功） | `824d54b`（PLANの更新を含む） |
 | 3-7 | 統合テスト用runner・専用設定の作成完了（globalSetupは意図的に必ず停止） | `d087712`（`test: add fail-closed integration test runner`） |
 | 3-7B | runnerの確認モードの検証・`.env.test` のGit保護の確認 | `d087712`（変更はPLANだけ） |
-| 3-8 | ユーザーの指示により、接続後の本人確認と空DB検査を実装（DB非接続の単体テストのみ。globalSetupからはまだ呼ばない）。当初の3-8（`prisma.config.ts` のガードとmigration用スクリプト）は**未実施** | **未commit** |
+| 3-8A | ユーザーの指示により、接続後の本人確認と空DB検査を実装（DB非接続の単体テストのみ。実DBでの動作確認と、globalSetupへの組み込みは**未実施**） | `4b788e7`（`test: add integration database identity and empty checks`） |
+| 3-8B | 当初の3-8：`prisma.config.ts` のガードとテストDB専用migrationスクリプト（DB非接続の単体テスト、静的検証、`prisma validate` による設定読み込みの検証。実DBへの接続・`migrate deploy` は未実施。通常実行モードは、接続後の本人確認が未実装のため必ず停止する） | `test: guard Prisma CLI and add test DB migration runner` |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -493,9 +494,10 @@ npm run test:integration ─► 専用runner
 - **未実施・未検証:** runnerの通常実行モード（子プロセスに渡る環境変数と、globalSetupで停止することの実行時の確認）、実DBへの接続、統合テストの実行、Docker・Prisma CLI・migration・seed・build。
 - 次のStepは **Step 3-8**。
 
-**Step 3-8（接続後の本人確認と空DB検査。ユーザーの指示による）**
+**Step 3-8A（接続後の本人確認と空DB検査。ユーザーの指示による。`4b788e7` でcommit）**
 
-- 下の「Step 3-8」の節（`prisma.config.ts` のガードとmigration用スクリプト）とは内容が違う。ユーザーの指示で、2-2の接続後の照合と2-3の開始前の読み取り確認を先に実装した。当初の3-8の作業は未実施のまま残っている。
+- 下の「Step 3-8」の節（`prisma.config.ts` のガードとmigration用スクリプト）とは内容が違う。ユーザーの指示で、2-2の接続後の照合と2-3の開始前の読み取り確認を先に実装した。当初の3-8の作業は、Step 3-8Bで実施した。
+- 以下の「未追跡・未commit」「未commit」は記録した時点の状態。すべて `4b788e7` に含まれる。
 - 作成（未追跡・未commit）:
   - `lib/testing/integrationDatabaseCheck.ts`：`verifyIntegrationDatabase()`。DBドライバを読み込まず、接続は `connect`（pg.Client 互換の `query`・`end`）として呼び出し側が渡す。
   - `lib/testing/integrationDatabaseCheck.test.ts`：偽のクライアントによる単体テスト54件（pg・Prisma Client は読み込まない）。
@@ -512,6 +514,98 @@ npm run test:integration ─► 専用runner
   - 実際の接続には `pg` が必要。静的検査の規則1は `pg` を `lib/prisma.ts`・`prisma/seed.ts` 以外で禁止しているので、`lib/testing/integrationGlobalSetup.ts` の1ファイルだけを許可リストに足す（ディレクトリ単位では許可しない）か、`lib/prisma.ts` 経由で照合するかを、その時に決める。安全条件は「`verifyIntegrationDatabase()` の中で、接続前の検証に通った後にだけ `connect` が呼ばれること」。
   - 強制停止の `throw` を外すのは、DBへの接続の承認を得たStepで行う。
 - **未実施・未検証:** 実DBに対する本人確認・空DB検査（SQLが実際のPostgreSQL 15で期待どおりに動くこと、`shobj_description`・`pg_class` の読み取り権限）、Docker・Prisma CLI・migration・seed・build、統合テストの実行、runnerの通常実行モード。
+
+**Step 3-8B（当初の3-8：`prisma.config.ts` のガードとテストDB専用migrationスクリプト）**
+
+- 作成（いずれも未追跡・未commit）:
+  - `lib/db/prismaCliGuard.ts`：`resolvePrismaCliDatabaseTarget()`。`prisma.config.ts` から呼ぶ純粋関数。`.env.test`・`.env` の読み込みは関数として受け取り、テストDBモードのときだけ呼ぶ。
+  - `lib/db/prismaCliGuard.test.ts`：37件。`prisma.config.ts` は読み込まず、ソースを文字列として確かめるだけ。
+  - `lib/testing/testDbMigrate.ts`：`runTestDbMigrate()`。migrationの手順の本体。ファイルの読み込み、存在確認、接続後の本人確認、子プロセスの起動、表示は、すべて引数で受け取る。
+  - `lib/testing/testDbMigrate.test.ts`：28件。偽の関数を使うので、Prisma CLIは起動せず、DBにも接続しない。
+  - `scripts/testdb-migrate.mts`：実際の入出力をつなぐだけの薄いスクリプト。
+- 変更（未commit）:
+  - `prisma.config.ts`
+  - `package.json`：`testdb:migrate`・`testdb:migrate:check` を追加。
+  - `lib/testing/integrationEnv.ts`：許可リストで環境変数を引き継ぐ処理を、`inheritAllowedEnv()` として切り出した。runnerの子プロセスに渡す環境変数と、落とす変数の一覧は変わらない。
+  - `lib/testing/dbConnectionPaths.test.ts`：通常テストの期待件数を25件から27件にした。許可リストと規則は変えていない。
+- **`prisma.config.ts` のガード**（`import "dotenv/config"` の後、`defineConfig` の前に、モジュールの読み込み時に実行する）:
+  - `KATANA_DB_TARGET` が未設定のとき：これまでどおり `env("DATABASE_URL")` を使う。`.env.test`・`.env` は読まない。
+    - 例外として、`DATABASE_URL` がテストDBに見える場合は拒否する（`TEST_URL_WITHOUT_TEST_TARGET`）。テストDBに見えるとは、次のどれかに当てはまること：DB名が `katana_test`、ユーザーが `katana_test_user`、ループバックのホストでポートが5434。
+    - URLを解析できない場合や、ほかの接続先の場合は、これまでどおりの動作になる。
+  - `KATANA_DB_TARGET=test` のとき：
+    1. `NODE_OPTIONS` と、`dotenv_config_*=` の形のコマンドライン引数がないことを確かめる。
+    2. 作業ディレクトリの `.env.test` を読む。ない場合は `TEST_ENV_MISSING`。
+    3. `.env.test` の `DATABASE_URL` を `assertTestDatabaseTarget()` で検証する。環境変数の検査は、dotenvが読み込んだ後の `process.env` に対して行い、開発用DBとの比較には `.env` の値を使う。
+    4. プロセスの `DATABASE_URL` が、検証済みの値と完全に一致することを確かめる（`DATABASE_URL_MISMATCH`）。一致しない例は、dotenvが `.env` の開発用URLを補った場合や、未設定の場合。
+    5. ここまですべて通ったら、検証済みの値を使う。テストDBモードから開発用のURLに切り替える分岐はない。
+  - `KATANA_DB_TARGET` がそれ以外の値（空文字・`TEST` など）のとき：拒否する（`TARGET_INVALID`）。
+  - エラー（`PrismaCliGuardError`）には、エラーコードだけを含める。URL・パスワード・拒否した値は含めない。
+  - Prisma 7.2.0の仕組み（ソースで確認済み）：Prisma CLIは、設定ファイルをc12/jitiで読み込む（`dotenv: false`）。設定ファイルで例外が出ると、`Failed to load config file … Error: ${error}` を表示して終了コード1で終わり、既定の設定に戻ることはない。Prisma CLIは `.env` を自動では読まない。
+- **migrationスクリプトの実行順序**（途中で失敗したら、その時点で止める）:
+  1. 引数：なし、または `--check` だけを受け付ける。
+  2. Nodeの起動オプション：`process.execArgv` が空で、`NODE_OPTIONS` が設定されていないこと。
+  3. `.env.test` を読む。
+  4. `.env` から開発用DBのURLを取得する。
+  5. URLを検証する。
+  6. 子プロセスの環境変数を作り、完成した環境変数でもう一度検証する。
+  7. Prisma CLIの本体・`prisma.config.ts`・`schema.prisma`・`prisma/migrations` があることを確かめる。確認モードは、ここで表示して終了する。
+  8. 接続後の本人確認（2-7の4）。
+  9. すべて成功した場合だけ、子プロセスを起動する。
+- コマンドは `node node_modules/prisma/build/index.js migrate deploy --config <root>/prisma.config.ts` に固定した。`shell: false`、作業ディレクトリは `katana-web/`。外部から引数を渡す経路はない。`migrate deploy` を選んだ理由：未適用のmigrationを適用するだけで、DBの作り直し・Prisma Clientの生成・seedを行わないため。
+- 子プロセスの環境変数：
+  - 親から引き継ぐのは、runnerと同じ許可リストの変数（`PATH`・`HOME`・`LC_*` など）だけ。
+  - それに、検証済みの `DATABASE_URL` と `KATANA_DB_TARGET=test` を加える。
+  - 引き継がないもの：`PG*`・`DOTENV_*`・`NODE_OPTIONS`・`PRISMA_*`・親の `DATABASE_URL`・`KATANA_*`。`NODE_ENV` も設定しない。
+- 確認モード（`npm run testdb:migrate:check`）：表示するのは、次の5つ。DATABASE_URLの全文とパスワードは表示しない。
+  - 検証に通った接続先（`127.0.0.1:5434/katana_test`、ユーザー `katana_test_user`。2-7の3）
+  - 作業ディレクトリ
+  - 実行する予定のコマンド
+  - 子プロセスの環境変数（`DATABASE_URL` は伏せる）
+  - 親から落とした主な変数の名前
+
+  本人確認と子プロセスの起動は行わない。
+- **設計との違い:**
+  - 2-7の4（DBのコメントの照合）は、DBへの接続が必要なため実装していない。スクリプトは、本人確認の関数として、必ず `IDENTITY_CHECK_NOT_IMPLEMENTED` を投げる仮の関数を渡している。そのため、**`npm run testdb:migrate` の通常実行モードは、Prisma CLIを起動する前に必ず停止する**（runnerのglobalSetupと同じく、安全側に倒した形）。
+  - 次の2つは、設計（2-7）にはなかった拒否条件として追加した：テストモードなしでテストDBに見えるURLを使う場合（`TEST_URL_WITHOUT_TEST_TARGET`）と、`KATANA_DB_TARGET` が `test` 以外の値の場合（`TARGET_INVALID`）。
+  - 静的検査の許可リスト（2-4・3-4）には、`scripts/testdb*` を加えていない。このスクリプトは `pg` もPrisma Clientも読み込まないため。
+- 確認済み:
+  - `npx tsc --noEmit` と、変更した8ファイルの `eslint` が成功した。
+  - 新しい単体テストは65件（37件＋28件）がすべて成功した。`dbConnectionPaths.test.ts` も148件成功し、違反は0件。
+  - `npm test` は27ファイル・638件が成功した（573件＋65件）。
+  - `npx vitest list --filesOnly` は27件で、`*.integration.test.*` は0件。統合テスト用の設定では6件。
+  - 確認モードを `NODE_DEBUG=child_process` を付けて実行した（`.env.test` はない状態）。次のどの場合も終了コード1で止まり、スクリプトは子プロセスを起動しなかった（記録された `spawn` は、npm自身が起動した `sh -c` だけ）：`.env.test` がない（`TEST_ENV_MISSING`）、未対応の引数（`ARGUMENTS_INVALID`）、`NODE_OPTIONS` がある、Nodeの起動オプションがある。
+- **残る迂回の経路（R3）:** 次のどれかを直接実行すると、テストDB用のガードを通らない。
+  - `KATANA_DB_TARGET` を付けない、`npx prisma …` の直接実行。`migrate reset`・`db push`・`studio` なども含む。これまでどおり `.env` の開発用DBに接続する。ただし、`DATABASE_URL` がテストDBに見える場合は拒否される。
+  - `--config` で別の設定ファイルを指定する。
+  - `prisma/seed.ts` の実行（R4）。
+  - URLを直接受け取るCLIのオプション（`db execute --url` など。Prisma 7で残っているオプションは未確認）。
+
+  `KATANA_DB_TARGET=test` を付けて、テストDBのURLを明示的に設定すれば、`migrate deploy` 以外のコマンド（`migrate reset` など）もテストDBに対して実行できる。ただし、接続先はテストDBに限られる。対策は、これまでどおり運用ルールとCLAUDE.mdへの明記（2-7）。
+- **Prisma CLIによる設定読み込みの検証（ユーザーの承認を得て実施。実行したPrisma CLIのコマンドは `validate` だけ）:**
+  - 実行方法：ローカルのCLI（`./node_modules/.bin/prisma`。npxは使わない）を、作業ディレクトリ `katana-web/` で実行した。毎回 `env -i PATH="$PATH" HOME="$HOME"` で環境変数を空にし、接続先はすべて架空の値にした。`prisma validate` は、スキーマの読み込み・lint・検証・DMMFの生成だけを行い、接続先のURLを使わない（CLIのソースで確認）。
+  - 通常モード（`KATANA_DB_TARGET` なし。接続できないダミーのURL）：終了コード0。`Loaded Prisma config from prisma.config.ts.` と `The schema at prisma/schema.prisma is valid` が表示された。jitiが、拡張子付きの相対importと `import { type … }` を処理できることを確認した。実行の前後で、`git status --ignored` と `git diff` のハッシュは変わらなかった。
+  - 通常モードで、テストDBに見えるURL（`katana_test_user@127.0.0.1:5434/katana_test`）を指定した場合：終了コード1。エラーは `TEST_URL_WITHOUT_TEST_TARGET`で、スキーマの処理には進まなかった。
+  - テストモード（`KATANA_DB_TARGET=test`）：一時的な `.env.test`（`umask 077`、権限 `-rw-------`、架空の認証情報）を作って実行した。
+    - プロセスの `DATABASE_URL` が `.env.test` の値と完全に一致し、PG*・DOTENV_*・NODE_OPTIONS がない場合：終了コード0で、設定の読み込みとスキーマの検証に成功した。
+    - プロセスの `DATABASE_URL` だけを別の値にした場合：終了コード1。エラーは `DATABASE_URL_MISMATCH` で、スキーマの処理には進まなかった。
+  - migrationの確認モード（同じ一時的な `.env.test` がある状態で `npm run testdb:migrate:check`。`NODE_DEBUG=child_process` 付き）：終了コード0。
+    - 接続先は `127.0.0.1:5434/katana_test`（ユーザー `katana_test_user`）として検証に通った。
+    - 予定のコマンドは `node node_modules/prisma/build/index.js migrate deploy --config prisma.config.ts (no shell)` と表示された。
+    - 子プロセスの環境変数は、許可リストの変数・`DATABASE_URL=(hidden)`・`KATANA_DB_TARGET=test` だけだった。
+    - 記録された `spawn` は、npm自身の `sh -c` だけだった。
+  - すべての出力で、パスワード・`postgresql://`・URLの全文が0件であることを確かめた。一時的な `.env.test` は、検証の後に削除した。`.env`・`.env.local` のハッシュは、実行の前後で変わらなかった。
+  - 表示の小さな問題（変更していない）：設定の読み込みに失敗したとき、Prismaが表示するパスが、ファイルではなくディレクトリ（`…/katana-web`）になる。Prismaが、エラーメッセージの中の `prisma.config.<拡張子>` という文字列からファイル名を推定しているため。動作には影響しない。
+  - 実行中に、CLIが「Update available 7.2.0 -> 8.0.0-rc.29」と表示した。Prisma CLIは、更新の確認などで外部と通信する（DBへの接続ではない）。
+- 通常テスト：`npm test` は27ファイル・638件すべて成功（記録は上の「確認済み」）。
+- **未実施・未検証:**
+  - 実DBへの接続。`migrate deploy` の実際の適用（Step 3-12）。
+  - 接続後のDBの本人確認（2-7の4）。**未実装**。通常実行モードは必ず停止する。
+  - `.env` から `DATABASE_URL` を補う、いつもの開発用の操作（`generate`・`migrate dev` など）での設定の読み込み。同じ設定ファイルを使うので動く見込みだが、実行していない。
+  - Prisma CLIの外部との通信を止める設定（`CHECKPOINT_DISABLE` など）は、検討していない。
+- 気づいた点（変更していない）：`scripts/test-integration.mts` の確認モードは、コマンドを表示するときに `path.relative(ROOT, arg)` を相対の引数（`run` など）にも使っている。作業ディレクトリがルートのときは正しく表示されるので、今は実害がない。`testDbMigrate.ts` では、絶対パスだけを変換するようにした。
+- **申し送り:**
+  - 本人確認を組み込むとき：仮の関数を、DBのコメント（`katana-test-db`）・`current_database()`・`current_user` を照合する関数に置き換える。`verifyIntegrationDatabase()` は、migration済みのテーブル構成まで確かめるので、migrationの前には使えない。本人確認の部分だけを分ける必要がある。`pg` を使う場合は、静的検査の許可リストに `scripts/testdb-migrate.mts` の1ファイルだけを加えるかどうかを、その時に決める。
+  - CLAUDE.mdへの追記案（Step 3-13）には、「テストDBにはPrisma CLIを直接実行せず、`npm run testdb:migrate` を使う」を入れる。
 
 全Stepに共通する事項:
 
@@ -622,7 +716,7 @@ npm run test:integration ─► 専用runner
 - **承認が必要な操作:** 否定テストの実行（接続の前に停止することが前提）。
 - **停止条件:** ガードより先に、接続を試みた形跡がある。
 
-### Step 3-8：`prisma.config.ts` のガードとmigration用スクリプト
+### Step 3-8：`prisma.config.ts` のガードとmigration用スクリプト（Step 3-8Bとして実施済み。実装した仕様は3-Aの記録が正）
 
 - **作業内容:** 2-7のガードと、`testdb-migrate` スクリプトを作る。
 - **変更対象ファイル:** `prisma.config.ts`、`scripts/testdb-migrate.mts`（新規）、`package.json`。
@@ -728,7 +822,7 @@ npm run test:integration ─► 専用runner
 |---|---|---|
 | R1 | migrationを空のDBに適用できるか、`schema.prisma` と一致するか | 未検証（Step 3-12） |
 | R2 | 開発用DBの `_prisma_migrations` と、手元のファイルのchecksumが一致するか | 解消（Step 3-0で一致を確認） |
-| R3 | `KATANA_DB_TARGET=test` を設定せずにPrisma CLIを直接実行すると、開発用DBに接続する | 残余リスク（2-7）。運用ルールとCLAUDE.mdで対処する |
+| R3 | `KATANA_DB_TARGET=test` を設定せずにPrisma CLIを直接実行すると、開発用DBに接続する | 残余リスク（2-7）。運用ルールとCLAUDE.mdで対処する。Step 3-8Bで、テストDBに見えるURLをテストモードなしで使う場合は拒否するようにした（ほかの経路は3-Aの3-8B） |
 | R4 | `prisma/seed.ts` と Prisma Studio はガードの外にある | 範囲外 |
 | R5 | `lib/generated/prisma/` が、Gitの除外対象なのに管理されたまま残っている | importは静的検査で防ぐ。整理は別タスク |
 | R6 | 静的検査はASTの解析だが、文字列を組み立てたimport、パッケージ経由の読み込み、`@/*` 以外の別名などはすり抜けられる（3-Aの3-4B・3-5Bに一覧）。判定できない動的importなどは、規則4で「未確認」として失敗させる | 低。レビューで補う |
@@ -747,12 +841,11 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：`d087712`（`test: add fail-closed integration test runner`。Step 3-7・3-7Bの変更をまとめたもの）
-   - 変更済み（Step 3-8。未commit）：`docs/PLAN-test-db-isolation.md`、`lib/testing/dbConnectionPaths.test.ts`、`lib/testing/integrationGlobalSetup.ts`
-   - 未追跡（Step 3-8。未commit）：`lib/testing/integrationDatabaseCheck.ts`、`lib/testing/integrationDatabaseCheck.test.ts`
+   - HEAD：`test: guard Prisma CLI and add test DB migration runner`（Step 3-8Bの変更。親は `4b788e7`）
+   - 変更済み・未追跡のファイル：なし（下の2件を除く）
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
-   - `.env.test` は存在しない（Step 3-7Bの一時ファイルは削除済み）
-3. Step 3-8（接続後の本人確認と空DB検査）は実装済み・未commit。当初の3-8（`prisma.config.ts` のガードとmigration用スクリプト）は未実施。次に何を行うか（commit、当初の3-8、3-9など）は、始める前にユーザーに確認する。指示されたStep以外には着手しない。
+   - `.env.test` は存在しない（Step 3-7B・3-8Bの一時ファイルは削除済み）
+3. 次の作業は **Step 3-9**（Compose定義とDockerのラッパー）。始める前にユーザーに確認する。前提として、R12（Dockerの記録の取り直し。承認が必要）と、3-7Bの申し送り（`.env.test.example` は `.env*` で除外されるので、否定のパターンが必要）を確認する。接続後のDBの本人確認（migration用スクリプト・globalSetup）は、まだ実装していない。指示されたStep以外には着手しない。
 4. Stepが終わったら報告し、ユーザーの確認を得たうえで、次の2つを更新してからセッションを終える。
    - 3章の「3-A. 実施結果」（結果、設計との違い、未検証の事項、次のStepへの申し送り）
    - 本節の手順2の想定と、手順3の次のStep
