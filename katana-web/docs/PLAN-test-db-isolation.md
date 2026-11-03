@@ -1,7 +1,7 @@
 # 計画：専用テストDBの構築とVitest統合テストの分離
 
 作成日: 2026-10-26
-更新日: 2026-11-02（Step 3-6の実施結果を反映）
+更新日: 2026-11-03（Step 3-7・3-7Bの実施結果を反映）
 作業ブランチ: `chore/test-db-isolation`（`fix-dashboard` の `6168889` から作成）
 
 ## 状態
@@ -10,7 +10,7 @@
 |---|---|
 | Phase 1：読み取り専用の調査 | **実施済み**（結果は本ファイルの1章） |
 | Phase 2：安全設計 | **設計レビュー完了**（確定設計は本ファイルの2章） |
-| Phase 3：実装 | **実施中**（Step 3-0〜3-6 実施済み。Step 3-3〜3-6はStep 3-6の後処理でcommit。次は **Step 3-7**。結果は3章の「3-A. 実施結果」） |
+| Phase 3：実装 | **実施中**（Step 3-0〜3-7B 実施済み。Step 3-3〜3-6は `824d54b` でcommit、Step 3-7・3-7Bは**未commit**。次は **Step 3-8**。結果は3章の「3-A. 実施結果」） |
 | Phase 4：検証 | **未着手** |
 
 F-01の判定は **CONDITIONAL PASS のまま**。実DB・Cookie・HTTPでの検証は、Phase 4のE2Eで行う。
@@ -347,15 +347,17 @@ npm run test:integration ─► 専用runner
 | 3-0 | 実施済み（Dockerの記録は未記録。下記） | なし |
 | 3-1 | 実施済み | `3dcfbb3` |
 | 3-2 | 完了 | `3f0c710` |
-| 3-3 | 完了（buildは未実施） | Step 3-6の後処理でcommit（`test: isolate unit and integration database access`） |
+| 3-3 | 完了（buildは未実施） | `824d54b`（Step 3-6の後処理でcommit。`test: isolate unit and integration database access`） |
 | 3-4 | 静的監査完了 | 記録なし（下記） |
-| 3-4B | 接続経路の静的検査（規則1・2）完了 | 同上 |
-| 3-5 | 統合テストのリネーム完了 | 同上 |
-| 3-5B | 規則3・4の静的検査とPLANの更新を実施 | 同上 |
-| 3-6 | 完了（`npm test` を2回実行し、すべて成功） | 同上（PLANの更新を含む） |
-| 3-7 | **次に行う** | – |
+| 3-4B | 接続経路の静的検査（規則1・2）完了 | `824d54b` |
+| 3-5 | 統合テストのリネーム完了 | `824d54b` |
+| 3-5B | 規則3・4の静的検査とPLANの更新を実施 | `824d54b` |
+| 3-6 | 完了（`npm test` を2回実行し、すべて成功） | `824d54b`（PLANの更新を含む） |
+| 3-7 | 統合テスト用runner・専用設定の作成完了（globalSetupは意図的に必ず停止） | **未commit** |
+| 3-7B | runnerの確認モードの検証・`.env.test` のGit保護の確認 | **未commit**（変更はPLANだけ） |
+| 3-8 | **次に行う** | – |
 
-**commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
+**commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
 **実際のDB接続による検証は、まだ1回も行っていない：** ガードの `throw`、統合テストのモードでの許可、静的検査の判定が実際の実行と一致することは、どれも静的な確認とDBを使わない単体テストだけで確かめている。
 
@@ -460,6 +462,36 @@ npm run test:integration ─► 専用runner
   - Prisma接続ガード（`lib/prisma.ts`）の実行時の検証（ガードが実際に `throw` すること、統合テストのモードで正しいURLが許可されること）。
   - build（R13）。
 - 次のStepは **Step 3-7**。
+
+**Step 3-7（統合テスト用runner・専用設定）**
+
+- 作成（いずれも未追跡・未commit）:
+  - `vitest.integration.config.ts`：`vitest.config.ts` を引き継がない独立した設定。`include: ["**/*.integration.test.{ts,tsx}"]`、`exclude: [...configDefaults.exclude]`、`globalSetup`、`fileParallelism: false`、`maxWorkers: 1`、`maxConcurrency: 1`、`sequence: { concurrent: false, shuffle: false }`、`passWithNoTests: false`、`testTimeout`・`hookTimeout` 30秒、`envDir: false`（Viteに `.env*` を読ませない）。`test.env` は設定しない。`@` の別名は明示的に設定した。
+  - `scripts/test-integration.mts`（runner）：引数なしは通常実行モード、`--check` は確認モード。それ以外の引数は拒否する（Vitestへのオプションの受け渡しはしない）。runner自身にNodeのオプション（`process.execArgv`）があれば停止する。確認モードは、検証と設定の表示だけを行い、子プロセスを起動しない。通常実行モードは、`shell: false`・作業ディレクトリ `katana-web/` 固定で `node node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts` を起動する。
+  - `lib/testing/integrationEnv.ts`：runnerとglobalSetupが共通で使う。`.env.test`・`.env` を `dotenv.parse` で読み（`process.env` は変えない）、子プロセスの環境変数を作り、`assertTestDatabaseTarget()` で検証する。設計の対象ファイル一覧にはないファイル。
+  - `lib/testing/integrationGlobalSetup.ts`：runnerを経由した起動か（`KATANA_DB_TEST_MODE=integration` かつ `KATANA_TEST_RUNNER=script`）と、接続先をもう一度検証したうえで、**必ず `throw` して停止する**。接続後の照合と、データが残っていないかの読み取り確認は後続のStepで実装する。それまでは、テストファイルの読み込み・ワーカーの起動まで進まない。
+- 変更（未commit）：`package.json`（`test:unit`・`test:integration`・`test:integration:check` を追加）、`tsconfig.json`（`allowImportingTsExtensions: true` を追加。Nodeが `.ts` を直接読み込むには拡張子付きのimportが必要なため。`noEmit: true` なので、TypeScriptの制約を満たす）。
+- 子プロセスの環境変数：親からは許可リスト（`PATH`・`HOME`・`USER`・`LOGNAME`・`TMPDIR`・`TMP`・`TEMP`・`LANG`・`LC_*`・`TZ`・`TERM`・`COLORTERM`・`FORCE_COLOR`・`NO_COLOR`・`CI`）だけを引き継ぐ。`PG*`・`DOTENV_*`・`NODE_OPTIONS`・親の `DATABASE_URL` などはすべて落とす。`DATABASE_URL`（`.env.test` の値だけ）、`KATANA_DB_TEST_MODE=integration`、`KATANA_TEST_RUNNER=script`、`NODE_ENV=test` を設定する。親に `NODE_OPTIONS` があれば停止する。
+- 表示：接続URL・パスワード・接続先は表示しない。検証に失敗したときは、エラーコード（例：`PORT_NOT_ALLOWED`）だけを表示する。
+- 設計との違い:
+  - globalSetupの接続後の照合（`pg` による `current_database()` などの照合）と、データ残留の読み取り確認は実装していない（後続のStepに分けた）。それまでは必ず停止する。
+  - `lib/testing/integrationSetup.ts`（setupFiles）は作成していない（接続後の照合が必要なため）。ワーカーでは `lib/prisma.ts` のガードが働く。
+  - runnerは接続先を表示しない（2-7のmigration用スクリプトは、パスワードなしで表示する設計）。
+- 確認済み：`npx vitest list --config vitest.integration.config.ts --filesOnly` は統合テスト6件・通常テスト0件。通常の `npx vitest list --filesOnly` は24件・統合テスト0件。`--filesOnly` がglobalSetupを実行せず、テストファイルも読み込まないことは、Vitest 4.1.11のソースを読んで確かめた。`npm test` は24ファイル・519件成功。`dbConnectionPaths.test.ts` は148件成功（新しいファイルにも違反はなく、許可リストは変えていない）。`npx tsc --noEmit`・新規4ファイルの `eslint` 成功。
+- Nodeが `.ts` を読み込むときに `MODULE_TYPELESS_PACKAGE_JSON` の警告が出る（`package.json` に `"type"` がないため）。動作には影響しない。
+
+**Step 3-7B（runnerの確認モードの検証・`.env.test` のGit保護）**
+
+- `.env.test` のGit保護：リポジトリのルート（`KatanaService/.gitignore` の36行目）の `.env*` で、すでに除外されていた（最初のcommit `251c511` から）。同等の設定があるので、`katana-web/.gitignore` には追加していない。`git check-ignore -v .env.test` で除外を確認した。
+  - **Step 3-9への申し送り：** 同じ `.env*` で `.env.test.example` も除外される。Gitで管理するには、否定のパターン（`!.env.test.example`）などが必要。
+- 確認モードの正常系：架空のパスワードを使った一時的な `.env.test`（`umask 077`、権限 `-rw-------`）を作り、`npm run test:integration:check` を実行した。終了コード0、接続先の検証に成功、子プロセスの環境変数（`DATABASE_URL` は伏せる）と起動コマンドを表示、統合テスト6件を表示。出力にパスワードと `postgresql://` は含まれなかった。終了後、一時的な `.env.test` だけを削除した。
+- 異常系（確認モードで、`NODE_DEBUG=child_process` を付けて実行。`spawn` が呼ばれれば記録されることは、別の簡単なコマンドで確かめた）：`.env.test` がない、`DATABASE_URL` が未設定、パスワードがない、ポートが5433、DB名が `katana`、ユーザーが `katana`、`NODE_OPTIONS` を設定、runnerにNodeのオプション、未対応の引数（`--config x`・`--check --watch`・位置引数）で、すべて終了コード1で停止し、子プロセスは起動せず、パスワードやURLの全文は表示されなかった。
+  - 開発用DBと同じ接続先：実際の `.env` の値をそのまま `.env.test` の値として純粋関数に渡すと拒否された（`PORT_NOT_ALLOWED`）。ホスト・ポート・DB名が開発用と同じ場合、文字列が同じ場合は、架空の値で `MATCHES_DEVELOPMENT_DATABASE` になることを確かめた。
+  - 親の `PGHOST`・`DOTENV_CONFIG_PATH`・`DATABASE_URL` は、子プロセスの環境変数から取り除かれ、検証は成功する（2-2の設計どおり）。
+- globalSetup：`pg`・Prisma Client を読み込まず、検証の後に無条件で `throw` し、迂回する分岐がないことをコードで確認した。Vitestでは、globalSetupが終わってから `pool.runTests` でワーカーを起動するため、テストファイルは読み込まれない（Vitestのソースを読んで確認）。
+- テストファイルは追加していない。`npx tsc --noEmit`・`eslint`・`npm test`（24ファイル・519件）はすべて成功。
+- **未実施・未検証:** runnerの通常実行モード（子プロセスに渡る環境変数と、globalSetupで停止することの実行時の確認）、実DBへの接続、統合テストの実行、Docker・Prisma CLI・migration・seed・build。
+- 次のStepは **Step 3-8**。
 
 全Stepに共通する事項:
 
@@ -681,7 +713,7 @@ npm run test:integration ─► 専用runner
 | R5 | `lib/generated/prisma/` が、Gitの除外対象なのに管理されたまま残っている | importは静的検査で防ぐ。整理は別タスク |
 | R6 | 静的検査はASTの解析だが、文字列を組み立てたimport、パッケージ経由の読み込み、`@/*` 以外の別名などはすり抜けられる（3-Aの3-4B・3-5Bに一覧）。判定できない動的importなどは、規則4で「未確認」として失敗させる | 低。レビューで補う |
 | R7 | tmpfsとイメージの `VOLUME` 宣言の関係 | 未検証（Step 3-11） |
-| R8 | Node 25で `.mts` のスクリプトを動かせるか。Vitest 4の `test.env` と `.env.test` の扱い | `test.env` が親プロセスの値を上書きすることは、Step 3-3でソースを読んで確認済み。`.mts` の実行と `.env.test` の扱いは未検証（Step 3-7）。`.mts` が動かなければ、別の実行方法を検討する |
+| R8 | Node 25で `.mts` のスクリプトを動かせるか。Vitest 4の `test.env` と `.env.test` の扱い | `test.env` が親プロセスの値を上書きすることは、Step 3-3でソースを読んで確認済み。`.mts` のrunnerがNode 25でそのまま動くことは、Step 3-7Bの確認モードで確認済み。統合テスト用の設定は `envDir: false` でViteに `.env*` を読ませない（通常実行モードでの確認は未実施） |
 | R12 | Step 3-0で取得したDockerの記録（コンテキスト・ボリューム名・`katana-db`）が残っていない | Step 3-9の前に、承認を得て取得し直す（3-A） |
 | R13 | Step 3-3の完了条件の `npm run build` を実施していない | DBに接続しないことを確認できる方法が見つかるまで保留。Phase 4までに実施する |
 | R9 | テストが途中で落ちた後は、`testdb:reset` が必要になる | 利便性の問題であり、安全性の問題ではない |
@@ -695,10 +727,12 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：`test: isolate unit and integration database access`（`3f0c710` の次のcommit。Step 3-3〜3-6の変更をまとめたもの）
-   - 変更済み・削除：なし
-   - 未追跡：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/` だけ（どちらもcommitの対象外）
-3. 次は **Step 3-7（統合テスト用の設定・globalSetup・runner）**。Step 3-3の申し送り（`vitest.integration.config.ts` は `vitest.config.ts` を引き継がない、runnerは `katana-web/` から起動する）を確認してから始める。指示されたStep以外には着手しない。
+   - HEAD：`824d54b`（`test: isolate unit and integration database access`。Step 3-3〜3-6の変更をまとめたもの）
+   - 変更済み（Step 3-7・3-7B。未commit）：`docs/PLAN-test-db-isolation.md`、`package.json`、`tsconfig.json`
+   - 未追跡（Step 3-7。未commit）：`vitest.integration.config.ts`、`scripts/test-integration.mts`、`lib/testing/integrationEnv.ts`、`lib/testing/integrationGlobalSetup.ts`
+   - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
+   - `.env.test` は存在しない（Step 3-7Bの一時ファイルは削除済み）
+3. 次は **Step 3-8（`prisma.config.ts` のガードとmigration用スクリプト）**。Step 3-7の変更を先にcommitするかを、始める前にユーザーに確認する。指示されたStep以外には着手しない。
 4. Stepが終わったら報告し、ユーザーの確認を得たうえで、次の2つを更新してからセッションを終える。
    - 3章の「3-A. 実施結果」（結果、設計との違い、未検証の事項、次のStepへの申し送り）
    - 本節の手順2の想定と、手順3の次のStep

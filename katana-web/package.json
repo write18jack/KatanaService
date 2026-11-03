@@ -7,7 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:integration": "node scripts/test-integration.mts",
+    "test:integration:check": "node scripts/test-integration.mts --check"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
