@@ -12,7 +12,9 @@
     "test:integration": "node scripts/test-integration.mts",
     "test:integration:check": "node scripts/test-integration.mts --check",
     "testdb:migrate": "node scripts/testdb-migrate.mts",
-    "testdb:migrate:check": "node scripts/testdb-migrate.mts --check"
+    "testdb:migrate:check": "node scripts/testdb-migrate.mts --check",
+    "testdb:check": "node scripts/testdb.mts --check",
+    "testdb:status": "node scripts/testdb.mts --status"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

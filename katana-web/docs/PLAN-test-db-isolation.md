@@ -1,7 +1,7 @@
 # 計画：専用テストDBの構築とVitest統合テストの分離
 
 作成日: 2026-10-26
-更新日: 2026-11-03（Step 3-8Aのcommit `4b788e7` と、Step 3-8B（`prisma.config.ts` のガードとmigration用スクリプト）の実施結果・Prisma CLIによる設定読み込みの検証結果を反映）
+更新日: 2026-11-03（Step 3-8Bのcommit `d56c8e4`、R12のDockerの読み取り調査、Step 3-9・3-9B（テストDBの構成ファイルとDockerのラッパー。`docker compose config` による照合まで）の実施結果を反映）
 作業ブランチ: `chore/test-db-isolation`（`fix-dashboard` の `6168889` から作成）
 
 ## 状態
@@ -10,7 +10,7 @@
 |---|---|
 | Phase 1：読み取り専用の調査 | **実施済み**（結果は本ファイルの1章） |
 | Phase 2：安全設計 | **設計レビュー完了**（確定設計は本ファイルの2章） |
-| Phase 3：実装 | **実施中**（Step 3-0〜3-8B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712`、Step 3-8A（接続後の本人確認と空DB検査）は `4b788e7` でcommit。Step 3-8B（当初の3-8：`prisma.config.ts` のガードとmigration用スクリプト）は、`prisma validate` による設定読み込みの検証の後、commit `test: guard Prisma CLI and add test DB migration runner` でcommit。次は **Step 3-9**（開始前にユーザーに確認する）。結果は3章の「3-A. 実施結果」） |
+| Phase 3：実装 | **実施中**（Step 3-0〜3-8B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712`、Step 3-8A（接続後の本人確認と空DB検査）は `4b788e7` でcommit。Step 3-8B（当初の3-8：`prisma.config.ts` のガードとmigration用スクリプト）は `d56c8e4` でcommit。Step 3-9（テストDBの構成ファイル）とStep 3-9B（Dockerのラッパー `scripts/testdb.mts` の `--check`・`--status`と、`docker compose config` による照合。架空の一時的な `.env.test` で、全項目が一致）は実施済み。`up`・`down`・`reset` は未実装で、コンテナは一度も起動していない。結果は3章の「3-A. 実施結果」） |
 | Phase 4：検証 | **未着手** |
 
 F-01の判定は **CONDITIONAL PASS のまま**。実DB・Cookie・HTTPでの検証は、Phase 4のE2Eで行う。
@@ -344,7 +344,7 @@ npm run test:integration ─► 専用runner
 
 | Step | 状態 | commit |
 |---|---|---|
-| 3-0 | 実施済み（Dockerの記録は未記録。下記） | なし |
+| 3-0 | 実施済み（Dockerの記録は、Step 3-9で取り直した。下記） | なし |
 | 3-1 | 実施済み | `3dcfbb3` |
 | 3-2 | 完了 | `3f0c710` |
 | 3-3 | 完了（buildは未実施） | `824d54b`（Step 3-6の後処理でcommit。`test: isolate unit and integration database access`） |
@@ -356,7 +356,9 @@ npm run test:integration ─► 専用runner
 | 3-7 | 統合テスト用runner・専用設定の作成完了（globalSetupは意図的に必ず停止） | `d087712`（`test: add fail-closed integration test runner`） |
 | 3-7B | runnerの確認モードの検証・`.env.test` のGit保護の確認 | `d087712`（変更はPLANだけ） |
 | 3-8A | ユーザーの指示により、接続後の本人確認と空DB検査を実装（DB非接続の単体テストのみ。実DBでの動作確認と、globalSetupへの組み込みは**未実施**） | `4b788e7`（`test: add integration database identity and empty checks`） |
-| 3-8B | 当初の3-8：`prisma.config.ts` のガードとテストDB専用migrationスクリプト（DB非接続の単体テスト、静的検証、`prisma validate` による設定読み込みの検証。実DBへの接続・`migrate deploy` は未実施。通常実行モードは、接続後の本人確認が未実装のため必ず停止する） | `test: guard Prisma CLI and add test DB migration runner` |
+| 3-8B | 当初の3-8：`prisma.config.ts` のガードとテストDB専用migrationスクリプト（DB非接続の単体テスト、静的検証、`prisma validate` による設定読み込みの検証。実DBへの接続・`migrate deploy` は未実施。通常実行モードは、接続後の本人確認が未実装のため必ず停止する） | `d56c8e4`（`test: guard Prisma CLI and add test DB migration runner`） |
+| 3-9 | テストDBの構成ファイル（Compose定義・初期化スクリプト・`.env.test.example`・`.gitignore`）の作成と静的検証。R12のDockerの読み取り調査 | **未commit** |
+| 3-9B | Dockerのラッパー `scripts/testdb.mts`（`--check`・`--status`。読み取り専用）、R14・R15の対策、`docker compose config` による照合（架空の一時的な `.env.test` で実施）。`up`・`down`・`reset` は**未実装**（コンテナは一度も起動していない） | **未commit** |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -365,7 +367,7 @@ npm run test:integration ─► 専用runner
 **Step 3-0**
 
 - checksum：開発用DBの `_prisma_migrations` と手元の8件のSHA-256が一致した（`3dcfbb3` のcommitメッセージに記録）。R2は解消。
-- Dockerの記録（`docker context show` の値、開発用ボリュームの正確な名前、`katana-db` の記録）：**本ファイルにもcommitにも記録が残っていない**。2-5は「Step 3-0で記録した値」との照合を前提にしているため、**Step 3-9の前に、承認を得て読み取り系コマンドで取得し直し、ここに記録する**。
+- Dockerの記録（`docker context show` の値、開発用ボリュームの正確な名前、`katana-db` の記録）：Step 3-0の記録は残っていない。**Step 3-9で、承認を得て読み取り系コマンドで取得し直した**（3-9の記録の「R12」）。
 
 **Step 3-1**
 
@@ -602,10 +604,176 @@ npm run test:integration ─► 専用runner
   - 接続後のDBの本人確認（2-7の4）。**未実装**。通常実行モードは必ず停止する。
   - `.env` から `DATABASE_URL` を補う、いつもの開発用の操作（`generate`・`migrate dev` など）での設定の読み込み。同じ設定ファイルを使うので動く見込みだが、実行していない。
   - Prisma CLIの外部との通信を止める設定（`CHECKPOINT_DISABLE` など）は、検討していない。
+- **commit：** `d56c8e4`（`test: guard Prisma CLI and add test DB migration runner`。親は `4b788e7`）。対象は10ファイル（変更5件・新規5件）。commitの前に、`git diff --cached --check` が0件であること、`.env`・`.env.local` の値が差分に含まれないことを確かめた。
+- まとめ：Prisma CLI 7.2は、変更後の `prisma.config.ts` を読み込めた。テストモードの正常系も成功した。`DATABASE_URL_MISMATCH` による拒否と、migrationの確認モードも、期待どおりに動いた。通常テストは638件すべて成功した。**実DBへの接続と `migrate deploy` は、まだ実施していない。**
 - 気づいた点（変更していない）：`scripts/test-integration.mts` の確認モードは、コマンドを表示するときに `path.relative(ROOT, arg)` を相対の引数（`run` など）にも使っている。作業ディレクトリがルートのときは正しく表示されるので、今は実害がない。`testDbMigrate.ts` では、絶対パスだけを変換するようにした。
 - **申し送り:**
   - 本人確認を組み込むとき：仮の関数を、DBのコメント（`katana-test-db`）・`current_database()`・`current_user` を照合する関数に置き換える。`verifyIntegrationDatabase()` は、migration済みのテーブル構成まで確かめるので、migrationの前には使えない。本人確認の部分だけを分ける必要がある。`pg` を使う場合は、静的検査の許可リストに `scripts/testdb-migrate.mts` の1ファイルだけを加えるかどうかを、その時に決める。
   - CLAUDE.mdへの追記案（Step 3-13）には、「テストDBにはPrisma CLIを直接実行せず、`npm run testdb:migrate` を使う」を入れる。
+
+**Step 3-9（テストDBの構成ファイル。静的検証まで。未完了・未commit）**
+
+- **R12：Dockerの読み取り専用の調査**（ユーザーの承認を得て実施。2026-11-03）
+  - 使ったコマンド：`docker info`（バージョンだけ）・`docker context show`・`docker ps -a`・`docker volume ls`・`docker compose ls -a`。`docker volume inspect` と `docker inspect sample-db` は、`--format` で必要な項目だけを表示した。ほかに `lsof` でポートを確かめた。起動・停止・exec・ボリュームの変更は、していない。
+  - Dockerのデーモンは起動していた（Engine 29.4.1、Compose v5.1.3）。**コンテキストは `desktop-linux`**（2-5の照合に使う値）。
+  - **開発用コンテナ `katana-db` は存在しない**（`docker ps -a` に出てこない）。Composeのプロジェクトも、1つも表示されなかった（`docker compose ls -a`）。
+  - **開発用DBのボリュームは `katana-web_postgres_data`**。どのコンテナからも使われていない。
+    - 作成日時は2026-07-18T05:42:41Z。
+    - ラベルは、`com.docker.compose.project=katana-web`・`com.docker.compose.volume=postgres_data`。
+    - 1-2の指摘のとおり、Composeのプロジェクト名はディレクトリ名（`katana-web`）になっている。
+  - ほかのコンテナは `sample-db`（`sample-db-image:latest`、2026年5月から停止中、再起動ポリシー `no`）だけ。無名のボリューム `b655b6e4…` を `/var/lib/postgresql` にマウントしている。
+  - ほかのボリューム：無名のボリューム `0df3f60a…`（2026-05-01作成、どのコンテナも使っていない）。
+  - テスト用のコンテナ（`katana-test-db`）、`katana-test` プロジェクト、テスト用のボリュームは、どれもない。
+  - **5434番ポートは空いている。** 5433番も、今は待ち受けがない（開発用コンテナがないため）。
+  - PLANとの違い：2-5と3-11は、`katana-db` のID・状態・マウントを記録し、操作の前後で比べることを前提にしている。しかし、今はコンテナが存在しない。比べる対象を「`katana-db` が存在しないこと（または状態）」と「ボリューム `katana-web_postgres_data` の作成日時とラベル」にする必要がある（ラッパーの実装時に決める）。
+- 作成（いずれも未追跡・未commit）:
+  - `docker-compose.test.yml`
+  - `docker/test-db/init/01-app-role.sh`（実行権限 `755`）
+  - `docker/test-db/init/02-marker.sql`
+  - `.env.test.example`
+- 変更（未commit）：リポジトリのルートの `.gitignore`（`KatanaService/.gitignore`）に、`!katana-web/.env.test.example` を追加した。`.env*` の行はそのまま。`katana-web/.gitignore` は変えていない。
+- **Compose定義**（`docker-compose.test.yml`）:
+  - プロジェクト・サービス・コンテナ：`name: katana-test`、サービス `test-db`、コンテナ `katana-test-db`。
+  - イメージは `postgres:15`。`restart: "no"`（自動では起動し直さない）。
+  - ポートは `127.0.0.1:5434:5432` だけ。
+  - データの保存先：`/var/lib/postgresql/data` をtmpfsにする。トップレベルの `volumes` はなく、名前付きボリュームも使わない。
+  - マウントは、`./docker/test-db/init` を `/docker-entrypoint-initdb.d` に読み取り専用でbindマウントするものだけ。
+  - healthcheck：TCPでの `pg_isready`（`-h 127.0.0.1`）。初期化中の一時的なサーバーはTCPで待ち受けないので、初期化が終わる前に healthy にはならない。
+  - 書かないもの：`env_file`・`privileged`・`network_mode`。
+- **パスワードの渡し方：** Gitで管理するファイルには書かない。`.env.test` の値を、Composeの変数展開（`${VAR:?…}`）で受け取る。未設定なら、Composeが起動の前にエラーで止まる。
+  - `KATANA_TEST_DB_PASSWORD`：`katana_test_user` のパスワード。**`.env.test` の `DATABASE_URL` のパスワードと同じ値にする。** 2つの値の一致は、今は運用で守る（ラッパーで照合する予定）。
+  - `KATANA_TEST_DB_ADMIN_PASSWORD`：初期化だけに使う管理用のスーパーユーザー `postgres` のパスワード（`POSTGRES_PASSWORD`。公式イメージでは必須）。
+  - `.env.test` に新しいキーが増えても、ほかのスクリプトへの影響はない。runner・`prismaCliGuard`・`testdb-migrate` は、`dotenv.parse` で `DATABASE_URL` だけを読み、`process.env` には反映しないため。
+  - Composeの変数展開では、**シェルの環境変数が `--env-file` の値より優先される**（Composeの仕様）。ラッパーでは、子プロセスから同じ名前の環境変数を取り除く必要がある。
+- **権限：** `katana_test_user` は、`NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS` のログイン用ロールとし、`katana_test` の所有者にする。
+  - PostgreSQL 15では、`public` スキーマの所有者は `pg_database_owner`。そのため、DBの所有者はmigrationでテーブルを作成できる見込み（未検証）。
+  - 管理用の `postgres` DBへの `PUBLIC` の権限は取り消す。
+  - スーパーユーザー（`postgres`）は、公式イメージの初期化に必要なので残した。アプリとテストからは使わない。ガードはユーザー `katana_test_user` 以外を拒否する。
+- **DBの識別コメント：** `02-marker.sql` で `COMMENT ON DATABASE katana_test IS 'katana-test-db';` を実行する。この値は、`integrationDatabaseCheck.ts` の `TEST_DATABASE_MARKER` と同じ。
+  - 2つの初期化スクリプトは、どちらも最初に `current_database() <> 'katana_test'` なら例外を投げる。`01-app-role.sh` は、さらに `POSTGRES_DB` が `katana_test` であること、パスワードが空でないことも確かめる。
+  - 初期化スクリプトをマウントするのはテスト用のComposeファイルだけで、開発用の `docker-compose.yml` には関わらない。
+- **初期化が実行される条件：** 公式イメージは、データディレクトリが空のときだけ、`/docker-entrypoint-initdb.d` のスクリプトを名前順に実行する。
+  - データはtmpfsにあるので、コンテナを作るたびに空になり、毎回初期化される。
+  - データディレクトリが空でない場合（ボリュームを使う構成に変えた場合など）は、初期化は実行されない。そのため、コメントが付いているとは限らない。接続後の本人確認で、必ず照合する。
+  - 既存のボリュームを自動で削除したり、初期化し直したりする処理はない。
+- **静的検証**（一時スクリプトで実施。`js-yaml` は推移的な依存を使った。スクリプトはcommitしない）。次の22項目がすべて一致した。
+  - 2-5の操作前の確認を、`config` の代わりにファイルで照合した：
+    - プロジェクト名、サービスが1つだけであること、コンテナ名、イメージ、`restart`。
+    - ポートが `127.0.0.1:5434:5432` だけであること、tmpfs。
+    - `type: volume` のマウントとトップレベルの `volumes` がないこと、bindマウントが初期化用のディレクトリだけであること。
+    - `POSTGRES_DB=katana_test`、パスワードが必須の変数展開であること。
+    - `katana-db`・`postgres_data`・`5433` という文字列と、接続URLの文字列がないこと。
+  - 既存のガードとの整合：
+    - マーカーと DB名・ユーザーが、`TEST_DATABASE_TARGET`・`EXPECTED_DATABASE`・`EXPECTED_USER`・`TEST_DATABASE_MARKER` と一致する。
+    - `.env.test.example` のキーは3つ。URLのパスワードが `KATANA_TEST_DB_PASSWORD` と一致し、管理用のパスワードは別の値になっている。
+    - 見本のURLは、`assertTestDatabaseTarget()`（`.env` の開発用URLとの比較を含む）を通る。
+  - `bash -n` による `01-app-role.sh` の構文検査も通った。
+- `.gitignore` の確認（`git check-ignore -v --no-index`）:
+  - 管理対象になるのは `katana-web/.env.test.example` だけ。
+  - 引き続き除外されるもの：`katana-web/.env.test`・`.env`・`.env.local`・`.env.test.local`・`.env.example`・`.env.development`・`.env.test.example.bak`、ほかの階層の `.env.test.example`。
+- 確認済み:
+  - `npx tsc --noEmit` が成功した。TypeScript・JavaScriptのファイルは変えていないので、eslintの対象はない。
+  - `npm test` は、27ファイル・638件がすべて成功した。
+  - `npx vitest list --filesOnly` は27件で、`*.integration.test.*` は0件。統合テスト用の設定では6件。
+  - `dbConnectionPaths.test.ts` は、件数・規則とも変更なし。`.sh`・`.sql`・`.yml` は走査の対象外。
+- **設計との違い:**
+  - 初期化のファイルを、`01-marker.sql`（1件）ではなく、`01-app-role.sh` と `02-marker.sql` の2件にした。理由は2つ。
+    - 2-1の「DB名・ユーザーは開発用と別」と、権限を絞る方針を満たすため、スーパーユーザーではないアプリ用のロールを作る必要があった。その作成に、環境変数のパスワードを使う必要がある。
+    - マーカーを最後に付ければ、マーカーがあることが、初期化がすべて終わった印になる。
+  - `.env.test.example` に、`KATANA_TEST_DB_PASSWORD`・`KATANA_TEST_DB_ADMIN_PASSWORD` を加えた（2-1は `DATABASE_URL` だけを想定）。
+  - `.gitignore` は、`katana-web/` ではなく、リポジトリのルートで変更した（除外ルールがルートにあるため）。
+  - **未実施（3-9の完了条件・変更対象のうち）**：
+    - ラッパー `scripts/testdb.mts`（2-5の操作前・操作後の確認、Compose用の環境変数の除去、パスワードの一致の照合）と、`package.json` の変更。
+    - `docker compose ... config` による照合（承認が必要。`.env.test` が必要）。
+- **残る安全上の懸念:**
+  - 見本のプレースホルダー（`CHANGE_ME_…`）のまま `.env.test` を作っても、`assertTestDatabaseTarget()` は通る（パスワードの中身は検査しない）。拒否するかどうかは、ガードを変えることになるので、別に判断する。
+  - `KATANA_TEST_DB_PASSWORD` は、コンテナの環境変数に残る（`docker inspect` で見える）。ローカル専用のテストDBなので許容したが、記録しておく。
+  - スーパーユーザー `postgres` も、5434番ポートからパスワードでログインできる（`127.0.0.1` だけ）。
+  - R7（tmpfsとイメージの `VOLUME` 宣言の関係で、無名ボリュームが作られないか）は未検証（Step 3-11）。
+  - migrationを `katana_test_user` の権限で適用できるか、`shobj_description`・`pg_class` を読めるかは、実DBで未検証。
+- **未実施（Step 3-9の時点）:** Dockerの起動・停止、`docker compose config`、DBへの接続、SQLの実行、migration、seed、統合テスト、build、git add・commit。`docker compose config` による照合とラッパーは、Step 3-9Bで実施した。
+
+**Step 3-9B（Dockerのラッパーと、`docker compose config` による照合。未commit）**
+
+- 作成（いずれも未追跡・未commit）：`scripts/testdb.mts`（ラッパー本体。検証の関数をexportし、直接実行したときだけ `main()` が動く）、`scripts/testdb.test.ts`（67件。docker の呼び出しは偽の関数で置き換える）。
+- 変更（未commit）:
+  - `package.json`：`testdb:check`・`testdb:status` を追加。
+  - `lib/testing/dbConnectionPaths.test.ts`：通常テストの期待件数を28件にした（テストファイルを1件増やしたため。規則と許可リストは変えていない）。指示された「変更してよいファイル」には入っていないが、テストファイルを増やすと必ず変える必要がある。
+- **モード:** `--check` と `--status` だけを受け付ける。それ以外（`up`・`down`・`reset`、`-p`・`-f`・`--env-file` などを含む）は、`ARGUMENTS_INVALID` で拒否する。
+  - PLANの `up`・`down`・`reset`（2-3・2-5）は、**実装していない**。操作前・操作後の確認（`ps` での照合、5434番ポートの確認、開発用ボリュームの記録の比較、tmpfs・無名ボリュームの確認）がそろってから、別のStepで実装する。
+- **Composeの呼び出し：** 引数を `docker compose --project-name katana-test --file <katana-web>/docker-compose.test.yml --project-directory <katana-web> --env-file <katana-web>/.env.test <サブコマンド>` に固定した（パスはすべて絶対パス）。子プロセスは `execFile`（`shell: false`）で起動し、作業ディレクトリは `katana-web/`。
+  - 実行できるDockerのコマンドは、許可リストの読み取り専用の9つだけ。リストにないコマンドは `DOCKER_COMMAND_NOT_ALLOWED` で拒否する。
+    - `context show`
+    - `compose config --quiet`、`compose config --format json`、`compose ps --all --format json`
+    - `ps --all` に `--filter` を付けた3つ（プロジェクトのラベル、`name=^katana-db$`、`volume=katana-web_postgres_data`）
+    - `volume ls --filter name=^katana-web_postgres_data$`
+    - `volume inspect katana-web_postgres_data --format`（名前・作成日時・Composeのラベルだけ）
+- **実行順序:**
+  1. 引数
+  2. Nodeの起動オプション（`execArgv`・`NODE_OPTIONS`）
+  3. 親に `DOCKER_HOST`・`DOCKER_CONTEXT` があれば停止
+  4. `.env.test`・`.env` の読み込み
+  5. R14の検証
+  6. 子プロセスの環境変数を作り、もう一度確かめる（R15）
+  7. Composeファイルと初期化スクリプトがあることの確認
+  8. `docker context show` が `desktop-linux` であることの確認
+  9. `config --quiet` と `config --format json` の照合（JSONは表示せず、プログラムの中で照合する）
+  10. 要約の表示
+
+  `--status` は、10の後に、プロジェクトのコンテナ（`katana-test-db` 以外があれば停止）、`katana-db` の有無、開発用ボリュームの名前・作成日時・ラベル、ボリュームを使うコンテナを読み取って表示する。
+- **R14（パスワードの整合性）:** `.env.test` を `dotenv.parse` で読み、次の順に確かめる。
+  - キーが `DATABASE_URL`・`KATANA_TEST_DB_PASSWORD`・`KATANA_TEST_DB_ADMIN_PASSWORD` の3つ以外にないこと（`TEST_ENV_UNEXPECTED_KEY`）。`--env-file` は `COMPOSE_*` なども読むので、ほかのキーを拒否する。
+  - `DATABASE_URL` が `assertTestDatabaseTarget()` を通ること（`.env` の開発用URLとの比較を含む）。
+  - 2つのパスワードが空でないこと。
+  - 3つのパスワード（URLのパスワード・アプリ用・管理用）に、見本の値（`change_me`・`change-me`・`changeme`。大文字・小文字は区別しない）が含まれないこと（`PASSWORD_PLACEHOLDER`）。
+  - 3つのパスワードが、`[A-Za-z0-9_-]` の文字だけでできていること（`PASSWORD_CHARSET`）。
+  - URLのパスワードとアプリ用のパスワードが一致すること（`URL_PASSWORD_MISMATCH`）。
+  - 管理用とアプリ用のパスワードが違うこと（`ADMIN_PASSWORD_SAME_AS_APP`）。
+  - **パーセントエンコードの扱い：** URLのパスワードは、書かれたままの文字列（デコードしない）で比べる。使える文字は、エンコードが要らないものだけにした。そのため、`%` を含む表記は文字種の検査で拒否され、エンコードの有無で値が食い違うことはない。
+  - 既存のガード（`assertTestDatabaseTarget()`）は変えていない。見本の値を拒否するのは、ラッパーだけ。runner・`testdb-migrate`・`prisma.config.ts` は、パスワードの中身を検査しないまま（R14の残り）。
+- **R15（環境変数の隔離）:**
+  - 子プロセスの環境変数は、runnerと同じ許可リスト（`inheritAllowedEnv()`）で引き継ぐ変数と、検証済みの `KATANA_TEST_DB_PASSWORD`・`KATANA_TEST_DB_ADMIN_PASSWORD` だけ。
+  - 引き継がないもの：親の `DATABASE_URL`・`PG*`・`DOTENV_*`・`COMPOSE_*`・`POSTGRES_*`・`DOCKER_*`（`DOCKER_CONFIG`・`DOCKER_CERT_PATH` を含む）・`NODE_OPTIONS`、親の同名のパスワード変数。
+  - 組み立てた後に、禁止のパターンがないこと、`KATANA_` で始まる変数がこの2つだけで、値が検証済みのものと一致することを、もう一度確かめる（`CHILD_ENV_INVALID`）。
+  - パスワードは `.env.test` からだけ受け取り、ほかのファイルから補うことはない。
+- **`docker compose config` による照合**（ユーザーの指示により、configだけを実行。`docker context show` も実行した。どちらもコンテナを操作しない）:
+  - 架空の一時的な `.env.test`（`umask 077`、権限 `-rw-------`、架空のパスワード）を作り、`npm run testdb:check` を実行した。終了コード0で、すべての項目が一致した。
+    - プロジェクト `katana-test`、`postgres:15`、`restart: no`
+    - ポート `127.0.0.1:5434 -> 5432`
+    - tmpfs `/var/lib/postgresql/data`、名前付きボリュームと `type: volume` のマウントがない
+    - 初期化用のディレクトリが、読み取り専用のbindマウントになっている
+    - healthcheck がある
+    - 環境変数の4つのキーと値が、検証済みの値と一致する
+    - `katana-db`・`postgres_data`・`5433`・`katana-web_` という文字列がない
+  - Composeのプロジェクトのディレクトリにある `.env`（開発用）の値は、展開の結果に混ざらなかった。環境変数の値が、検証済みの値と完全に一致した。
+  - 親に `COMPOSE_FILE=docker-compose.yml`・`COMPOSE_PROJECT_NAME=katana-web`・`KATANA_TEST_DB_PASSWORD=wrong`・`DATABASE_URL`・`PGHOST` を設定して実行しても、プロジェクトは `katana-test` のままで、パスワードは `.env.test` の値で展開された（R15の確認）。
+  - 次の場合は、Dockerを呼ばずに終了コード1で止まった。
+    - `.env.test.example` をそのままコピーした場合（`PASSWORD_PLACEHOLDER`）
+    - `COMPOSE_PROFILES` を加えた場合（`TEST_ENV_UNEXPECTED_KEY`）
+    - `DOCKER_HOST` がある場合（`DOCKER_TARGET_ENV_PRESENT`）
+    - `-p katana-web` を付けた場合（`ARGUMENTS_INVALID`）
+  - 出力に、パスワードと `postgresql://` は0件だった。
+  - 一時的な `.env.test` は削除した。`.env`・`.env.local` のハッシュは、実行の前後で変わらなかった。
+  - 実行後の `docker ps -a`・`docker volume ls` の一覧は、Step 3-9の調査と同じだった（`sample-db`、無名のボリューム2つ、`katana-web_postgres_data`）。
+  - `--status` は、単体テストだけで確かめた（実際のDockerでは実行していない）。
+- **tmpfsとイメージの `VOLUME` 宣言（R7）:** `postgres:15` のイメージは `VOLUME /var/lib/postgresql/data` を宣言している。
+  - 同じパスにtmpfsのマウントがあれば、Dockerはそのパスに無名のボリュームを作らない見込み（コンテナの作成時に、マウント済みのパスを飛ばす）。ただし、**静的には確定できない**。イメージの設定も読んでいない。
+  - 後続のStepで、初めて起動した後に、次を確かめる：`docker inspect katana-test-db` の `Mounts` が初期化用のbindマウントだけであること、`HostConfig.Tmpfs` に `/var/lib/postgresql/data` があること、`docker volume ls` の一覧が起動の前後で増えていないこと。
+  - Composeは、コンテナを作り直すときに、前のコンテナの無名ボリュームを引き継ぐ。無名ボリュームができていた場合は、このことにも注意する。
+- **開発用ボリュームの保護:** `katana-web_postgres_data` には、読み取り（`volume ls`・`volume inspect --format`・`ps --filter volume=`）しか行わない。削除・変更・マウントするコマンドは、許可リストにない。Composeの定義でも、このボリュームは参照していない（config の照合で確認済み）。
+- 確認済み:
+  - `npx tsc --noEmit` と、変更した3ファイルの `eslint` が成功した。
+  - `bash -n docker/test-db/init/01-app-role.sh` が成功した。
+  - 新しい単体テストの67件が成功した。`dbConnectionPaths.test.ts` は148件成功し、違反は0件。
+  - `npm test` は28ファイル・705件が成功した（638件＋67件）。
+  - `npx vitest list --filesOnly` は28件で、`*.integration.test.*` は0件。統合テスト用の設定では6件。
+- **残る課題・未検証:**
+  - `up`・`down`・`reset` の実装（操作前・操作後の確認を含む）。
+  - コンテナの初回の起動と、R7の確認。
+  - 初期化スクリプトが実際に成功すること（ロールの作成、所有者の変更、マーカーの設定）。
+  - `katana_test_user` の権限で migration を適用できること。
+  - `--status` の実際の出力。
+  - Composeの `ps --format json` の出力の形（JSON配列か、1行ごとのJSONか）は、両方に対応したが、Compose v5で実際に確かめていない。
 
 全Stepに共通する事項:
 
@@ -666,7 +834,7 @@ npm run test:integration ─► 専用runner
 - **作業内容:** 2-4の静的検査を、DBを使わない単体テストとして作る。ソースを文字列として読むだけで、検査対象のモジュールはimportしない。
   - **検査対象:** `app/`・`actions/`・`lib/`・`data/`・`components/`・`prisma/`・`scripts/`（あれば）と、ルート直下の `*.ts`・`*.mts`。`node_modules/`・`.next/`・`lib/generated/` の中身は読まない。
   - **規則1（Prisma Client・DBドライバの生成）:** `new PrismaClient`、`new PrismaPg`、`from "pg"`・`require("pg")`、`from "@prisma/adapter-pg"` を、許可リストの外で使っていたら失敗させる。
-    - 許可リスト：`lib/prisma.ts`、`prisma/seed.ts`、`lib/db/` の中のガード関連ファイル、`scripts/testdb*`（Step 3-7・3-8・3-9で作る予定。今はない）。
+    - 許可リスト：`lib/prisma.ts`、`prisma/seed.ts`、`lib/db/` の中のガード関連ファイル、`scripts/testdb*`（当初の予定）。**実装した許可リストは `lib/prisma.ts`・`prisma/seed.ts` の2件だけ**（3-Aの3-4）。`scripts/testdb-migrate.mts`（Step 3-8B。検証の後に `prisma migrate deploy` を起動する。通常実行モードは今は必ず停止する）と `scripts/testdb.mts`（Step 3-9B。Dockerのラッパー。読み取り専用の `--check`・`--status`）は、どちらもDBへの接続を自分では作らないので、許可リストに入れていない。
   - **規則2（古い生成物）:** `generated/prisma` をimportしていたら、場所に関係なく失敗させる（1-4のP5）。
   - **規則3（テストからの本物のPrisma）:** テストファイル（`*.test.ts(x)`）で次の書き方を検出したら失敗させる。
     - ファクトリなしの `vi.mock("@/lib/prisma")`（自動モックは本物のモジュールを評価する）。
@@ -725,7 +893,7 @@ npm run test:integration ─► 専用runner
 - **承認が必要な操作:** なし。
 - **停止条件:** Prisma CLIが起動してしまう。
 
-### Step 3-9：Compose定義とDockerのラッパー
+### Step 3-9：Compose定義とDockerのラッパー（Step 3-9・3-9Bで、構成ファイル・`--check`・`--status`・`config` による照合まで実施。`up`・`down`・`reset` は未実装。実装した仕様は3-Aの記録が正）
 
 - **作業内容:** 2-1・2-5に従って、Compose定義、初期化SQL、`.env.test.example`、`.gitignore` の変更、`testdb` ラッパー（`up`・`down`・`reset`）を作る。
 - **変更対象ファイル:** `docker-compose.test.yml`、`docker/test-db/init/01-marker.sql`、`.env.test.example`、`scripts/testdb.mts`（いずれも新規）、`.gitignore`、`package.json`。
@@ -826,9 +994,11 @@ npm run test:integration ─► 専用runner
 | R4 | `prisma/seed.ts` と Prisma Studio はガードの外にある | 範囲外 |
 | R5 | `lib/generated/prisma/` が、Gitの除外対象なのに管理されたまま残っている | importは静的検査で防ぐ。整理は別タスク |
 | R6 | 静的検査はASTの解析だが、文字列を組み立てたimport、パッケージ経由の読み込み、`@/*` 以外の別名などはすり抜けられる（3-Aの3-4B・3-5Bに一覧）。判定できない動的importなどは、規則4で「未確認」として失敗させる | 低。レビューで補う |
-| R7 | tmpfsとイメージの `VOLUME` 宣言の関係 | 未検証（Step 3-11） |
+| R7 | tmpfsとイメージの `VOLUME` 宣言の関係 | 未検証。静的には確定できない（3-Aの3-9B）。初めて起動した後に、`docker inspect` の `Mounts`・`HostConfig.Tmpfs` と、起動前後の `docker volume ls` で確かめる。既存の無名ボリューム `0df3f60a…`（どのコンテナも使っていない）があることは記録済み |
 | R8 | Node 25で `.mts` のスクリプトを動かせるか。Vitest 4の `test.env` と `.env.test` の扱い | `test.env` が親プロセスの値を上書きすることは、Step 3-3でソースを読んで確認済み。`.mts` のrunnerがNode 25でそのまま動くことは、Step 3-7Bの確認モードで確認済み。統合テスト用の設定は `envDir: false` でViteに `.env*` を読ませない（通常実行モードでの確認は未実施） |
-| R12 | Step 3-0で取得したDockerの記録（コンテキスト・ボリューム名・`katana-db`）が残っていない | Step 3-9の前に、承認を得て取得し直す（3-A） |
+| R12 | Step 3-0で取得したDockerの記録（コンテキスト・ボリューム名・`katana-db`）が残っていない | 解消（Step 3-9で取得し直した：コンテキスト `desktop-linux`、ボリューム `katana-web_postgres_data`）。**調査の時点で、開発用コンテナ `katana-db` は存在しない。** 今後の比較の対象は、開発用ボリュームの名前・作成日時（2026-07-18T05:42:41Z）・ラベル（`com.docker.compose.project=katana-web`・`com.docker.compose.volume=postgres_data`）と、`katana-db` の有無。`testdb --status` がこれらを読み取る。ボリュームへの操作は読み取りだけ |
+| R14 | `.env.test` のパスワードがプレースホルダーのままでもガードを通る。`DATABASE_URL` と `KATANA_TEST_DB_PASSWORD` の一致は、運用で守っている | ラッパー（`testdb --check`・`--status`）では対策済み（Step 3-9B：見本の値・文字種・一致・管理用との違いを検査）。`assertTestDatabaseTarget()`・runner・`testdb-migrate` は、パスワードの中身を検査しないまま |
+| R15 | Composeの変数展開では、シェルの環境変数が `--env-file` より優先される | 対策済み（Step 3-9B）。Composeの子プロセスには、許可リストの変数と検証済みのパスワードだけを渡す。親に `COMPOSE_*` や同名のパスワードを設定しても結果が変わらないことを、`config` で確認した |
 | R13 | Step 3-3の完了条件の `npm run build` を実施していない | DBに接続しないことを確認できる方法が見つかるまで保留。Phase 4までに実施する |
 | R9 | テストが途中で落ちた後は、`testdb:reset` が必要になる | 利便性の問題であり、安全性の問題ではない |
 | R10 | ガードのコードそのものを書き換えられると防げない | CLAUDE.mdとレビューで対処する |
@@ -841,11 +1011,12 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：`test: guard Prisma CLI and add test DB migration runner`（Step 3-8Bの変更。親は `4b788e7`）
-   - 変更済み・未追跡のファイル：なし（下の2件を除く）
+   - HEAD：`d56c8e4`（`test: guard Prisma CLI and add test DB migration runner`。Step 3-8Bの変更）
+   - 変更済み（Step 3-9・3-9B。未commit）：`docs/PLAN-test-db-isolation.md`、`lib/testing/dbConnectionPaths.test.ts`、`package.json`、リポジトリのルートの `.gitignore`（`git status` では `../.gitignore`）
+   - 未追跡（Step 3-9・3-9B。未commit）：`.env.test.example`、`docker-compose.test.yml`、`docker/test-db/init/01-app-role.sh`、`docker/test-db/init/02-marker.sql`、`scripts/testdb.mts`、`scripts/testdb.test.ts`
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
    - `.env.test` は存在しない（Step 3-7B・3-8Bの一時ファイルは削除済み）
-3. 次の作業は **Step 3-9**（Compose定義とDockerのラッパー）。始める前にユーザーに確認する。前提として、R12（Dockerの記録の取り直し。承認が必要）と、3-7Bの申し送り（`.env.test.example` は `.env*` で除外されるので、否定のパターンが必要）を確認する。接続後のDBの本人確認（migration用スクリプト・globalSetup）は、まだ実装していない。指示されたStep以外には着手しない。
+3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施していて、**未commit**。次に何を行うかは、始める前にユーザーに確認する。候補は、3-9・3-9Bのcommit、`up`・`down`・`reset` の実装（操作前・操作後の確認を含む）、Step 3-10（ユーザーによる `.env.test` の作成）。コンテナの起動（Step 3-11）と、R7の確認は、まだ行っていない。接続後のDBの本人確認（migration用スクリプト・globalSetup）も、まだ実装していない。指示されたStep以外には着手しない。
 4. Stepが終わったら報告し、ユーザーの確認を得たうえで、次の2つを更新してからセッションを終える。
    - 3章の「3-A. 実施結果」（結果、設計との違い、未検証の事項、次のStepへの申し送り）
    - 本節の手順2の想定と、手順3の次のStep
