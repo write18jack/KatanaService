@@ -17,7 +17,15 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { assertTestDatabaseTarget, TestDatabaseGuardError, type TestDatabaseTarget } from "../lib/db/testDatabaseGuard.ts";
+import {
+  assertTestDatabaseCredentials,
+  assertTestDatabaseTarget,
+  TEST_DB_ADMIN_PASSWORD_KEY,
+  TEST_DB_APP_PASSWORD_KEY,
+  TestDatabaseCredentialsError,
+  TestDatabaseGuardError,
+  type TestDatabaseTarget,
+} from "../lib/db/testDatabaseGuard.ts";
 import { DEVELOPMENT_ENV_FILE, inheritAllowedEnv, IntegrationRunnerError, readEnvFile, TEST_ENV_FILE } from "../lib/testing/integrationEnv.ts";
 
 export const COMPOSE_PROJECT = "katana-test";
@@ -36,16 +44,9 @@ const DEVELOPMENT_VOLUME_FORMAT = '{{.Name}}\t{{.CreatedAt}}\t{{index .Labels "c
 const INIT_TARGET = "/docker-entrypoint-initdb.d";
 
 /** .env.test に書いてよいキー（Compose の --env-file は COMPOSE_* なども読むので、これ以外を拒否する） */
-const APP_PASSWORD_KEY = "KATANA_TEST_DB_PASSWORD";
-const ADMIN_PASSWORD_KEY = "KATANA_TEST_DB_ADMIN_PASSWORD";
+const APP_PASSWORD_KEY = TEST_DB_APP_PASSWORD_KEY;
+const ADMIN_PASSWORD_KEY = TEST_DB_ADMIN_PASSWORD_KEY;
 const TEST_ENV_KEYS = ["DATABASE_URL", APP_PASSWORD_KEY, ADMIN_PASSWORD_KEY];
-/**
- * パスワードに使える文字。URLの中でパーセントエンコードが要らない文字だけにして、
- * DATABASE_URL に書かれたままの文字列（エンコードを解かない）と KATANA_TEST_DB_PASSWORD を、そのまま比べられるようにする。
- */
-const PASSWORD_CHARSET = /^[A-Za-z0-9_-]+$/;
-/** .env.test.example の見本の値（CHANGE_ME_…）など */
-const PLACEHOLDER = /change[_-]?me/i;
 /** Docker・Compose の接続先・読み込みを変える変数。親に設定されていたら停止する */
 const DOCKER_TARGET_ENV = ["DOCKER_HOST", "DOCKER_CONTEXT"];
 /** 子プロセスの環境変数に含まれていてはいけない変数（組み立てた後の再確認に使う） */
@@ -118,8 +119,9 @@ export type VerifiedTestDbEnv = {
 
 /**
  * `.env.test`（dotenv.parse した結果）を検証する（R14）。DBには接続しない。
- * DATABASE_URL は assertTestDatabaseTarget() で検証し、そのURLに書かれたままのパスワードが KATANA_TEST_DB_PASSWORD と一致すること、
- * 管理用のパスワードがアプリ用と違うこと、どれも見本の値ではなく、使える文字だけでできていることを確かめる。
+ * キーが3つだけであること（Compose の動作を変えるキーを入れさせない。ラッパーだけの条件）を確かめた後、
+ * DATABASE_URL を assertTestDatabaseTarget() で、パスワードを assertTestDatabaseCredentials() で検証する。
+ * パスワードの検証は、runner・testdb-migrate・Prisma CLI のテストDBモードと共通。エラーコードは共通の関数のものをそのまま使う。
  */
 export function verifyTestDbEnv(testEnv: EnvSource | undefined, developmentEnv: EnvSource | undefined): VerifiedTestDbEnv {
   if (testEnv === undefined) {
@@ -142,31 +144,19 @@ export function verifyTestDbEnv(testEnv: EnvSource | undefined, developmentEnv: 
     throw error;
   }
 
-  const appPassword = testEnv[APP_PASSWORD_KEY];
-  const adminPassword = testEnv[ADMIN_PASSWORD_KEY];
-  if (appPassword === undefined || appPassword === "") {
-    throw new TestDbError("APP_PASSWORD_MISSING", `${APP_PASSWORD_KEY} is not set.`);
+  let credentials: { appPassword: string; adminPassword: string };
+  try {
+    credentials = assertTestDatabaseCredentials(testEnv);
+  } catch (error) {
+    if (error instanceof TestDatabaseCredentialsError) {
+      // URL_INVALID は、assertTestDatabaseTarget() を通った後には起きない
+      if (error.code === "URL_INVALID") throw new TestDbError("TARGET_REJECTED", "the test database target was rejected (URL_INVALID).");
+      // 共通の関数の説明には、パスワード・接続URLが含まれない
+      throw new TestDbError(error.code, error.detail);
+    }
+    throw error;
   }
-  if (adminPassword === undefined || adminPassword === "") {
-    throw new TestDbError("ADMIN_PASSWORD_MISSING", `${ADMIN_PASSWORD_KEY} is not set.`);
-  }
-  // URL の password は、書かれたままの（パーセントエンコードを解かない）文字列。使える文字はエンコードが要らないものだけなので、
-  // `%` を含む書き方は PASSWORD_CHARSET で拒否され、エンコードの有無で値が食い違うことはない
-  const urlPassword = new URL(databaseUrl as string).password;
-  const passwords = [urlPassword, appPassword, adminPassword];
-  if (passwords.some((value) => PLACEHOLDER.test(value))) {
-    throw new TestDbError("PASSWORD_PLACEHOLDER", "a password still has the placeholder value from .env.test.example.");
-  }
-  if (passwords.some((value) => !PASSWORD_CHARSET.test(value))) {
-    throw new TestDbError("PASSWORD_CHARSET", "passwords may only contain A-Z, a-z, 0-9, '_' and '-'.");
-  }
-  if (urlPassword !== appPassword) {
-    throw new TestDbError("URL_PASSWORD_MISMATCH", `the DATABASE_URL password does not match ${APP_PASSWORD_KEY}.`);
-  }
-  if (adminPassword === appPassword) {
-    throw new TestDbError("ADMIN_PASSWORD_SAME_AS_APP", `${ADMIN_PASSWORD_KEY} must differ from ${APP_PASSWORD_KEY}.`);
-  }
-  return { target, databaseUrl: databaseUrl as string, appPassword, adminPassword };
+  return { target, databaseUrl: databaseUrl as string, ...credentials };
 }
 
 /**

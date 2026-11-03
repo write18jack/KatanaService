@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertTestDatabaseCredentials,
   assertTestDatabaseTarget,
   TEST_DATABASE_TARGET,
+  TestDatabaseCredentialsError,
+  type TestDatabaseCredentialsErrorCode,
   TestDatabaseGuardError,
   type TestDatabaseGuardErrorCode,
   type TestDatabaseGuardInput,
@@ -261,5 +264,98 @@ describe("assertTestDatabaseTarget", () => {
         expect((error as Error).message).not.toContain("leak-me");
       }
     });
+  });
+});
+
+describe("assertTestDatabaseCredentials（R14）", () => {
+  const ADMIN = "admin-dummy-pass_2";
+  const GOOD = { DATABASE_URL: TEST_URL, KATANA_TEST_DB_PASSWORD: PASSWORD, KATANA_TEST_DB_ADMIN_PASSWORD: ADMIN };
+
+  /** 指定したコードで拒否され、メッセージ・detail・文字列化した結果に、パスワードとURLが含まれないこと */
+  function expectCredentialsRejected(testEnv: Record<string, string | undefined>, code: TestDatabaseCredentialsErrorCode) {
+    let caught: unknown;
+    try {
+      assertTestDatabaseCredentials(testEnv);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(TestDatabaseCredentialsError);
+    const error = caught as TestDatabaseCredentialsError;
+    expect(error.code).toBe(code);
+    const secrets = [PASSWORD, ADMIN, TEST_URL, "postgresql://", ...Object.values(testEnv)].filter((value): value is string => !!value);
+    for (const text of [error.message, error.detail, String(error)]) {
+      for (const secret of secrets) expect(text).not.toContain(secret);
+    }
+  }
+
+  it("正しい設定なら、検証済みの2つのパスワードを返す", () => {
+    expect(assertTestDatabaseCredentials(GOOD)).toEqual({ appPassword: PASSWORD, adminPassword: ADMIN });
+  });
+
+  it("assertTestDatabaseTarget() と同じ正しいURLを、両方の関数が受け付ける", () => {
+    expect(() => assertTestDatabaseTarget(input({ databaseUrl: GOOD.DATABASE_URL }))).not.toThrow();
+    expect(() => assertTestDatabaseCredentials(GOOD)).not.toThrow();
+  });
+
+  it.each([
+    ["DATABASE_URL がない", undefined],
+    ["DATABASE_URL が空", ""],
+    ["URLとして解析できない", "not a url"],
+    ["空白を含む", `${TEST_URL} `],
+  ])("%s なら拒否する", (_label, databaseUrl) => {
+    expectCredentialsRejected({ ...GOOD, DATABASE_URL: databaseUrl }, "URL_INVALID");
+  });
+
+  it.each([
+    ["アプリ用がない", { KATANA_TEST_DB_PASSWORD: undefined }, "APP_PASSWORD_MISSING"],
+    ["アプリ用が空", { KATANA_TEST_DB_PASSWORD: "" }, "APP_PASSWORD_MISSING"],
+    ["管理用がない", { KATANA_TEST_DB_ADMIN_PASSWORD: undefined }, "ADMIN_PASSWORD_MISSING"],
+    ["管理用が空", { KATANA_TEST_DB_ADMIN_PASSWORD: "" }, "ADMIN_PASSWORD_MISSING"],
+  ] as const)("%s なら拒否する", (_label, override, code) => {
+    expectCredentialsRejected({ ...GOOD, ...override }, code);
+  });
+
+  it("キーの名前は大文字・小文字を区別する（小文字のキーは、ないものとして拒否する）", () => {
+    expectCredentialsRejected(
+      { DATABASE_URL: TEST_URL, katana_test_db_password: PASSWORD, KATANA_TEST_DB_ADMIN_PASSWORD: ADMIN },
+      "APP_PASSWORD_MISSING",
+    );
+  });
+
+  it.each([
+    ["見本の値をそのままコピー", "CHANGE_ME_test_password", "CHANGE_ME_test_password", "CHANGE_ME_admin_password"],
+    ["URLだけ見本の値", "CHANGE_ME_test_password", PASSWORD, ADMIN],
+    ["アプリ用だけ見本の値（URLとも不一致）", PASSWORD, "change_me", ADMIN],
+    ["管理用だけ見本の値", PASSWORD, PASSWORD, "CHANGE_ME_admin_password"],
+    ["小文字・区切りなし", PASSWORD, PASSWORD, "my-changeme-pw"],
+    ["大文字・ハイフン区切り", "CHANGE-ME", "CHANGE-ME", ADMIN],
+  ])("%s なら拒否する（不一致より先に検査する）", (_label, urlPassword, appPassword, adminPassword) => {
+    expectCredentialsRejected(
+      { DATABASE_URL: testUrl({ password: urlPassword }), KATANA_TEST_DB_PASSWORD: appPassword, KATANA_TEST_DB_ADMIN_PASSWORD: adminPassword },
+      "PASSWORD_PLACEHOLDER",
+    );
+  });
+
+  it.each([
+    ["パーセントエンコードした表記", "app%5Fpass", "app_pass"],
+    ["記号", "p@ss!word", "p@ss!word"],
+    ["空白", "pass word", "pass word"],
+  ])("URLのパスワードが%sなら拒否する", (_label, urlPassword, appPassword) => {
+    // new URL() が受け付ける形にしたうえで、使える文字以外を含むものを拒否する
+    const databaseUrl = `postgresql://katana_test_user:${encodeURIComponent(urlPassword).replace(/%25/g, "%")}@127.0.0.1:5434/katana_test`;
+    expectCredentialsRejected({ ...GOOD, DATABASE_URL: databaseUrl, KATANA_TEST_DB_PASSWORD: appPassword }, "PASSWORD_CHARSET");
+  });
+
+  it("管理用のパスワードが使えない文字を含めば拒否する", () => {
+    expectCredentialsRejected({ ...GOOD, KATANA_TEST_DB_ADMIN_PASSWORD: "admin;pass" }, "PASSWORD_CHARSET");
+  });
+
+  it("URLのパスワードとアプリ用のパスワードが違えば拒否する（1文字の違い・大文字小文字の違いも）", () => {
+    expectCredentialsRejected({ ...GOOD, KATANA_TEST_DB_PASSWORD: `${PASSWORD}x` }, "URL_PASSWORD_MISMATCH");
+    expectCredentialsRejected({ ...GOOD, KATANA_TEST_DB_PASSWORD: PASSWORD.toUpperCase() }, "URL_PASSWORD_MISMATCH");
+  });
+
+  it("管理用のパスワードがアプリ用と同じなら拒否する", () => {
+    expectCredentialsRejected({ ...GOOD, KATANA_TEST_DB_ADMIN_PASSWORD: PASSWORD }, "ADMIN_PASSWORD_SAME_AS_APP");
   });
 });

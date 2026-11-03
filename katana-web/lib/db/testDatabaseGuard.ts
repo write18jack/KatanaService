@@ -159,3 +159,85 @@ export function assertTestDatabaseTarget(input: TestDatabaseGuardInput): TestDat
 
   return { host: url.hostname, port: url.port, database: TEST_DATABASE_TARGET.database, user };
 }
+
+/** `.env.test` の、katana_test_user のパスワード（DATABASE_URL のパスワードと同じ値） */
+export const TEST_DB_APP_PASSWORD_KEY = "KATANA_TEST_DB_PASSWORD";
+/** `.env.test` の、初期化だけに使う管理用ユーザー（postgres）のパスワード */
+export const TEST_DB_ADMIN_PASSWORD_KEY = "KATANA_TEST_DB_ADMIN_PASSWORD";
+
+/**
+ * パスワードに使える文字。URLの中でパーセントエンコードが要らない文字だけにして、
+ * DATABASE_URL に書かれたままの文字列（エンコードを解かない）と KATANA_TEST_DB_PASSWORD を、そのまま比べられるようにする。
+ */
+const PASSWORD_CHARSET = /^[A-Za-z0-9_-]+$/;
+/** .env.test.example の見本の値（CHANGE_ME_…）など */
+const PASSWORD_PLACEHOLDER = /change[_-]?me/i;
+
+export type TestDatabaseCredentialsErrorCode =
+  | "URL_INVALID"
+  | "APP_PASSWORD_MISSING"
+  | "ADMIN_PASSWORD_MISSING"
+  | "PASSWORD_PLACEHOLDER"
+  | "PASSWORD_CHARSET"
+  | "URL_PASSWORD_MISMATCH"
+  | "ADMIN_PASSWORD_SAME_AS_APP";
+
+export class TestDatabaseCredentialsError extends Error {
+  readonly code: TestDatabaseCredentialsErrorCode;
+  /** コードを除いた説明（パスワード・接続URLを含まない）。呼び出し側が自分のエラーに包むときに使う */
+  readonly detail: string;
+
+  constructor(code: TestDatabaseCredentialsErrorCode, detail: string) {
+    super(`[testDatabaseGuard] ${code}: ${detail}`);
+    this.name = "TestDatabaseCredentialsError";
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+/**
+ * `.env.test`（dotenv.parse した結果）のパスワードを検証する（R14）。DBには接続しない。
+ * assertTestDatabaseTarget() で DATABASE_URL を検証した後に呼ぶ（URLの形式・空のパスワードは、そちらで拒否される）。
+ *
+ * - KATANA_TEST_DB_PASSWORD・KATANA_TEST_DB_ADMIN_PASSWORD が空でないこと
+ * - URLのパスワードを含む3つの値が、見本の値（CHANGE_ME など。大文字・小文字は区別しない）でないこと
+ * - 3つの値が、使える文字（`[A-Za-z0-9_-]`）だけでできていること
+ * - URLに書かれたままのパスワードが KATANA_TEST_DB_PASSWORD と一致し、管理用のパスワードはそれと違うこと
+ *
+ * テストDBの経路（Dockerのラッパー・統合テストのrunner・migration用スクリプト・Prisma CLIのテストDBモード）からだけ呼ぶ。
+ * 失敗したときのメッセージには、パスワード・接続URLを含めない。成功したら、検証済みの2つのパスワードを返す。
+ */
+export function assertTestDatabaseCredentials(testEnv: Readonly<Record<string, string | undefined>>): {
+  appPassword: string;
+  adminPassword: string;
+} {
+  const parsed = testEnv.DATABASE_URL === undefined ? null : parsePostgresUrl(testEnv.DATABASE_URL);
+  if (!parsed) {
+    throw new TestDatabaseCredentialsError("URL_INVALID", "DATABASE_URL could not be parsed as a URL.");
+  }
+  const appPassword = testEnv[TEST_DB_APP_PASSWORD_KEY];
+  const adminPassword = testEnv[TEST_DB_ADMIN_PASSWORD_KEY];
+  if (appPassword === undefined || appPassword === "") {
+    throw new TestDatabaseCredentialsError("APP_PASSWORD_MISSING", `${TEST_DB_APP_PASSWORD_KEY} is not set.`);
+  }
+  if (adminPassword === undefined || adminPassword === "") {
+    throw new TestDatabaseCredentialsError("ADMIN_PASSWORD_MISSING", `${TEST_DB_ADMIN_PASSWORD_KEY} is not set.`);
+  }
+  // URL の password は、書かれたままの（パーセントエンコードを解かない）文字列。使える文字はエンコードが要らないものだけなので、
+  // `%` を含む書き方は PASSWORD_CHARSET で拒否され、エンコードの有無で値が食い違うことはない
+  const urlPassword = parsed.url.password;
+  const passwords = [urlPassword, appPassword, adminPassword];
+  if (passwords.some((value) => PASSWORD_PLACEHOLDER.test(value))) {
+    throw new TestDatabaseCredentialsError("PASSWORD_PLACEHOLDER", "a password still has the placeholder value from .env.test.example.");
+  }
+  if (passwords.some((value) => !PASSWORD_CHARSET.test(value))) {
+    throw new TestDatabaseCredentialsError("PASSWORD_CHARSET", "passwords may only contain A-Z, a-z, 0-9, '_' and '-'.");
+  }
+  if (urlPassword !== appPassword) {
+    throw new TestDatabaseCredentialsError("URL_PASSWORD_MISMATCH", `the DATABASE_URL password does not match ${TEST_DB_APP_PASSWORD_KEY}.`);
+  }
+  if (adminPassword === appPassword) {
+    throw new TestDatabaseCredentialsError("ADMIN_PASSWORD_SAME_AS_APP", `${TEST_DB_ADMIN_PASSWORD_KEY} must differ from ${TEST_DB_APP_PASSWORD_KEY}.`);
+  }
+  return { appPassword, adminPassword };
+}

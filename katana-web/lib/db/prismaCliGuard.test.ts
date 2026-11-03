@@ -13,9 +13,14 @@ const PASSWORD = "cli-dummy-pass";
 const TEST_URL = `postgresql://katana_test_user:${PASSWORD}@127.0.0.1:5434/katana_test`;
 const DEV_PASSWORD = "dev-dummy-pass";
 const DEV_URL = `postgresql://katana:${DEV_PASSWORD}@localhost:5433/katana`;
+const ADMIN_PASSWORD = "cli-dummy-admin";
+/** 正しい .env.test（パスワードの2つのキーを含む。R14）。url を変えるときは、アプリ用のパスワードはそのまま */
+function testEnvFor(url: string = TEST_URL): Record<string, string> {
+  return { DATABASE_URL: url, KATANA_TEST_DB_PASSWORD: PASSWORD, KATANA_TEST_DB_ADMIN_PASSWORD: ADMIN_PASSWORD };
+}
 
 function testModeInput(overrides: { env?: Record<string, string | undefined>; testEnv?: Record<string, string> | undefined; argv?: string[] } = {}) {
-  const readTestEnv = vi.fn(() => ("testEnv" in overrides ? overrides.testEnv : { DATABASE_URL: TEST_URL }));
+  const readTestEnv = vi.fn(() => ("testEnv" in overrides ? overrides.testEnv : testEnvFor()));
   const readDevelopmentEnv = vi.fn(() => ({ DATABASE_URL: DEV_URL }));
   const input: PrismaCliGuardInput = {
     env: { KATANA_DB_TARGET: "test", DATABASE_URL: TEST_URL, PATH: "/usr/bin", ...overrides.env },
@@ -47,7 +52,7 @@ function expectRejected(input: PrismaCliGuardInput, code: PrismaCliGuardErrorCod
   if (targetCode) expect(error.targetCode).toBe(targetCode);
   // Prisma CLI は `Error: ${error}` を表示するので、文字列化した結果でも確かめる
   for (const text of [error.message, String(error)]) {
-    for (const secret of [PASSWORD, DEV_PASSWORD, TEST_URL, DEV_URL, "postgresql://", "postgres://"]) {
+    for (const secret of [PASSWORD, ADMIN_PASSWORD, DEV_PASSWORD, TEST_URL, DEV_URL, "postgresql://", "postgres://"]) {
       expect(text).not.toContain(secret);
     }
   }
@@ -105,7 +110,7 @@ describe("resolvePrismaCliDatabaseTarget：KATANA_DB_TARGET=test", () => {
 
   it("localhost の表記も許可する", () => {
     const url = TEST_URL.replace("127.0.0.1", "localhost");
-    const { input } = testModeInput({ env: { DATABASE_URL: url }, testEnv: { DATABASE_URL: url } });
+    const { input } = testModeInput({ env: { DATABASE_URL: url }, testEnv: testEnvFor(url) });
     expect(resolvePrismaCliDatabaseTarget(input)).toEqual({ mode: "test", url });
   });
 
@@ -127,7 +132,7 @@ describe("resolvePrismaCliDatabaseTarget：KATANA_DB_TARGET=test", () => {
     ["ほかのホスト", TEST_URL.replace("127.0.0.1", "db.example.com"), "HOST_NOT_ALLOWED"],
     ["クエリパラメータ", `${TEST_URL}?host=/tmp`, "QUERY_NOT_ALLOWED"],
   ])(".env.test が %s なら拒否する（プロセスの値が同じでも）", (_label, url, targetCode) => {
-    const { input } = testModeInput({ env: { DATABASE_URL: url }, testEnv: { DATABASE_URL: url } });
+    const { input } = testModeInput({ env: { DATABASE_URL: url }, testEnv: testEnvFor(url) });
     expectRejected(input, "TARGET_REJECTED", targetCode);
   });
 
@@ -143,6 +148,28 @@ describe("resolvePrismaCliDatabaseTarget：KATANA_DB_TARGET=test", () => {
     ["DOTENV_CONFIG_OVERRIDE", "DOTENV_ENV_PRESENT"],
   ])("%s が設定されていれば拒否する（値が空でも）", (key, targetCode) => {
     expectRejected(testModeInput({ env: { [key]: "" } }).input, "TARGET_REJECTED", targetCode);
+  });
+
+  it.each([
+    ["アプリ用のパスワードがない", { KATANA_TEST_DB_PASSWORD: undefined }, "APP_PASSWORD_MISSING"],
+    ["管理用のパスワードが空", { KATANA_TEST_DB_ADMIN_PASSWORD: "" }, "ADMIN_PASSWORD_MISSING"],
+    ["管理用が見本の値", { KATANA_TEST_DB_ADMIN_PASSWORD: "CHANGE_ME_admin_password" }, "PASSWORD_PLACEHOLDER"],
+    ["URLとアプリ用のパスワードが違う", { KATANA_TEST_DB_PASSWORD: `${PASSWORD}x` }, "URL_PASSWORD_MISMATCH"],
+    ["管理用がアプリ用と同じ", { KATANA_TEST_DB_ADMIN_PASSWORD: PASSWORD }, "ADMIN_PASSWORD_SAME_AS_APP"],
+  ])(".env.test の %s なら拒否する（R14）", (_label, override, credentialsCode) => {
+    const testEnv = { ...testEnvFor(), ...override } as Record<string, string>;
+    expectRejected(testModeInput({ testEnv }).input, "CREDENTIALS_REJECTED", credentialsCode);
+  });
+
+  it("URLのパスワードも見本の値なら拒否する（プロセスの値が同じでも。R14）", () => {
+    const url = TEST_URL.replace(PASSWORD, "CHANGE_ME_test_password");
+    const testEnv = { ...testEnvFor(url), KATANA_TEST_DB_PASSWORD: "CHANGE_ME_test_password" };
+    expectRejected(testModeInput({ env: { DATABASE_URL: url }, testEnv }).input, "CREDENTIALS_REJECTED", "PASSWORD_PLACEHOLDER");
+  });
+
+  it("プロセスの環境変数のパスワードは使わない（.env.test の値だけを検証する。R14）", () => {
+    const { input } = testModeInput({ env: { KATANA_TEST_DB_PASSWORD: PASSWORD, KATANA_TEST_DB_ADMIN_PASSWORD: ADMIN_PASSWORD }, testEnv: { DATABASE_URL: TEST_URL } });
+    expectRejected(input, "CREDENTIALS_REJECTED", "APP_PASSWORD_MISSING");
   });
 
   it("NODE_OPTIONS が設定されていれば、.env.test を読む前に拒否する", () => {

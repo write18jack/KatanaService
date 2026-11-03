@@ -16,7 +16,10 @@ const PASSWORD = "migrate-dummy-pass";
 const TEST_URL = `postgresql://katana_test_user:${PASSWORD}@127.0.0.1:5434/katana_test`;
 const DEV_PASSWORD = "dev-dummy-pass";
 const DEV_URL = `postgresql://katana:${DEV_PASSWORD}@localhost:5433/katana`;
-const SECRETS = [PASSWORD, DEV_PASSWORD, TEST_URL, DEV_URL, "postgresql://", "postgres://"];
+const ADMIN_PASSWORD = "migrate-dummy-admin";
+const SECRETS = [PASSWORD, ADMIN_PASSWORD, DEV_PASSWORD, TEST_URL, DEV_URL, "postgresql://", "postgres://"];
+/** 正しい .env.test（パスワードの2つのキーを含む。R14） */
+const GOOD_TEST_ENV = { DATABASE_URL: TEST_URL, KATANA_TEST_DB_PASSWORD: PASSWORD, KATANA_TEST_DB_ADMIN_PASSWORD: ADMIN_PASSWORD };
 
 type Fake = {
   deps: TestDbMigrateDeps;
@@ -39,7 +42,7 @@ function fake(
   const calls: string[] = [];
   const logs: string[] = [];
   const files: Record<string, Record<string, string> | undefined> = {
-    ".env.test": { DATABASE_URL: TEST_URL },
+    ".env.test": GOOD_TEST_ENV,
     ".env": { DATABASE_URL: DEV_URL },
     ...overrides.files,
   };
@@ -225,10 +228,44 @@ describe("runTestDbMigrate：停止条件（子プロセスを起動しない）
     ["ほかのホスト", TEST_URL.replace("127.0.0.1", "10.0.0.5"), "HOST_NOT_ALLOWED"],
     ["クエリパラメータ", `${TEST_URL}?host=/tmp`, "QUERY_NOT_ALLOWED"],
   ])(".env.test の DATABASE_URL が %s なら、コマンドの確認の前に止まる", async (_label, url, guardCode) => {
-    const f = fake({ files: { ".env.test": url === undefined ? {} : { DATABASE_URL: url } } });
+    const f = fake({ files: { ".env.test": { ...GOOD_TEST_ENV, DATABASE_URL: url } as Record<string, string> } });
     const error = await expectStopped(f, "TARGET_REJECTED");
     expect(error.message).toContain(`(${guardCode})`);
     expect(f.calls).toEqual(["read:.env.test", "read:.env"]);
+  });
+
+  it.each([
+    ["アプリ用のパスワードがない", { KATANA_TEST_DB_PASSWORD: undefined }, "APP_PASSWORD_MISSING"],
+    ["アプリ用のパスワードが空", { KATANA_TEST_DB_PASSWORD: "" }, "APP_PASSWORD_MISSING"],
+    ["管理用のパスワードがない", { KATANA_TEST_DB_ADMIN_PASSWORD: undefined }, "ADMIN_PASSWORD_MISSING"],
+    [
+      "見本の値のまま",
+      {
+        DATABASE_URL: TEST_URL.replace(PASSWORD, "CHANGE_ME_test_password"),
+        KATANA_TEST_DB_PASSWORD: "CHANGE_ME_test_password",
+        KATANA_TEST_DB_ADMIN_PASSWORD: "CHANGE_ME_admin_password",
+      },
+      "PASSWORD_PLACEHOLDER",
+    ],
+    ["URLとアプリ用のパスワードが違う", { KATANA_TEST_DB_PASSWORD: `${PASSWORD}x` }, "URL_PASSWORD_MISMATCH"],
+    ["管理用がアプリ用と同じ", { KATANA_TEST_DB_ADMIN_PASSWORD: PASSWORD }, "ADMIN_PASSWORD_SAME_AS_APP"],
+    ["使えない文字", { KATANA_TEST_DB_ADMIN_PASSWORD: "admin pass!" }, "PASSWORD_CHARSET"],
+  ])(".env.test の %s なら、コマンドの確認の前に止まる（R14）", async (_label, override, credentialsCode) => {
+    const f = fake({ files: { ".env.test": { ...GOOD_TEST_ENV, ...override } as Record<string, string> } });
+    const error = await expectStopped(f, "CREDENTIALS_REJECTED");
+    expect(error.message).toContain(`(${credentialsCode})`);
+    expect(f.calls).toEqual(["read:.env.test", "read:.env"]);
+  });
+
+  it("確認モードでも、パスワードの検証に失敗すれば止まる（R14）", async () => {
+    const f = fake({ argv: ["--check"], files: { ".env.test": { ...GOOD_TEST_ENV, KATANA_TEST_DB_ADMIN_PASSWORD: "changeme-admin" } } });
+    await expectStopped(f, "CREDENTIALS_REJECTED");
+  });
+
+  it("パスワードは子プロセスに渡さず、親の同じ名前の変数も使わない（R14）", async () => {
+    const f = fake({ parentEnv: { PATH: "/usr/bin", KATANA_TEST_DB_PASSWORD: "parent-pass", KATANA_TEST_DB_ADMIN_PASSWORD: "parent-admin" } });
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.spawn.mock.calls[0][2].env).toEqual({ PATH: "/usr/bin", DATABASE_URL: TEST_URL, KATANA_DB_TARGET: "test" });
   });
 
   it("開発用DBと同じ接続先なら止まる", async () => {

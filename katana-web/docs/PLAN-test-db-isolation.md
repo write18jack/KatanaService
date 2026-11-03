@@ -1,7 +1,7 @@
 # 計画：専用テストDBの構築とVitest統合テストの分離
 
 作成日: 2026-10-26
-更新日: 2026-11-03（Step 3-8Bのcommit `d56c8e4`、R12のDockerの読み取り調査、Step 3-9・3-9B（テストDBの構成ファイルとDockerのラッパー。`docker compose config` による照合まで）の実施結果を反映）
+更新日: 2026-11-03（Step 3-8Bのcommit `d56c8e4`、R12のDockerの読み取り調査、Step 3-9・3-9B（テストDBの構成ファイルとDockerのラッパー。`docker compose config` による照合まで）の実施結果と、そのcommit `61f8105`、Step 3-9C（R14のパスワード検証の共通化）の実施結果を反映）
 作業ブランチ: `chore/test-db-isolation`（`fix-dashboard` の `6168889` から作成）
 
 ## 状態
@@ -10,7 +10,7 @@
 |---|---|
 | Phase 1：読み取り専用の調査 | **実施済み**（結果は本ファイルの1章） |
 | Phase 2：安全設計 | **設計レビュー完了**（確定設計は本ファイルの2章） |
-| Phase 3：実装 | **実施中**（Step 3-0〜3-8B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712`、Step 3-8A（接続後の本人確認と空DB検査）は `4b788e7` でcommit。Step 3-8B（当初の3-8：`prisma.config.ts` のガードとmigration用スクリプト）は `d56c8e4` でcommit。Step 3-9（テストDBの構成ファイル）とStep 3-9B（Dockerのラッパー `scripts/testdb.mts` の `--check`・`--status`と、`docker compose config` による照合。架空の一時的な `.env.test` で、全項目が一致）は実施済み。`up`・`down`・`reset` は未実装で、コンテナは一度も起動していない。結果は3章の「3-A. 実施結果」） |
+| Phase 3：実装 | **実施中**（Step 3-0〜3-8B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712`、Step 3-8A（接続後の本人確認と空DB検査）は `4b788e7` でcommit。Step 3-8B（当初の3-8：`prisma.config.ts` のガードとmigration用スクリプト）は `d56c8e4` でcommit。Step 3-9（テストDBの構成ファイル）とStep 3-9B（Dockerのラッパー `scripts/testdb.mts` の `--check`・`--status`と、`docker compose config` による照合。架空の一時的な `.env.test` で、全項目が一致）は実施済みで、`61f8105` でcommit。Step 3-9C（R14のパスワード検証を共通の関数にまとめ、4つの経路に適用）は実施済みで、`test: centralize test database credential validation` でcommit。`up`・`down`・`reset` は未実装で、コンテナの起動とDBへの接続は一度も行っていない。結果は3章の「3-A. 実施結果」） |
 | Phase 4：検証 | **未着手** |
 
 F-01の判定は **CONDITIONAL PASS のまま**。実DB・Cookie・HTTPでの検証は、Phase 4のE2Eで行う。
@@ -357,8 +357,9 @@ npm run test:integration ─► 専用runner
 | 3-7B | runnerの確認モードの検証・`.env.test` のGit保護の確認 | `d087712`（変更はPLANだけ） |
 | 3-8A | ユーザーの指示により、接続後の本人確認と空DB検査を実装（DB非接続の単体テストのみ。実DBでの動作確認と、globalSetupへの組み込みは**未実施**） | `4b788e7`（`test: add integration database identity and empty checks`） |
 | 3-8B | 当初の3-8：`prisma.config.ts` のガードとテストDB専用migrationスクリプト（DB非接続の単体テスト、静的検証、`prisma validate` による設定読み込みの検証。実DBへの接続・`migrate deploy` は未実施。通常実行モードは、接続後の本人確認が未実装のため必ず停止する） | `d56c8e4`（`test: guard Prisma CLI and add test DB migration runner`） |
-| 3-9 | テストDBの構成ファイル（Compose定義・初期化スクリプト・`.env.test.example`・`.gitignore`）の作成と静的検証。R12のDockerの読み取り調査 | **未commit** |
-| 3-9B | Dockerのラッパー `scripts/testdb.mts`（`--check`・`--status`。読み取り専用）、R14・R15の対策、`docker compose config` による照合（架空の一時的な `.env.test` で実施）。`up`・`down`・`reset` は**未実装**（コンテナは一度も起動していない） | **未commit** |
+| 3-9 | テストDBの構成ファイル（Compose定義・初期化スクリプト・`.env.test.example`・`.gitignore`）の作成と静的検証。R12のDockerの読み取り調査 | `61f8105`（`test: add isolated PostgreSQL test environment`。3-9Bと同じcommit） |
+| 3-9B | Dockerのラッパー `scripts/testdb.mts`（`--check`・`--status`。読み取り専用）、R14・R15の対策、`docker compose config` による照合（架空の一時的な `.env.test` で実施）。`up`・`down`・`reset` は**未実装**（コンテナの起動・DBへの接続は一度も行っていない） | `61f8105`（`test: add isolated PostgreSQL test environment`） |
+| 3-9C | R14のパスワード検証の共通化（`assertTestDatabaseCredentials()`。Dockerのラッパー・統合テストのrunner・migration用スクリプト・Prisma CLIのテストDBモードに適用）。DB非接続の単体テストと、3つの確認モードの実行による回帰確認。R14は**一部が残る** | `test: centralize test database credential validation`（hashは次のセッションで記録する） |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -611,7 +612,9 @@ npm run test:integration ─► 専用runner
   - 本人確認を組み込むとき：仮の関数を、DBのコメント（`katana-test-db`）・`current_database()`・`current_user` を照合する関数に置き換える。`verifyIntegrationDatabase()` は、migration済みのテーブル構成まで確かめるので、migrationの前には使えない。本人確認の部分だけを分ける必要がある。`pg` を使う場合は、静的検査の許可リストに `scripts/testdb-migrate.mts` の1ファイルだけを加えるかどうかを、その時に決める。
   - CLAUDE.mdへの追記案（Step 3-13）には、「テストDBにはPrisma CLIを直接実行せず、`npm run testdb:migrate` を使う」を入れる。
 
-**Step 3-9（テストDBの構成ファイル。静的検証まで。未完了・未commit）**
+**Step 3-9（テストDBの構成ファイル。静的検証まで。`61f8105` でcommit）**
+
+- 以下の「未追跡・未commit」「未commit」は記録した時点の状態。Step 3-9・3-9Bの変更は、すべて `61f8105` に含まれる。
 
 - **R12：Dockerの読み取り専用の調査**（ユーザーの承認を得て実施。2026-11-03）
   - 使ったコマンド：`docker info`（バージョンだけ）・`docker context show`・`docker ps -a`・`docker volume ls`・`docker compose ls -a`。`docker volume inspect` と `docker inspect sample-db` は、`--format` で必要な項目だけを表示した。ほかに `lsof` でポートを確かめた。起動・停止・exec・ボリュームの変更は、していない。
@@ -693,7 +696,7 @@ npm run test:integration ─► 専用runner
   - migrationを `katana_test_user` の権限で適用できるか、`shobj_description`・`pg_class` を読めるかは、実DBで未検証。
 - **未実施（Step 3-9の時点）:** Dockerの起動・停止、`docker compose config`、DBへの接続、SQLの実行、migration、seed、統合テスト、build、git add・commit。`docker compose config` による照合とラッパーは、Step 3-9Bで実施した。
 
-**Step 3-9B（Dockerのラッパーと、`docker compose config` による照合。未commit）**
+**Step 3-9B（Dockerのラッパーと、`docker compose config` による照合。`61f8105` でcommit）**
 
 - 作成（いずれも未追跡・未commit）：`scripts/testdb.mts`（ラッパー本体。検証の関数をexportし、直接実行したときだけ `main()` が動く）、`scripts/testdb.test.ts`（67件。docker の呼び出しは偽の関数で置き換える）。
 - 変更（未commit）:
@@ -730,7 +733,7 @@ npm run test:integration ─► 専用runner
   - URLのパスワードとアプリ用のパスワードが一致すること（`URL_PASSWORD_MISMATCH`）。
   - 管理用とアプリ用のパスワードが違うこと（`ADMIN_PASSWORD_SAME_AS_APP`）。
   - **パーセントエンコードの扱い：** URLのパスワードは、書かれたままの文字列（デコードしない）で比べる。使える文字は、エンコードが要らないものだけにした。そのため、`%` を含む表記は文字種の検査で拒否され、エンコードの有無で値が食い違うことはない。
-  - 既存のガード（`assertTestDatabaseTarget()`）は変えていない。見本の値を拒否するのは、ラッパーだけ。runner・`testdb-migrate`・`prisma.config.ts` は、パスワードの中身を検査しないまま（R14の残り）。
+  - 既存のガード（`assertTestDatabaseTarget()`）は変えていない。見本の値を拒否するのは、ラッパーだけ。runner・`testdb-migrate`・`prisma.config.ts` は、パスワードの中身を検査しないまま（R14の残り）。→ Step 3-9Cで、4つの経路に共通の検証を入れた（下記）。
 - **R15（環境変数の隔離）:**
   - 子プロセスの環境変数は、runnerと同じ許可リスト（`inheritAllowedEnv()`）で引き継ぐ変数と、検証済みの `KATANA_TEST_DB_PASSWORD`・`KATANA_TEST_DB_ADMIN_PASSWORD` だけ。
   - 引き継がないもの：親の `DATABASE_URL`・`PG*`・`DOTENV_*`・`COMPOSE_*`・`POSTGRES_*`・`DOCKER_*`（`DOCKER_CONFIG`・`DOCKER_CERT_PATH` を含む）・`NODE_OPTIONS`、親の同名のパスワード変数。
@@ -774,6 +777,63 @@ npm run test:integration ─► 専用runner
   - `katana_test_user` の権限で migration を適用できること。
   - `--status` の実際の出力。
   - Composeの `ps --format json` の出力の形（JSON配列か、1行ごとのJSONか）は、両方に対応したが、Compose v5で実際に確かめていない。
+- **commitの前の修正（コメント・文書だけ）:** `docker-compose.test.yml` のコメント2か所（初期化スクリプトの名前を `01-app-role.sh` に訂正。マウントはディレクトリ単位なので、実際のマウントパスは正しかった。`testdb.mts` が「後続のStepで作成」とあった記述を、今の状態に更新）と、本ファイルの2か所（Phase 3の状態の欄、Step 3-4の許可リストの記述）。
+- **commitの前の最終検証:**
+  - `npx tsc --noEmit`、TS・JSの3ファイルの `eslint`、`bash -n docker/test-db/init/01-app-role.sh`、`git diff --check` が成功した。
+  - `npm test` は28ファイル・705件がすべて成功した（静的検査の違反0件）。`npx vitest list --filesOnly` は28件で、`*.integration.test.*` は0件。統合テスト用の設定では6件。
+  - `docker compose config` による照合（`npm run testdb:check`）を、3-9Bと同じ条件で行い、終了コード0で全項目が一致した。条件は、架空のパスワードで権限600の一時的な `.env.test` を作ること、`DOCKER_HOST`・`DOCKER_CONTEXT`・`NODE_OPTIONS` を外すこと、実行後に削除すること。開発用DBへの参照はなく、出力に秘密情報は0件。`.env`・`.env.local` のハッシュと、`docker ps -a`・`docker volume ls` の一覧は、実行の前後で変わらなかった。
+  - **コンテナの起動・停止・削除、DBへの接続、migration、seed、統合テスト、build は行っていない。**
+- **commit：** `61f8105`（`test: add isolated PostgreSQL test environment`。親は `d56c8e4`）。Step 3-9・3-9Bをまとめた1つのcommit。対象は10ファイル（変更4件・新規6件）。
+  - 変更：リポジトリのルートの `.gitignore`、`package.json`、`lib/testing/dbConnectionPaths.test.ts`、`docs/PLAN-test-db-isolation.md`。
+  - 新規：`.env.test.example`、`docker-compose.test.yml`、`docker/test-db/init/01-app-role.sh`、`docker/test-db/init/02-marker.sql`、`scripts/testdb.mts`、`scripts/testdb.test.ts`。
+  - ステージはファイルを指定して行った（`git add .`・`-A` は使っていない）。commitの前に、`git diff --cached --check` が0件であること、`.env`・`.env.local` の値と実在する認証情報が差分に含まれないことを確かめた。pptx・`test-data/`・`.env.test` はステージしていない。
+  - commit後の本ファイルの更新（この記録と「次のセッションで最初に行うこと」）は、ユーザーの指示で、次の実装作業（Step 3-9C）のcommitに含めた。
+
+**Step 3-9C（R14のパスワード検証の共通化。ユーザーの指示による）**
+
+- 目的：Step 3-9Bではラッパーだけが行っていた `.env.test` のパスワードの検証を、共通の純粋関数にまとめ、テストDBの正規の実行経路のすべてで行う。DBには接続しない。
+- **共通の関数**（`lib/db/testDatabaseGuard.ts` に追加。外部モジュールは読み込まない）:
+  - `assertTestDatabaseCredentials(testEnv)`：`.env.test` を `dotenv.parse` した結果を受け取り、次の順に確かめる。成功したら、検証済みの2つのパスワードを返す。
+    1. `DATABASE_URL` が解析できること（`URL_INVALID`）
+    2. `KATANA_TEST_DB_PASSWORD`・`KATANA_TEST_DB_ADMIN_PASSWORD` が空でないこと（`APP_PASSWORD_MISSING`・`ADMIN_PASSWORD_MISSING`）
+    3. URLのパスワードを含む3つの値が、見本の値（`/change[_-]?me/i`）でないこと（`PASSWORD_PLACEHOLDER`）
+    4. 3つの値が `[A-Za-z0-9_-]` だけでできていること（`PASSWORD_CHARSET`）
+    5. URLに書かれたままのパスワードが `KATANA_TEST_DB_PASSWORD` と一致すること（`URL_PASSWORD_MISMATCH`）
+    6. 管理用のパスワードがアプリ用と違うこと（`ADMIN_PASSWORD_SAME_AS_APP`）
+  - `TestDatabaseCredentialsError`：`code` と `detail`（コードを除いた説明）を持つ。メッセージ・`detail` には、パスワード・接続URLを含めない。
+  - 定数 `TEST_DB_APP_PASSWORD_KEY`・`TEST_DB_ADMIN_PASSWORD_KEY` もここに置いた（ラッパーはこれを使う）。
+  - `assertTestDatabaseTarget()` は変えていない。共通の関数は、どの経路でも `assertTestDatabaseTarget()` に通った**後**に呼ぶ。接続先が不正なら、今までどおり接続先のエラーで止まる。
+- **適用した経路（4つ）:**
+  - Dockerのラッパー（`scripts/testdb.mts` の `verifyTestDbEnv`）：自前の検証を共通の関数に置き換えた。エラーコードは今までと同じ（共通の関数のコードをそのまま使う）。キーを3つに限る条件（`TEST_ENV_UNEXPECTED_KEY`）は、Composeの動作を変えさせないためのものなので、ラッパーにだけ残した。
+  - 統合テストのrunner（`lib/testing/integrationEnv.ts` の `prepareIntegrationEnv`）：拒否したら `IntegrationRunnerError`（`the test database credentials in .env.test were rejected (<コード>)`）。
+  - migration用スクリプト（`lib/testing/testDbMigrate.ts`）：手順5に追加。新しいコード `CREDENTIALS_REJECTED`（理由のコードを括弧で付ける）。確認モードでも止まる。
+  - Prisma CLIのテストDBモード（`lib/db/prismaCliGuard.ts`）：`assertTestDatabaseTarget()` の後、`DATABASE_URL_MISMATCH` の確認の前。新しいコード `CREDENTIALS_REJECTED`。`targetCode` に理由のコードを入れる。
+  - パスワードは、検証には `.env.test` の値だけを使う。親の環境変数に同じ名前の変数があっても使わない。runner・migration用スクリプトの子プロセスには、パスワードを渡さない（接続には `DATABASE_URL` だけを使う）。
+- **既存の機能への影響:**
+  - 開発・本番用の経路は変えていない。`lib/prisma.ts` と、Prisma CLIの既定のモード（`KATANA_DB_TARGET` が未設定）は変更なし。既定のモードで `.env.test` を読まないことは、既存のテストで確認している。
+  - テストDBの経路は厳しくなった。`DATABASE_URL` しか書いていない `.env.test` は、runner・`testdb-migrate`・Prisma CLIのテストDBモードでも拒否される（`.env.test.example` には、もともと3つのキーがある）。
+  - 既存のガードは緩めていない。globalSetup（`lib/testing/integrationGlobalSetup.ts`）は、**今も必ず停止する**（変更していない）。
+- **テスト:**
+  - 新規：`lib/testing/integrationEnv.test.ts`（runnerの `prepareIntegrationEnv` には、これまで単体テストがなかった）。
+  - 変更：`lib/db/testDatabaseGuard.test.ts`（共通の関数のテスト）、`lib/db/prismaCliGuard.test.ts`・`lib/testing/testDbMigrate.test.ts`（テスト用の `.env.test` に架空のパスワード2つを足し、R14のテストを追加）、`scripts/testdb.test.ts`（ラッパーの判定が共通の関数と同じコードになること）。
+  - 確かめた内容：正しい設定、見本の値、空・未設定のパスワード、不一致、管理用とアプリ用が同じ、使えない文字・パーセントエンコードの表記、キーの名前の大文字・小文字、不正な接続先、`NODE_OPTIONS`・`PG*`、親の環境変数のパスワードを使わないこと、エラーに秘密情報が入らないこと。
+  - `lib/testing/dbConnectionPaths.test.ts`：テストファイルが1つ増えたので、通常テストの期待件数を28→29に変更した。規則・許可リストは変えていない。
+- **確認済み:**
+  - 新しく追加したテストの57件が成功した。
+  - `npm test` は29ファイル・762件がすべて成功した（705件＋57件）。`dbConnectionPaths.test.ts` の静的検査の違反は0件。
+  - `npx tsc --noEmit` と、変更した11ファイルの `eslint` が成功した。`git diff --check` は0件。
+  - `npx vitest list --filesOnly` は29件で、`*.integration.test.*` は0件。統合テスト用の設定では6件。
+  - **回帰確認（3つの確認モード）：** 架空の認証情報で一時的な `.env.test` を作った（`umask 077`、権限 `-rw-------`）。`DOCKER_HOST`・`DOCKER_CONTEXT`・`NODE_OPTIONS` を外して実行した。
+    - 3つの確認モードは、どれも検証だけで終わり、子プロセスの起動・DBへの接続の前に返ることを、ソースで確かめてから実行した（runner の `mode === "check"`、`runTestDbMigrate` の手順7の後、`testdb.mts` の読み取り専用のコマンドの許可リスト）。
+    - `npm run test:integration:check`・`npm run testdb:migrate:check`・`npm run testdb:check` は、3つとも終了コード0で、共通の検証に通った。`testdb:check` の `docker compose config` の照合も、全項目が一致した。
+    - `.env.test.example` をそのままコピーした場合は、3つとも終了コード1で止まった（runner と `testdb-migrate` は `(PASSWORD_PLACEHOLDER)`、ラッパーは `PASSWORD_PLACEHOLDER`）。
+    - 出力に、パスワード・`CHANGE_ME`・`postgresql://`・`postgres://` は0件。一時的な `.env.test` は削除し、存在しないことを確かめた。`.env`・`.env.local` のハッシュと、`docker ps -a`・`docker volume ls` の一覧は、実行の前後で変わらなかった。
+  - **Dockerの操作（読み取り系の `context show`・`config`・前後比較の `ps -a`・`volume ls` 以外）、コンテナの起動、DBへの接続、migration、seed、統合テスト、runnerの通常実行モード、build は行っていない。**
+- **R14の残課題（R14は完全には解消していない）:**
+  1. globalSetup と `lib/prisma.ts` の統合テストモードを、runnerを通さずに起動する経路。どちらもプロセスの `DATABASE_URL` の接続先だけを検証し、パスワードは検証しない。`KATANA_DB_TEST_MODE=integration`・`KATANA_TEST_RUNNER=script` を手で設定して `vitest --config vitest.integration.config.ts` を直接実行すると、runnerのパスワードの検証を通らない。**今は globalSetup が必ず停止するので、統合テストは始まらない。** globalSetup に接続の処理を組み込むときに、この経路の対策を決める。
+  2. `docker compose` の直接実行。Compose定義の `${VAR:?}` は、値が設定されていることしか確かめない。見本の値のままでも起動できる。操作はラッパーからだけ行う運用で守る（CLAUDE.mdへの追記案、Step 3-13）。
+  3. psql などのプロジェクトの外の道具からテストDBへの接続は、対象外。
+- **commit：** `test: centralize test database credential validation`（親は `61f8105`）。対象は12ファイル（変更11件・新規1件。本ファイルを含む）。hash は、commit後に次のセッションで3-Aに記録する。
 
 全Stepに共通する事項:
 
@@ -997,7 +1057,7 @@ npm run test:integration ─► 専用runner
 | R7 | tmpfsとイメージの `VOLUME` 宣言の関係 | 未検証。静的には確定できない（3-Aの3-9B）。初めて起動した後に、`docker inspect` の `Mounts`・`HostConfig.Tmpfs` と、起動前後の `docker volume ls` で確かめる。既存の無名ボリューム `0df3f60a…`（どのコンテナも使っていない）があることは記録済み |
 | R8 | Node 25で `.mts` のスクリプトを動かせるか。Vitest 4の `test.env` と `.env.test` の扱い | `test.env` が親プロセスの値を上書きすることは、Step 3-3でソースを読んで確認済み。`.mts` のrunnerがNode 25でそのまま動くことは、Step 3-7Bの確認モードで確認済み。統合テスト用の設定は `envDir: false` でViteに `.env*` を読ませない（通常実行モードでの確認は未実施） |
 | R12 | Step 3-0で取得したDockerの記録（コンテキスト・ボリューム名・`katana-db`）が残っていない | 解消（Step 3-9で取得し直した：コンテキスト `desktop-linux`、ボリューム `katana-web_postgres_data`）。**調査の時点で、開発用コンテナ `katana-db` は存在しない。** 今後の比較の対象は、開発用ボリュームの名前・作成日時（2026-07-18T05:42:41Z）・ラベル（`com.docker.compose.project=katana-web`・`com.docker.compose.volume=postgres_data`）と、`katana-db` の有無。`testdb --status` がこれらを読み取る。ボリュームへの操作は読み取りだけ |
-| R14 | `.env.test` のパスワードがプレースホルダーのままでもガードを通る。`DATABASE_URL` と `KATANA_TEST_DB_PASSWORD` の一致は、運用で守っている | ラッパー（`testdb --check`・`--status`）では対策済み（Step 3-9B：見本の値・文字種・一致・管理用との違いを検査）。`assertTestDatabaseTarget()`・runner・`testdb-migrate` は、パスワードの中身を検査しないまま |
+| R14 | `.env.test` のパスワードがプレースホルダーのままでもガードを通る。`DATABASE_URL` と `KATANA_TEST_DB_PASSWORD` の一致は、運用で守っている | **一部対策済み・残課題あり。** Step 3-9Cで、共通の `assertTestDatabaseCredentials()`（見本の値・空・文字種・URLとの一致・管理用との違い）を、4つの正規の経路（Dockerのラッパー・統合テストのrunner・`testdb-migrate`・Prisma CLIのテストDBモード）に適用した。残り：(1) runnerを通さずに globalSetup・`lib/prisma.ts` の統合テストモードを起動する経路（パスワードは未検証。今は globalSetup が必ず停止する）、(2) `docker compose` の直接実行、(3) 外部の道具からの接続（対象外）。詳細は3-Aの3-9C |
 | R15 | Composeの変数展開では、シェルの環境変数が `--env-file` より優先される | 対策済み（Step 3-9B）。Composeの子プロセスには、許可リストの変数と検証済みのパスワードだけを渡す。親に `COMPOSE_*` や同名のパスワードを設定しても結果が変わらないことを、`config` で確認した |
 | R13 | Step 3-3の完了条件の `npm run build` を実施していない | DBに接続しないことを確認できる方法が見つかるまで保留。Phase 4までに実施する |
 | R9 | テストが途中で落ちた後は、`testdb:reset` が必要になる | 利便性の問題であり、安全性の問題ではない |
@@ -1011,12 +1071,11 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：`d56c8e4`（`test: guard Prisma CLI and add test DB migration runner`。Step 3-8Bの変更）
-   - 変更済み（Step 3-9・3-9B。未commit）：`docs/PLAN-test-db-isolation.md`、`lib/testing/dbConnectionPaths.test.ts`、`package.json`、リポジトリのルートの `.gitignore`（`git status` では `../.gitignore`）
-   - 未追跡（Step 3-9・3-9B。未commit）：`.env.test.example`、`docker-compose.test.yml`、`docker/test-db/init/01-app-role.sh`、`docker/test-db/init/02-marker.sql`、`scripts/testdb.mts`、`scripts/testdb.test.ts`
+   - HEAD：`test: centralize test database credential validation`（Step 3-9C。親は `61f8105`）。hash は `git log -1` で確かめ、3-Aの3-9Cの「commit」と、2章のStepの一覧表の3-9Cの行に記録する（この記録は、次の実装作業とあわせてcommitする）
+   - 変更済み（未commit）：なし
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
-   - `.env.test` は存在しない（Step 3-7B・3-8Bの一時ファイルは削除済み）
-3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施していて、**未commit**。次に何を行うかは、始める前にユーザーに確認する。候補は、3-9・3-9Bのcommit、`up`・`down`・`reset` の実装（操作前・操作後の確認を含む）、Step 3-10（ユーザーによる `.env.test` の作成）。コンテナの起動（Step 3-11）と、R7の確認は、まだ行っていない。接続後のDBの本人確認（migration用スクリプト・globalSetup）も、まだ実装していない。指示されたStep以外には着手しない。
+   - `.env.test` は存在しない（Step 3-7B・3-8B・3-9B・3-9C と、`61f8105` のcommit前の検証で作った一時ファイルは、すべて削除済み）
+3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）もcommit済みだが、R14には残課題がある（3-Aの3-9C）。次に何を行うかは、始める前にユーザーに確認する。候補は、`up`・`down`・`reset` の実装（操作前・操作後の確認を含む）、Step 3-10（ユーザーによる `.env.test` の作成）。コンテナの起動（Step 3-11）と、R7の確認は、まだ行っていない。接続後のDBの本人確認（migration用スクリプト・globalSetup）も、まだ実装していない。指示されたStep以外には着手しない。
 4. Stepが終わったら報告し、ユーザーの確認を得たうえで、次の2つを更新してからセッションを終える。
    - 3章の「3-A. 実施結果」（結果、設計との違い、未検証の事項、次のStepへの申し送り）
    - 本節の手順2の想定と、手順3の次のStep

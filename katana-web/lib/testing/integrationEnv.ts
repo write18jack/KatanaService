@@ -1,7 +1,13 @@
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { parse } from "dotenv";
-import { assertTestDatabaseTarget, TestDatabaseGuardError, type TestDatabaseTarget } from "../db/testDatabaseGuard.ts";
+import {
+  assertTestDatabaseCredentials,
+  assertTestDatabaseTarget,
+  TestDatabaseCredentialsError,
+  TestDatabaseGuardError,
+  type TestDatabaseTarget,
+} from "../db/testDatabaseGuard.ts";
 
 /**
  * 統合テスト用runner（scripts/test-integration.mts）と globalSetup が共通で使う、環境変数の準備と検証。
@@ -73,6 +79,21 @@ function verifyTarget(databaseUrl: string | undefined, env: EnvSource, developme
   }
 }
 
+/**
+ * `.env.test` のパスワードを検証する（R14）。失敗したらエラーコードだけを含むエラーに置き換える。
+ * 接続先の検証（verifyTarget）に通った後に呼ぶ。パスワードは子プロセスには渡さない（接続には DATABASE_URL だけを使う）。
+ */
+function verifyCredentials(testEnv: EnvSource): void {
+  try {
+    assertTestDatabaseCredentials(testEnv);
+  } catch (error) {
+    if (error instanceof TestDatabaseCredentialsError) {
+      throw new IntegrationRunnerError(`the test database credentials in ${TEST_ENV_FILE} were rejected (${error.code}).`);
+    }
+    throw error;
+  }
+}
+
 export type PreparedIntegrationEnv = {
   /** 子プロセス（Vitest）に渡す環境変数 */
   childEnv: Record<string, string> & { NODE_ENV: "test" };
@@ -87,6 +108,7 @@ export type PreparedIntegrationEnv = {
  * - 親の環境変数は許可リストのものだけを引き継ぐ。
  * - DATABASE_URL は `.env.test` の値だけを使う（親の値・`.env` の値は使わない）。
  * - KATANA_DB_TEST_MODE=integration・KATANA_TEST_RUNNER=script・NODE_ENV=test を設定する。
+ * - `.env.test` のパスワード（見本の値でないこと、URLとの一致など。R14）を、接続先の検証の後に確かめる。
  */
 export function prepareIntegrationEnv(input: {
   parentEnv: EnvSource;
@@ -115,6 +137,7 @@ export function prepareIntegrationEnv(input: {
   childEnv.KATANA_TEST_RUNNER = "script";
 
   const target = verifyTarget(databaseUrl, childEnv, developmentEnv);
+  verifyCredentials(testEnv);
   return { childEnv, target, droppedKeys };
 }
 

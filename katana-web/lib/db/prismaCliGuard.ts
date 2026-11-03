@@ -1,4 +1,12 @@
-import { assertTestDatabaseTarget, TEST_DATABASE_TARGET, TestDatabaseGuardError, type TestDatabaseGuardErrorCode } from "./testDatabaseGuard.ts";
+import {
+  assertTestDatabaseCredentials,
+  assertTestDatabaseTarget,
+  TEST_DATABASE_TARGET,
+  TestDatabaseCredentialsError,
+  type TestDatabaseCredentialsErrorCode,
+  TestDatabaseGuardError,
+  type TestDatabaseGuardErrorCode,
+} from "./testDatabaseGuard.ts";
 
 /**
  * prisma.config.ts から呼ぶ、Prisma CLI の接続先ガード（2-7）。DBには接続しない。
@@ -9,6 +17,7 @@ import { assertTestDatabaseTarget, TEST_DATABASE_TARGET, TestDatabaseGuardError,
  * - `KATANA_DB_TARGET=test`：テストDBモード。`.env.test` の DATABASE_URL を assertTestDatabaseTarget() で検証し、
  *   プロセスの DATABASE_URL（scripts/testdb-migrate.mts が検証済みの値を渡す）と完全に一致した場合だけ、
  *   `{ mode: "test", url }` を返す。テストDBモードで別の接続先に切り替える経路は持たない。
+ *   `.env.test` のパスワード（見本の値でないこと、URLとの一致など。R14）も、assertTestDatabaseCredentials() で確かめる。
  *   `import "dotenv/config"` が `.env` の開発用URLを補っていた場合は一致しないので、拒否される。
  * - それ以外の値（`TEST`・空文字など）：拒否する（打ち間違いで開発用DBに接続させない）。
  *
@@ -27,14 +36,15 @@ export type PrismaCliGuardErrorCode =
   | "DOTENV_ARGUMENT_PRESENT"
   | "TEST_ENV_MISSING"
   | "TARGET_REJECTED"
+  | "CREDENTIALS_REJECTED"
   | "DATABASE_URL_MISMATCH";
 
 export class PrismaCliGuardError extends Error {
   readonly code: PrismaCliGuardErrorCode;
-  /** TARGET_REJECTED のときの、assertTestDatabaseTarget() のエラーコード */
-  readonly targetCode?: TestDatabaseGuardErrorCode;
+  /** TARGET_REJECTED のときは assertTestDatabaseTarget() の、CREDENTIALS_REJECTED のときは assertTestDatabaseCredentials() のエラーコード */
+  readonly targetCode?: TestDatabaseGuardErrorCode | TestDatabaseCredentialsErrorCode;
 
-  constructor(code: PrismaCliGuardErrorCode, detail: string, targetCode?: TestDatabaseGuardErrorCode) {
+  constructor(code: PrismaCliGuardErrorCode, detail: string, targetCode?: TestDatabaseGuardErrorCode | TestDatabaseCredentialsErrorCode) {
     super(`[prismaCliGuard] ${code}: ${detail}`);
     this.name = "PrismaCliGuardError";
     this.code = code;
@@ -121,6 +131,14 @@ export function resolvePrismaCliDatabaseTarget(input: PrismaCliGuardInput): Pris
   } catch (error) {
     if (error instanceof TestDatabaseGuardError) {
       throw new PrismaCliGuardError("TARGET_REJECTED", `the test database target was rejected (${error.code}).`, error.code);
+    }
+    throw error;
+  }
+  try {
+    assertTestDatabaseCredentials(testEnv);
+  } catch (error) {
+    if (error instanceof TestDatabaseCredentialsError) {
+      throw new PrismaCliGuardError("CREDENTIALS_REJECTED", `the test database credentials in .env.test were rejected (${error.code}).`, error.code);
     }
     throw error;
   }

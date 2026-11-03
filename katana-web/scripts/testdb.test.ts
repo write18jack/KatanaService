@@ -1,5 +1,6 @@
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { assertTestDatabaseCredentials, TestDatabaseCredentialsError } from "../lib/db/testDatabaseGuard.ts";
 import {
   buildComposeEnv,
   type CommandResult,
@@ -218,6 +219,24 @@ describe("verifyTestDbEnv（R14）", () => {
   it("URLにエンコードした表記とアプリ用の値が、デコードすると同じでも一致とはみなさない（書かれたままの文字列で比べる）", () => {
     const env = { DATABASE_URL: TEST_URL.replace(APP, "app%5Fpass"), KATANA_TEST_DB_PASSWORD: "app_pass", KATANA_TEST_DB_ADMIN_PASSWORD: ADMIN };
     expectCode(() => verifyTestDbEnv(env, dev), "PASSWORD_CHARSET");
+  });
+
+  it.each([
+    ["見本の値", { KATANA_TEST_DB_ADMIN_PASSWORD: "CHANGE_ME_admin_password" }],
+    ["不一致", { KATANA_TEST_DB_PASSWORD: `${APP}x` }],
+    ["管理用と同じ", { KATANA_TEST_DB_ADMIN_PASSWORD: APP }],
+    ["空", { KATANA_TEST_DB_PASSWORD: "" }],
+    ["使えない文字", { KATANA_TEST_DB_ADMIN_PASSWORD: "a b" }],
+  ])("パスワードの判定（%s）は、runner・testdb-migrate・Prisma CLI と共通の assertTestDatabaseCredentials() と同じコードになる", (_label, override) => {
+    const env = { ...GOOD_ENV, ...override };
+    let sharedCode: string | undefined;
+    try {
+      assertTestDatabaseCredentials(env);
+    } catch (error) {
+      if (error instanceof TestDatabaseCredentialsError) sharedCode = error.code;
+    }
+    expect(sharedCode).toBeDefined();
+    expectCode(() => verifyTestDbEnv(env, dev), sharedCode as TestDbErrorCode);
   });
 });
 

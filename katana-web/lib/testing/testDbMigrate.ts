@@ -1,6 +1,12 @@
 import path from "node:path";
 import { DB_TARGET_ENV, DB_TARGET_TEST } from "../db/prismaCliGuard.ts";
-import { assertTestDatabaseTarget, TestDatabaseGuardError, type TestDatabaseTarget } from "../db/testDatabaseGuard.ts";
+import {
+  assertTestDatabaseCredentials,
+  assertTestDatabaseTarget,
+  TestDatabaseCredentialsError,
+  TestDatabaseGuardError,
+  type TestDatabaseTarget,
+} from "../db/testDatabaseGuard.ts";
 import { DEVELOPMENT_ENV_FILE, inheritAllowedEnv, TEST_ENV_FILE } from "./integrationEnv.ts";
 
 /**
@@ -11,7 +17,7 @@ import { DEVELOPMENT_ENV_FILE, inheritAllowedEnv, TEST_ENV_FILE } from "./integr
  *
  * 実行順序（途中で失敗したら、その時点で止める。別の接続先は試さない）:
  * 1. 引数の検証  2. Node の起動オプション（execArgv・NODE_OPTIONS）の確認  3. `.env.test` の読み込み
- * 4. `.env` の開発用DBの接続先の取得  5. テストDBのURLの検証  6. 子プロセスの環境変数の生成（作った後にもう一度検証）
+ * 4. `.env` の開発用DBの接続先の取得  5. テストDBのURLとパスワード（R14）の検証  6. 子プロセスの環境変数の生成（作った後にもう一度検証）
  * 7. 実行する Prisma CLI のコマンドの確認  （確認モードはここで表示して終了する）
  * 8. 接続後の本人確認（DBのコメントの照合。2-7の4）  9. すべて成功した場合だけ子プロセスを起動する
  *
@@ -37,6 +43,7 @@ export type TestDbMigrateErrorCode =
   | "NODE_OPTIONS_PRESENT"
   | "TEST_ENV_MISSING"
   | "TARGET_REJECTED"
+  | "CREDENTIALS_REJECTED"
   | "REQUIRED_FILE_MISSING"
   | "IDENTITY_CHECK_NOT_IMPLEMENTED";
 
@@ -158,9 +165,17 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
   // 4. 開発用DBの接続先（比較にだけ使う）
   const developmentEnv = deps.readEnvFile(path.join(root, DEVELOPMENT_ENV_FILE));
 
-  // 5. URLの検証（環境変数の検査は、6で作った子プロセスの環境変数に対して行う）
+  // 5. URLの検証（環境変数の検査は、6で作った子プロセスの環境変数に対して行う）と、パスワードの検証（R14）
   const databaseUrl = testEnv.DATABASE_URL;
   verifyTarget(databaseUrl, {}, developmentEnv);
+  try {
+    assertTestDatabaseCredentials(testEnv);
+  } catch (error) {
+    if (error instanceof TestDatabaseCredentialsError) {
+      throw new TestDbMigrateError("CREDENTIALS_REJECTED", `the test database credentials in ${TEST_ENV_FILE} were rejected (${error.code}).`);
+    }
+    throw error;
+  }
   const verifiedUrl = databaseUrl as string;
 
   // 6. 子プロセスの環境変数。作った後の最終的な値で、もう一度検証する
