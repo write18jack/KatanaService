@@ -1,7 +1,7 @@
 # 計画：専用テストDBの構築とVitest統合テストの分離
 
 作成日: 2026-10-26
-更新日: 2026-11-03（Step 3-7・3-7Bの実施結果を反映）
+更新日: 2026-11-03（Step 3-8（接続後の本人確認と空DB検査）の実施結果を反映）
 作業ブランチ: `chore/test-db-isolation`（`fix-dashboard` の `6168889` から作成）
 
 ## 状態
@@ -10,7 +10,7 @@
 |---|---|
 | Phase 1：読み取り専用の調査 | **実施済み**（結果は本ファイルの1章） |
 | Phase 2：安全設計 | **設計レビュー完了**（確定設計は本ファイルの2章） |
-| Phase 3：実装 | **実施中**（Step 3-0〜3-7B 実施済み。Step 3-3〜3-6は `824d54b` でcommit、Step 3-7・3-7Bは**未commit**。次は **Step 3-8**。結果は3章の「3-A. 実施結果」） |
+| Phase 3：実装 | **実施中**（Step 3-0〜3-7B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712` でcommit。Step 3-8（接続後の本人確認と空DB検査。当初の3-8とは内容が違う）は**未commit**。次のStepはユーザーに確認する。結果は3章の「3-A. 実施結果」） |
 | Phase 4：検証 | **未着手** |
 
 F-01の判定は **CONDITIONAL PASS のまま**。実DB・Cookie・HTTPでの検証は、Phase 4のE2Eで行う。
@@ -353,9 +353,9 @@ npm run test:integration ─► 専用runner
 | 3-5 | 統合テストのリネーム完了 | `824d54b` |
 | 3-5B | 規則3・4の静的検査とPLANの更新を実施 | `824d54b` |
 | 3-6 | 完了（`npm test` を2回実行し、すべて成功） | `824d54b`（PLANの更新を含む） |
-| 3-7 | 統合テスト用runner・専用設定の作成完了（globalSetupは意図的に必ず停止） | **未commit** |
-| 3-7B | runnerの確認モードの検証・`.env.test` のGit保護の確認 | **未commit**（変更はPLANだけ） |
-| 3-8 | **次に行う** | – |
+| 3-7 | 統合テスト用runner・専用設定の作成完了（globalSetupは意図的に必ず停止） | `d087712`（`test: add fail-closed integration test runner`） |
+| 3-7B | runnerの確認モードの検証・`.env.test` のGit保護の確認 | `d087712`（変更はPLANだけ） |
+| 3-8 | ユーザーの指示により、接続後の本人確認と空DB検査を実装（DB非接続の単体テストのみ。globalSetupからはまだ呼ばない）。当初の3-8（`prisma.config.ts` のガードとmigration用スクリプト）は**未実施** | **未commit** |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -492,6 +492,26 @@ npm run test:integration ─► 専用runner
 - テストファイルは追加していない。`npx tsc --noEmit`・`eslint`・`npm test`（24ファイル・519件）はすべて成功。
 - **未実施・未検証:** runnerの通常実行モード（子プロセスに渡る環境変数と、globalSetupで停止することの実行時の確認）、実DBへの接続、統合テストの実行、Docker・Prisma CLI・migration・seed・build。
 - 次のStepは **Step 3-8**。
+
+**Step 3-8（接続後の本人確認と空DB検査。ユーザーの指示による）**
+
+- 下の「Step 3-8」の節（`prisma.config.ts` のガードとmigration用スクリプト）とは内容が違う。ユーザーの指示で、2-2の接続後の照合と2-3の開始前の読み取り確認を先に実装した。当初の3-8の作業は未実施のまま残っている。
+- 作成（未追跡・未commit）:
+  - `lib/testing/integrationDatabaseCheck.ts`：`verifyIntegrationDatabase()`。DBドライバを読み込まず、接続は `connect`（pg.Client 互換の `query`・`end`）として呼び出し側が渡す。
+  - `lib/testing/integrationDatabaseCheck.test.ts`：偽のクライアントによる単体テスト54件（pg・Prisma Client は読み込まない）。
+- 変更（未commit）：`lib/testing/integrationGlobalSetup.ts`（コメントだけ。**必ず停止する動作は変えていない**。新しいモジュールはまだ呼ばない）、`lib/testing/dbConnectionPaths.test.ts`（通常テストの期待件数を24→25に変更。許可リスト・規則は変えていない）。
+- 実行順序：(1〜3) `assertIntegrationProcessEnv()` でrunner経由の起動・URLの形式・開発用DBとの比較 → (4) 接続を1回だけ（失敗しても別の接続先を試さない） → `BEGIN READ ONLY` と `SHOW transaction_read_only = on` の確認 → (5) 本人確認 → (6) リレーションの構成とmigrationの確認 → (7) 空DB検査 → `ROLLBACK`。接続した後は、成功・失敗にかかわらず必ず `end()` する。最初の失敗を優先して投げる。
+- 本人確認：`current_database() = katana_test`、`current_user`・`session_user` がともに `katana_test_user`、DBのコメント（`shobj_description`）が `katana-test-db`（2-1のマーカー）。`inet_server_port()` は情報として返すだけで、判定には使わない（サーバー内部のポートは5432が普通で、公開ポート5434とは違う）。
+- テーブル構成：`schema.prisma` のモデル15件（`@map`・`@@map`・`@@schema` がないので、モデル名＝テーブル名。あれば拒否する）と、migrationの最終形の15テーブルが一致することを確認した（`Katana` などの旧テーブルは0718・0922で削除）。`pg_catalog.pg_class` から、システム以外の全スキーマのテーブル・ビュー・マテリアライズドビュー・外部テーブルを取得し、`public` の想定15テーブルと `_prisma_migrations` だけであることを確かめる。不足・想定外（暗黙の多対多 `_AToB`、ビュー、別スキーマを含む）は拒否する。
+- migration：`_prisma_migrations` の適用済みの名前が、`prisma/migrations` の8件と完全に一致し、未完了・失敗・ロールバック・重複が1件もないこと。migrationは行を挿入しないので、適用直後のDBは空になる想定。
+- 空DB検査：想定の15テーブルごとに `SELECT EXISTS (SELECT 1 FROM "public"."<table>")`。テーブル名は、識別子の文字種（`[A-Za-z_][A-Za-z0-9_]*`）を検証してから二重引用符で囲む（スキーマとカタログで照合済みの名前だけを使う）。1件でもあれば `DATA_PRESENT` で拒否し、行は削除しない。`_prisma_migrations` は対象外。
+- 例外：`IntegrationDatabaseCheckError`（`code` 付き）。接続URL・パスワード・ドライバの元のエラーメッセージは含めず、SQLSTATE などのコードだけを含める。本人確認の失敗では、実際の値を表示しない。
+- 限界：SQLで確かめられるのは、サーバーが返す名前とDBのコメントだけで、物理的にどのサーバー・コンテナかまでは保証できない（コメントは誰でも同じものを付けられる）。URLの検証（`127.0.0.1:5434` だけ）と組み合わせて判断する。列の定義までの照合はしない（Step 3-12の `migrate diff` で行う）。
+- 確認済み：新しい単体テスト54件すべて成功。`npx tsc --noEmit`・変更した4ファイルの `eslint` 成功。`npm test` は25ファイル・573件成功（Step 3-7の519件＋54件）。`npx vitest list --filesOnly` は25件で、`*.integration.test.*` は0件。統合テスト用の設定は6件。`dbConnectionPaths.test.ts` は148件成功。
+- **globalSetupに組み込むときの申し送り:**
+  - 実際の接続には `pg` が必要。静的検査の規則1は `pg` を `lib/prisma.ts`・`prisma/seed.ts` 以外で禁止しているので、`lib/testing/integrationGlobalSetup.ts` の1ファイルだけを許可リストに足す（ディレクトリ単位では許可しない）か、`lib/prisma.ts` 経由で照合するかを、その時に決める。安全条件は「`verifyIntegrationDatabase()` の中で、接続前の検証に通った後にだけ `connect` が呼ばれること」。
+  - 強制停止の `throw` を外すのは、DBへの接続の承認を得たStepで行う。
+- **未実施・未検証:** 実DBに対する本人確認・空DB検査（SQLが実際のPostgreSQL 15で期待どおりに動くこと、`shobj_description`・`pg_class` の読み取り権限）、Docker・Prisma CLI・migration・seed・build、統合テストの実行、runnerの通常実行モード。
 
 全Stepに共通する事項:
 
@@ -727,12 +747,12 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：`824d54b`（`test: isolate unit and integration database access`。Step 3-3〜3-6の変更をまとめたもの）
-   - 変更済み（Step 3-7・3-7B。未commit）：`docs/PLAN-test-db-isolation.md`、`package.json`、`tsconfig.json`
-   - 未追跡（Step 3-7。未commit）：`vitest.integration.config.ts`、`scripts/test-integration.mts`、`lib/testing/integrationEnv.ts`、`lib/testing/integrationGlobalSetup.ts`
+   - HEAD：`d087712`（`test: add fail-closed integration test runner`。Step 3-7・3-7Bの変更をまとめたもの）
+   - 変更済み（Step 3-8。未commit）：`docs/PLAN-test-db-isolation.md`、`lib/testing/dbConnectionPaths.test.ts`、`lib/testing/integrationGlobalSetup.ts`
+   - 未追跡（Step 3-8。未commit）：`lib/testing/integrationDatabaseCheck.ts`、`lib/testing/integrationDatabaseCheck.test.ts`
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
    - `.env.test` は存在しない（Step 3-7Bの一時ファイルは削除済み）
-3. 次は **Step 3-8（`prisma.config.ts` のガードとmigration用スクリプト）**。Step 3-7の変更を先にcommitするかを、始める前にユーザーに確認する。指示されたStep以外には着手しない。
+3. Step 3-8（接続後の本人確認と空DB検査）は実装済み・未commit。当初の3-8（`prisma.config.ts` のガードとmigration用スクリプト）は未実施。次に何を行うか（commit、当初の3-8、3-9など）は、始める前にユーザーに確認する。指示されたStep以外には着手しない。
 4. Stepが終わったら報告し、ユーザーの確認を得たうえで、次の2つを更新してからセッションを終える。
    - 3章の「3-A. 実施結果」（結果、設計との違い、未検証の事項、次のStepへの申し送り）
    - 本節の手順2の想定と、手順3の次のStep

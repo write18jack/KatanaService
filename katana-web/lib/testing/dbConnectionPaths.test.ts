@@ -335,7 +335,7 @@ const KNOWN_DB_INTEGRATION_TEST_FILES = [
   "lib/market-analytics/priceTrend.integration.test.ts",
   "lib/market-analytics/soldMetrics.integration.test.ts",
 ];
-const EXPECTED_UNIT_TEST_COUNT = 24;
+const EXPECTED_UNIT_TEST_COUNT = 25;
 const INTEGRATION_TEST_GLOB = "**/*.integration.test.{ts,tsx}";
 const TEST_FILE = /\.test\.tsx?$/;
 const INTEGRATION_TEST_FILE = /\.integration\.test\.tsx?$/;
@@ -848,7 +848,7 @@ describe("テストからの本物のPrisma・テストの分類（リポジト�
     expect(violations).toEqual([]);
   });
 
-  it("規則4：通常テスト24件・統合テスト6件で、統合テストは既知の6ファイルと一致する", () => {
+  it("規則4：通常テスト25件・統合テスト6件で、統合テストは既知の6ファイルと一致する", () => {
     const audit = auditTestClassification(repoHost, testFiles, KNOWN_DB_INTEGRATION_TEST_FILES);
     expect(audit.unitTests).toHaveLength(EXPECTED_UNIT_TEST_COUNT);
     expect([...audit.integrationTests].sort()).toEqual([...KNOWN_DB_INTEGRATION_TEST_FILES].sort());

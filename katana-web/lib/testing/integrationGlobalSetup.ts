@@ -8,7 +8,8 @@ import { assertIntegrationProcessEnv, DEVELOPMENT_ENV_FILE, readEnvFile } from "
  * 2. 接続先をもう一度検証する（DBには接続しない）。
  *
  * 接続後の照合（current_database()・current_user・DBのコメント）と、データが残っていないかの読み取り確認は
- * まだ実装していない。それまでは、テストを始めずに必ず停止する（照合なしでテストDBに書き込ませない）。
+ * lib/testing/integrationDatabaseCheck.ts の verifyIntegrationDatabase() に実装済みだが、まだここから呼ばない
+ * （DBへの接続は、承認を得た後続のStepで組み込む）。それまでは、テストを始めずに必ず停止する。
  * 自動の TRUNCATE・DELETE・migration・seed は、後続のStepでも行わない。
  */
 export default function setup(): void {
