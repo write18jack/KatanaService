@@ -277,7 +277,11 @@ const FORBIDDEN_MUTATION_ARGS = [
 const DEVELOPMENT_CONTAINER_FORMAT = "{{.Names}}\t{{.ID}}\t{{.State}}";
 /** 名前が katana-test-db のコンテナの、名前と Compose のプロジェクト（別のプロジェクトの同名コンテナを見つける） */
 const SAME_NAME_FORMAT = '{{.Names}}\t{{.Label "com.docker.compose.project"}}';
-/** テスト用コンテナの inspect で読む項目だけを、JSON の形で取り出す（Config.Env などのパスワードを含む項目は読まない） */
+/**
+ * テスト用コンテナの inspect で読む項目だけを、JSON の形で取り出す（Config.Env などのパスワードを含む項目は読まない）。
+ * マウントは、実際のマウント（Mounts）・作成時の指定（HostConfig.Mounts・HostConfig.Tmpfs）を読む。
+ * Config.Volumes はイメージの VOLUME 宣言で、実際のマウントではないので、判定には使わない（記録用に読むだけ）。
+ */
 export const CONTAINER_INSPECT_FORMAT =
   '{"project":{{json (index .Config.Labels "com.docker.compose.project")}},' +
   '"service":{{json (index .Config.Labels "com.docker.compose.service")}},' +
@@ -286,7 +290,9 @@ export const CONTAINER_INSPECT_FORMAT =
   '"state":{{json .State.Status}},' +
   '"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},' +
   '"mounts":{{json .Mounts}},' +
+  '"hostMounts":{{json .HostConfig.Mounts}},' +
   '"tmpfs":{{json .HostConfig.Tmpfs}},' +
+  '"imageVolumes":{{json .Config.Volumes}},' +
   '"ports":{{json .HostConfig.PortBindings}}}';
 const INSPECT_ARGS = ["inspect", "--type", "container", TEST_CONTAINER, "--format", CONTAINER_INSPECT_FORMAT];
 const IMAGE_ARGS = ["image", "inspect", TEST_IMAGE, "--format", "{{.Id}}"];
@@ -563,6 +569,86 @@ export function assertReadyForUp(snapshot: DockerSnapshot): void {
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- docker inspect の JSON を、形を確かめながら読む */
 /**
+ * マウントの照合（up の後・down の前に共通）。不一致の項目名を返す（値は含めない）。
+ *
+ * 許可するのは、初期化用ディレクトリの読み取り専用の bind（1つ）と、データ領域（/var/lib/postgresql/data）の tmpfs だけ。
+ * tmpfs の表し方は、Docker・Compose のバージョンや指定方法で違い得るので、次のどれでも受け付ける。
+ * - A. Mounts には bind だけがあり、HostConfig.Tmpfs にデータ領域がある（`--tmpfs`・Compose の `tmpfs:` の形）
+ * - B. Mounts に Type=tmpfs のデータ領域がある（`--mount type=tmpfs` の形。HostConfig.Mounts にもあれば、両方が一致すること）
+ * - C. Mounts と HostConfig.Tmpfs の両方に、データ領域の tmpfs がある
+ * 次は拒否する：Type=volume のマウント、データ領域への bind、ほかのパスの tmpfs・bind、不明な種類のマウント、
+ * データ領域の tmpfs が確認できない、同じものの重複、データ領域の tmpfs を HostConfig.Tmpfs と HostConfig.Mounts の両方で指定している、
+ * HostConfig.Mounts の指定が Mounts（実際のマウント）にない。
+ * イメージの VOLUME 宣言（Config.Volumes）は、実際のマウントではないので見ない。実際に無名のボリュームが作られていれば、
+ * Mounts に Type=volume として現れ（拒否）、ボリュームの一覧の比較でも見つかる。
+ */
+export function mountMismatches(c: any, root: string): string[] {
+  const mismatches = new Set<string>();
+  const initSource = path.join(root, INIT_DIR);
+
+  // 形の確認（null・未設定は「なし」として扱う。それ以外の形は拒否する）
+  const list = (value: any, name: string): any[] => {
+    if (value === null || value === undefined) return [];
+    if (Array.isArray(value)) return value;
+    mismatches.add(`mounts: ${name} is not a list`);
+    return [];
+  };
+  const mounts = list(c?.mounts, "Mounts");
+  const hostMounts = list(c?.hostMounts, "HostConfig.Mounts");
+  let tmpfsMap: Record<string, unknown> = {};
+  if (c?.tmpfs !== null && c?.tmpfs !== undefined) {
+    if (typeof c.tmpfs === "object" && !Array.isArray(c.tmpfs)) tmpfsMap = c.tmpfs;
+    else mismatches.add("tmpfs: HostConfig.Tmpfs is not a map");
+  }
+
+  // 実際のマウント（Mounts：Type・Source・Destination・RW）
+  let initBinds = 0;
+  let dataTmpfsMounts = 0;
+  for (const m of mounts) {
+    const destination = m?.Destination;
+    if (m?.Type === "volume") mismatches.add("no volume mounts");
+    else if (m?.Type === "bind") {
+      if (destination === DATA_DIR) mismatches.add("mounts: bind mount on the data directory");
+      else if (destination === INIT_TARGET && m?.Source === initSource && m?.RW === false) initBinds += 1;
+      else mismatches.add("mounts: unknown bind mount");
+    } else if (m?.Type === "tmpfs") {
+      if (destination === DATA_DIR) dataTmpfsMounts += 1;
+      else mismatches.add("tmpfs: unknown tmpfs mount");
+    } else mismatches.add("mounts: unknown mount type");
+  }
+  if (initBinds !== 1) mismatches.add("mounts: the read-only init bind mount");
+  if (dataTmpfsMounts > 1) mismatches.add("tmpfs: duplicate data directory entries");
+
+  // 作成時の指定（HostConfig.Mounts：Type・Source・Target・ReadOnly）
+  let initSpecs = 0;
+  let dataTmpfsSpecs = 0;
+  for (const s of hostMounts) {
+    const target = s?.Target;
+    if (s?.Type === "volume") mismatches.add("no volume mounts");
+    else if (s?.Type === "bind") {
+      if (target === DATA_DIR) mismatches.add("mounts: bind mount on the data directory");
+      else if (target === INIT_TARGET && s?.Source === initSource && s?.ReadOnly === true) initSpecs += 1;
+      else mismatches.add("mounts: unknown bind mount");
+    } else if (s?.Type === "tmpfs") {
+      if (target === DATA_DIR) dataTmpfsSpecs += 1;
+      else mismatches.add("tmpfs: unknown tmpfs mount");
+    } else mismatches.add("mounts: unknown mount type");
+  }
+  if (initSpecs > 1 || dataTmpfsSpecs > 1) mismatches.add("mounts: duplicate HostConfig.Mounts entries");
+  // HostConfig.Mounts で指定したものは、実際のマウントにも現れるはず
+  if (initSpecs === 1 && initBinds !== 1) mismatches.add("mounts: HostConfig.Mounts and Mounts disagree");
+  if (dataTmpfsSpecs === 1 && dataTmpfsMounts !== 1) mismatches.add("tmpfs: HostConfig.Mounts and Mounts disagree");
+
+  // 作成時の指定（HostConfig.Tmpfs：パス → オプション）
+  const tmpfsPaths = Object.keys(tmpfsMap);
+  if (tmpfsPaths.some((key) => key !== DATA_DIR)) mismatches.add("tmpfs: unknown tmpfs mount");
+  const dataInTmpfsMap = tmpfsPaths.includes(DATA_DIR);
+  if (dataInTmpfsMap && dataTmpfsSpecs > 0) mismatches.add("tmpfs: the data directory is specified in both HostConfig.Tmpfs and HostConfig.Mounts");
+  if (!dataInTmpfsMap && dataTmpfsMounts === 0 && dataTmpfsSpecs === 0) mismatches.add("tmpfs: the data directory tmpfs was not found");
+  return [...mismatches];
+}
+
+/**
  * テスト用コンテナの inspect（CONTAINER_INSPECT_FORMAT）を照合し、不一致の項目名を返す（値は含めない）。
  * Compose のラベル（プロジェクト・サービス・Composeファイル・作業ディレクトリ）で、このラッパーが作ったコンテナであることを確かめる。
  * running が true なら（up の後）、起動していて healthy であることも確かめる。false なら（down の前）、状態は問わない
@@ -583,17 +669,7 @@ export function containerInspectMismatches(json: string, root: string, options: 
   expect("service label", c?.service === TEST_SERVICE);
   expect("compose file label", c?.configFiles === path.join(root, COMPOSE_FILE));
   expect("working directory label", c?.workingDir === root);
-  const mounts = Array.isArray(c?.mounts) ? c.mounts : [];
-  expect("no volume mounts", mounts.every((m: any) => m?.Type !== "volume"));
-  expect(
-    "mounts",
-    mounts.length === 1 &&
-      mounts[0].Type === "bind" &&
-      mounts[0].Source === path.join(root, INIT_DIR) &&
-      mounts[0].Destination === INIT_TARGET &&
-      mounts[0].RW === false,
-  );
-  expect("tmpfs", c?.tmpfs !== null && typeof c?.tmpfs === "object" && Object.keys(c.tmpfs).includes(DATA_DIR));
+  mismatches.push(...mountMismatches(c, root));
   const ports = c?.ports !== null && typeof c?.ports === "object" ? c.ports : {};
   const bindings = Array.isArray(ports["5432/tcp"]) ? ports["5432/tcp"] : [];
   expect(

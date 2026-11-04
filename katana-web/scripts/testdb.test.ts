@@ -7,6 +7,7 @@ import {
   composeArgs,
   DOWN_SUBCOMMAND,
   isAllowedMutation,
+  mountMismatches,
   parseTestDbArgs,
   runTestDb,
   type TestDbDeps,
@@ -93,7 +94,19 @@ const EMPTY: DockerState = {
   inspect: undefined,
 };
 
-/** docker inspect（CONTAINER_INSPECT_FORMAT）の出力 */
+const INIT_SOURCE = path.join(ROOT, "docker/test-db/init");
+const DATA = "/var/lib/postgresql/data";
+/** 実際のマウント（Mounts）の項目 */
+const INIT_BIND = { Type: "bind", Source: INIT_SOURCE, Destination: "/docker-entrypoint-initdb.d", Mode: "ro", RW: false, Propagation: "rprivate" };
+const DATA_TMPFS = { Type: "tmpfs", Source: "", Destination: DATA, Mode: "", RW: true, Propagation: "" };
+/** 作成時の指定（HostConfig.Mounts）の項目 */
+const INIT_BIND_SPEC = { Type: "bind", Source: INIT_SOURCE, Target: "/docker-entrypoint-initdb.d", ReadOnly: true };
+const DATA_TMPFS_SPEC = { Type: "tmpfs", Target: DATA };
+
+/**
+ * docker inspect（CONTAINER_INSPECT_FORMAT）の出力。既定は、Compose の `tmpfs:` の形（ケースA：Mounts には bind だけで、
+ * HostConfig.Tmpfs にデータ領域がある）。Config.Volumes には、イメージの VOLUME 宣言（実際のマウントではない）が入る
+ */
 function inspectJson(overrides: Record<string, unknown> = {}) {
   return JSON.stringify({
     project: "katana-test",
@@ -102,8 +115,10 @@ function inspectJson(overrides: Record<string, unknown> = {}) {
     workingDir: ROOT,
     state: "running",
     health: "healthy",
-    mounts: [{ Type: "bind", Source: path.join(ROOT, "docker/test-db/init"), Destination: "/docker-entrypoint-initdb.d", Mode: "ro", RW: false }],
-    tmpfs: { "/var/lib/postgresql/data": "" },
+    mounts: [INIT_BIND],
+    hostMounts: [INIT_BIND_SPEC],
+    tmpfs: { [DATA]: "" },
+    imageVolumes: { [DATA]: {} },
     ports: { "5432/tcp": [{ HostIp: "127.0.0.1", HostPort: "5434" }] },
     ...overrides,
   });
@@ -817,5 +832,141 @@ describe("runTestDb：障害時の --down（状態を問わず、同一性を確
     await expect(runTestDb(f.deps)).resolves.toBe(0);
     expect(f.mutations()).toEqual([]);
     expectOnlyReadOnlyCalls(f.run);
+  });
+});
+
+describe("mountMismatches（tmpfs の表し方の違いと、許可するマウント）", () => {
+  const check = (overrides: Record<string, unknown>) => mountMismatches(JSON.parse(inspectJson(overrides)), ROOT);
+
+  it.each([
+    ["A. Mounts は bind だけ、HostConfig.Tmpfs にデータ領域", {}],
+    ["A'. HostConfig.Mounts がない（null）", { hostMounts: null }],
+    ["A''. HostConfig.Tmpfs にマウントのオプションがある", { tmpfs: { [DATA]: "rw,noexec,nosuid,size=65536k" } }],
+    ["B. Mounts に Type=tmpfs、HostConfig.Mounts にも同じ指定", { mounts: [INIT_BIND, DATA_TMPFS], hostMounts: [INIT_BIND_SPEC, DATA_TMPFS_SPEC], tmpfs: null }],
+    ["B'. Mounts に Type=tmpfs だけ（HostConfig.Tmpfs も HostConfig.Mounts の tmpfs もない）", { mounts: [DATA_TMPFS, INIT_BIND], tmpfs: {} }],
+    ["C. Mounts と HostConfig.Tmpfs の両方にデータ領域", { mounts: [INIT_BIND, DATA_TMPFS] }],
+    ["Config.Volumes にデータ領域の VOLUME 宣言がある（実際のマウントと混同しない）", { imageVolumes: { [DATA]: {} } }],
+    ["Config.Volumes がない", { imageVolumes: null }],
+  ])("%s なら許可する", (_label, overrides) => {
+    expect(check(overrides)).toEqual([]);
+  });
+
+  it.each([
+    ["データ領域への volume マウント（無名ボリューム）", { mounts: [INIT_BIND, { Type: "volume", Name: "b1c2d3e4", Destination: DATA, RW: true }] }, "no volume mounts"],
+    ["開発用ボリュームのマウント", { mounts: [INIT_BIND, { Type: "volume", Name: "katana-web_postgres_data", Destination: "/data", RW: true }] }, "no volume mounts"],
+    ["HostConfig.Mounts の volume 指定", { hostMounts: [INIT_BIND_SPEC, { Type: "volume", Source: "katana-web_postgres_data", Target: DATA }] }, "no volume mounts"],
+    ["データ領域への bind", { mounts: [INIT_BIND, { Type: "bind", Source: "/tmp/data", Destination: DATA, RW: true }] }, "mounts: bind mount on the data directory"],
+    ["HostConfig.Mounts のデータ領域への bind", { hostMounts: [INIT_BIND_SPEC, { Type: "bind", Source: "/tmp/data", Target: DATA }] }, "mounts: bind mount on the data directory"],
+    ["ほかのパスの tmpfs（Mounts）", { mounts: [INIT_BIND, { ...DATA_TMPFS, Destination: "/tmp" }] }, "tmpfs: unknown tmpfs mount"],
+    ["ほかのパスの tmpfs（HostConfig.Tmpfs）", { tmpfs: { [DATA]: "", "/run": "" } }, "tmpfs: unknown tmpfs mount"],
+    ["データ領域の親ディレクトリの tmpfs", { tmpfs: { "/var/lib/postgresql": "" } }, "tmpfs: unknown tmpfs mount"],
+    ["末尾に / が付いたパスの tmpfs", { tmpfs: { [`${DATA}/`]: "" } }, "tmpfs: unknown tmpfs mount"],
+    ["ほかの bind", { mounts: [INIT_BIND, { Type: "bind", Source: "/Users/x/.ssh", Destination: "/root/.ssh", RW: false }] }, "mounts: unknown bind mount"],
+    ["書き込み可能な初期化用の bind", { mounts: [{ ...INIT_BIND, RW: true }] }, "mounts: unknown bind mount"],
+    ["別の場所の初期化用の bind", { mounts: [{ ...INIT_BIND, Source: "/other/init" }] }, "mounts: unknown bind mount"],
+    ["初期化用の bind がない", { mounts: [], hostMounts: null }, "mounts: the read-only init bind mount"],
+    ["初期化用の bind が2つ", { mounts: [INIT_BIND, INIT_BIND] }, "mounts: the read-only init bind mount"],
+    ["不明な種類のマウント", { mounts: [INIT_BIND, { Type: "npipe", Source: "x", Destination: "/x" }] }, "mounts: unknown mount type"],
+    ["データ領域の tmpfs が確認できない", { tmpfs: null }, "tmpfs: the data directory tmpfs was not found"],
+    ["HostConfig.Tmpfs が空", { tmpfs: {} }, "tmpfs: the data directory tmpfs was not found"],
+    ["Mounts のデータ領域の tmpfs が重複", { mounts: [INIT_BIND, DATA_TMPFS, DATA_TMPFS] }, "tmpfs: duplicate data directory entries"],
+    ["HostConfig.Tmpfs と HostConfig.Mounts の両方でデータ領域を指定（矛盾）", { mounts: [INIT_BIND, DATA_TMPFS], hostMounts: [INIT_BIND_SPEC, DATA_TMPFS_SPEC] }, "both HostConfig.Tmpfs and HostConfig.Mounts"],
+    ["HostConfig.Mounts の tmpfs が Mounts にない（矛盾）", { hostMounts: [INIT_BIND_SPEC, DATA_TMPFS_SPEC], tmpfs: null }, "tmpfs: HostConfig.Mounts and Mounts disagree"],
+    ["HostConfig.Mounts の bind が Mounts にない（矛盾）", { mounts: [] }, "mounts: HostConfig.Mounts and Mounts disagree"],
+    ["HostConfig.Tmpfs はデータ領域、Mounts は同じパスに volume（矛盾）", { mounts: [INIT_BIND, { Type: "volume", Name: "x", Destination: DATA }] }, "no volume mounts"],
+    ["Mounts が配列でない", { mounts: { a: 1 } }, "mounts: Mounts is not a list"],
+    ["HostConfig.Tmpfs が対応表でない", { tmpfs: [DATA] }, "tmpfs: HostConfig.Tmpfs is not a map"],
+  ])("%s なら拒否する", (_label, overrides, item) => {
+    const mismatches = check(overrides);
+    expect(mismatches.some((name) => name.includes(item))).toBe(true);
+    // 項目名だけを返し、パスなどの値は含めない
+    for (const name of mismatches) {
+      expect(name).not.toContain("/");
+      expect(name).not.toContain("katana-web_postgres_data");
+    }
+  });
+});
+
+describe("runTestDb：tmpfs の表し方の違いを、up の後と down の前の両方で同じように扱う", () => {
+  const SHAPES = [
+    ["A（HostConfig.Tmpfs）", {}],
+    ["B（Mounts と HostConfig.Mounts の tmpfs）", { mounts: [INIT_BIND, DATA_TMPFS], hostMounts: [INIT_BIND_SPEC, DATA_TMPFS_SPEC], tmpfs: null }],
+    ["C（Mounts と HostConfig.Tmpfs）", { mounts: [INIT_BIND, DATA_TMPFS] }],
+  ] as const;
+
+  it.each(SHAPES)("ケース%s：up の後の確認に通る", async (_label, shape) => {
+    const f = fake({ argv: ["--up", "--apply"], afterUp: { inspect: inspectJson(shape) } });
+    await expect(runTestDb(f.deps)).resolves.toBe(0);
+    expect(f.mutations()).toEqual([composeArgs(ROOT, UP_SUBCOMMAND)]);
+  });
+
+  const STATES = [
+    ["created", "created", null],
+    ["running・healthy", "running", "healthy"],
+    ["running・starting", "running", "starting"],
+    ["running・unhealthy", "running", "unhealthy"],
+    ["exited", "exited", null],
+  ] as const;
+
+  for (const [shapeLabel, shape] of SHAPES) {
+    it.each(STATES)(`ケース${shapeLabel}・%s：down の前の確認に通り、固定の down を1回だけ実行する`, async (_label, state, health) => {
+      const container = {
+        ...RUNNING,
+        ps: JSON.stringify({ Name: "katana-test-db", Service: "test-db", State: state, Health: health ?? "" }) + "\n",
+        port: state === "running" ? "katana-test-db\n" : "",
+        inspect: inspectJson({ state, health, ...shape }),
+      };
+      const f = fake({ argv: ["--down", "--apply"], state: container });
+      await expect(runTestDb(f.deps)).resolves.toBe(0);
+      expect(f.mutations()).toEqual([composeArgs(ROOT, DOWN_SUBCOMMAND)]);
+      // 開発用ボリュームに対しては、読み取り以外のコマンドを実行しない
+      for (const [, args] of f.run.mock.calls) {
+        if (args.includes("katana-web_postgres_data") || args.some((arg) => arg.includes("volume=katana-web_postgres_data"))) {
+          expect(["volume inspect", "ps --all"]).toContain(args.slice(0, 2).join(" "));
+        }
+      }
+    });
+  }
+
+  it("upがタイムアウトした後に残った unhealthy のコンテナ（ケースB）も、--down --apply で片付けられる", async () => {
+    const remnant = {
+      ...RUNNING,
+      ps: '{"Name":"katana-test-db","Service":"test-db","State":"running","Health":"unhealthy"}\n',
+      inspect: inspectJson({ health: "unhealthy", mounts: [INIT_BIND, DATA_TMPFS], hostMounts: [INIT_BIND_SPEC, DATA_TMPFS_SPEC], tmpfs: null }),
+    };
+    const up = fake({ argv: ["--up", "--apply"], afterUp: remnant, upResult: { code: 1, stdout: "", stderr: "timeout" } });
+    await expectStopped(up, "DOCKER_COMMAND_FAILED");
+    const down = fake({ argv: ["--down", "--apply"], state: remnant });
+    await expect(runTestDb(down.deps)).resolves.toBe(0);
+    expect(down.mutations()).toEqual([composeArgs(ROOT, DOWN_SUBCOMMAND)]);
+  });
+
+  it.each([
+    ["データ領域への volume マウント", { mounts: [INIT_BIND, { Type: "volume", Name: "b1c2d3e4", Destination: DATA, RW: true }] }, "inspect: no volume mounts"],
+    ["データ領域への bind", { mounts: [INIT_BIND, { Type: "bind", Source: "/tmp/data", Destination: DATA, RW: true }] }, "inspect: mounts: bind mount on the data directory"],
+    ["不明な tmpfs", { tmpfs: { [DATA]: "", "/run": "" } }, "inspect: tmpfs: unknown tmpfs mount"],
+    ["データ領域の tmpfs がない", { tmpfs: null }, "inspect: tmpfs: the data directory tmpfs was not found"],
+    ["tmpfs の指定の矛盾", { mounts: [INIT_BIND, DATA_TMPFS], hostMounts: [INIT_BIND_SPEC, DATA_TMPFS_SPEC] }, "inspect: tmpfs: the data directory is specified in both"],
+  ])("up の後の確認でも、%s なら POST_CHECK_FAILED で止まり、何も削除しない", async (_label, overrides, item) => {
+    const f = fake({ argv: ["--up", "--apply"], afterUp: { inspect: inspectJson(overrides) } });
+    const error = await expectStopped(f, "POST_CHECK_FAILED");
+    expect(error.message).toContain(item);
+    expect(f.mutations()).toEqual([composeArgs(ROOT, UP_SUBCOMMAND)]);
+  });
+
+  it.each([
+    ["データ領域への volume マウント", { mounts: [INIT_BIND, { Type: "volume", Name: "b1c2d3e4", Destination: DATA, RW: true }] }],
+    ["データ領域への bind", { mounts: [INIT_BIND, { Type: "bind", Source: "/tmp/data", Destination: DATA, RW: true }] }],
+    ["不明な bind", { mounts: [INIT_BIND, { Type: "bind", Source: "/Users/x", Destination: "/x", RW: true }] }],
+    ["不明な tmpfs", { mounts: [INIT_BIND, { ...DATA_TMPFS, Destination: "/tmp" }] }],
+    ["データ領域の tmpfs がない", { tmpfs: null }],
+    ["tmpfs の指定の矛盾", { hostMounts: [INIT_BIND_SPEC, DATA_TMPFS_SPEC], tmpfs: null }],
+  ])("down の前の確認でも、unhealthy・exited のコンテナで %s なら down しない", async (_label, overrides) => {
+    for (const [state, health] of [["running", "unhealthy"], ["exited", null]] as const) {
+      const container = { ...RUNNING, inspect: inspectJson({ state, health, ...overrides }) };
+      const f = fake({ argv: ["--down", "--apply"], state: container });
+      await expectStopped(f, "CONTAINER_INSPECT_MISMATCH");
+      expect(f.mutations()).toEqual([]);
+    }
   });
 });
