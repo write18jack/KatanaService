@@ -1,7 +1,7 @@
 # 計画：専用テストDBの構築とVitest統合テストの分離
 
 作成日: 2026-10-26
-更新日: 2026-11-03（Step 3-8Bのcommit `d56c8e4`、R12のDockerの読み取り調査、Step 3-9・3-9B（テストDBの構成ファイルとDockerのラッパー。`docker compose config` による照合まで）の実施結果と、そのcommit `61f8105`、Step 3-9C（R14のパスワード検証の共通化）の実施結果とcommit `4553f2f`、Step 3-9D（ラッパーの `up`・`down` の実装と、障害時の down のレビュー。実際の起動・停止は未実施）の実施結果とcommit `5fcc259`、Step 3-10の実施前レビュー、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）の結果を反映）
+更新日: 2026-11-04（Step 3-8Bのcommit `d56c8e4`、R12のDockerの読み取り調査、Step 3-9・3-9B（テストDBの構成ファイルとDockerのラッパー。`docker compose config` による照合まで）の実施結果と、そのcommit `61f8105`、Step 3-9C（R14のパスワード検証の共通化）の実施結果とcommit `4553f2f`、Step 3-9D（ラッパーの `up`・`down` の実装と、障害時の down のレビュー。実際の起動・停止は未実施）の実施結果とcommit `5fcc259`、Step 3-10の実施前レビュー、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）の結果とcommit `8471705`、Step 3-10B（migration の前後のDBの状態の判定の実装。単体テストのみ）の結果を反映）
 作業ブランチ: `chore/test-db-isolation`（`fix-dashboard` の `6168889` から作成）
 
 ## 状態
@@ -10,7 +10,7 @@
 |---|---|
 | Phase 1：読み取り専用の調査 | **実施済み**（結果は本ファイルの1章） |
 | Phase 2：安全設計 | **設計レビュー完了**（確定設計は本ファイルの2章） |
-| Phase 3：実装 | **実施中**（Step 3-0〜3-8B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712`、Step 3-8A（接続後の本人確認と空DB検査）は `4b788e7` でcommit。Step 3-8B（当初の3-8：`prisma.config.ts` のガードとmigration用スクリプト）は `d56c8e4` でcommit。Step 3-9（テストDBの構成ファイル）とStep 3-9B（Dockerのラッパー `scripts/testdb.mts` の `--check`・`--status`と、`docker compose config` による照合。架空の一時的な `.env.test` で、全項目が一致）は実施済みで、`61f8105` でcommit。Step 3-9C（R14のパスワード検証を共通の関数にまとめ、4つの経路に適用）は実施済みで、`4553f2f` でcommit。Step 3-9D（ラッパーの `--up`・`--down`。`--apply` があるときだけ変更操作を行う）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit。Step 3-10の実施前レビュー（Dockerの読み取り専用の調査を含む）と、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）を実施し、`test: validate test database tmpfs mounts safely` でcommit。`reset` は未実装。**コンテナの起動・停止とDBへの接続は、一度も行っていない。** 結果は3章の「3-A. 実施結果」） |
+| Phase 3：実装 | **実施中**（Step 3-0〜3-8B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712`、Step 3-8A（接続後の本人確認と空DB検査）は `4b788e7` でcommit。Step 3-8B（当初の3-8：`prisma.config.ts` のガードとmigration用スクリプト）は `d56c8e4` でcommit。Step 3-9（テストDBの構成ファイル）とStep 3-9B（Dockerのラッパー `scripts/testdb.mts` の `--check`・`--status`と、`docker compose config` による照合。架空の一時的な `.env.test` で、全項目が一致）は実施済みで、`61f8105` でcommit。Step 3-9C（R14のパスワード検証を共通の関数にまとめ、4つの経路に適用）は実施済みで、`4553f2f` でcommit。Step 3-9D（ラッパーの `--up`・`--down`。`--apply` があるときだけ変更操作を行う）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit。Step 3-10の実施前レビュー（Dockerの読み取り専用の調査を含む）と、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）を実施し、`8471705` でcommit。Step 3-10B（DBの状態 A・B・C の読み取り専用の判定と、`pg` の許可リストの追加。単体テストのみ）を実装（未commit。どこからも呼ばない）。`reset` は未実装。**コンテナの起動・停止とDBへの接続は、一度も行っていない。** 結果は3章の「3-A. 実施結果」） |
 | Phase 4：検証 | **未着手** |
 
 F-01の判定は **CONDITIONAL PASS のまま**。実DB・Cookie・HTTPでの検証は、Phase 4のE2Eで行う。
@@ -340,7 +340,7 @@ npm run test:integration ─► 専用runner
 
 ## 3. Phase 3：実装順序（実施中）
 
-### 3-A. 実施結果（2026-11-03時点）
+### 3-A. 実施結果（2026-11-04時点）
 
 | Step | 状態 | commit |
 |---|---|---|
@@ -361,7 +361,8 @@ npm run test:integration ─► 専用runner
 | 3-9B | Dockerのラッパー `scripts/testdb.mts`（`--check`・`--status`。読み取り専用）、R14・R15の対策、`docker compose config` による照合（架空の一時的な `.env.test` で実施）。`up`・`down`・`reset` は**未実装**（コンテナの起動・DBへの接続は一度も行っていない） | `61f8105`（`test: add isolated PostgreSQL test environment`） |
 | 3-9C | R14のパスワード検証の共通化（`assertTestDatabaseCredentials()`。Dockerのラッパー・統合テストのrunner・migration用スクリプト・Prisma CLIのテストDBモードに適用）。DB非接続の単体テストと、3つの確認モードの実行による回帰確認。R14は**一部が残る** | `4553f2f`（`test: centralize test database credential validation`） |
 | 3-9D | Dockerのラッパーの `--up`・`--down`（`--apply` があるときだけ変更操作）。操作前・操作後の確認、障害時（starting・unhealthy・exited・up の失敗後）の down のレビューと、Compose のラベルの照合の追加。単体テスト、静的検証。**実際の `up`・`down` は実行していない**。R7 は未検証。`reset` は未実装 | `5fcc259`（`test: add guarded test database up and down commands`） |
-| 3-10A | tmpfs の判定の修正（`Mounts`・`HostConfig.Mounts`・`HostConfig.Tmpfs` のどの表し方でも、データ領域の tmpfs と初期化用の bind だけを許可する）。up の後と down の前の両方に適用。migration の前と後の検査の分け方を記録。**実際の `up`・`down`・DBへの接続は行っていない** | `test: validate test database tmpfs mounts safely`（親は `5fcc259`。hashは次のセッションで記録する。Step 3-10の実施前レビューの記録も含む） |
+| 3-10A | tmpfs の判定の修正（`Mounts`・`HostConfig.Mounts`・`HostConfig.Tmpfs` のどの表し方でも、データ領域の tmpfs と初期化用の bind だけを許可する）。up の後と down の前の両方に適用。migration の前と後の検査の分け方を記録。**実際の `up`・`down`・DBへの接続は行っていない** | `8471705`（`test: validate test database tmpfs mounts safely`。Step 3-10の実施前レビューの記録も含む） |
+| 3-10B | migration の前後のDBの状態（A：完全に空、B：途中まで適用・不整合、C：全件適用済み）の読み取り専用の判定（`lib/testing/testDbState.ts`）と、`pg` を読み込む1ファイル（`lib/testing/testDbConnection.ts`）の追加。DB非接続の単体テスト。**`testdb-migrate`・globalSetup への組み込みと、実DBへの接続は行っていない**（どちらも強制停止のまま）。commit の前のカタログ検査のレビューで、`pg_am`・`pg_transform` の検査漏れを直した | `test: classify test database migration states safely`（親は `8471705`。hashは次のセッションで記録する） |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -422,7 +423,7 @@ npm run test:integration ─► 専用runner
 **Step 3-4B（接続経路の静的検査）**
 
 - 作成：`lib/testing/dbConnectionPaths.test.ts`（未追跡・未commit）。ソースを TypeScript Compiler API で構文解析するだけで、検査対象のモジュールはimportしない（このファイルのimportは `node:fs`・`node:path`・`typescript`・`vitest` だけ）。
-- 規則1（`prisma-client-constructor`・`prisma-adapter-pg`・`pg-driver`）、規則2（`legacy-generated-prisma`）、`db-module-reexport`（`@/lib/prisma` と PrismaClient の再export）を実装した。許可リストは `lib/prisma.ts`・`prisma/seed.ts` の2件だけ（`lib/db/` のガードと `scripts/testdb*` は、今は接続を作らないので入れていない）。
+- 規則1（`prisma-client-constructor`・`prisma-adapter-pg`・`pg-driver`）、規則2（`legacy-generated-prisma`）、`db-module-reexport`（`@/lib/prisma` と PrismaClient の再export）を実装した。許可リストは `lib/prisma.ts`・`prisma/seed.ts` の2件だけ（`lib/db/` のガードと `scripts/testdb*` は、今は接続を作らないので入れていない）。→ Step 3-10B で、`pg` だけを許可するファイル `lib/testing/testDbConnection.ts` を1件追加した（3-Aの3-10B）。
 - 検出できない書き方は、ファイル先頭のコメントに列挙している（文字列を組み立てたimport、宣言を経由しない取得など）。
 - このStepのテストは63件（Step 3-5Bの時点で、規則1・2の部分だけを数えた件数）。実施時の実行結果は記録が残っていない。
 
@@ -1073,7 +1074,7 @@ npm run test:integration ─► 専用runner
 **Step 3-10A（tmpfs の判定と、障害時の復旧のしやすさの修正。コード・単体テスト・PLANの更新だけ）**
 
 - Dockerの変更操作、DBへの接続、migration、統合テストは行っていない。Dockerのコマンドも、このStepでは実行していない（読み取り系を含む）。
-- 変更：`scripts/testdb.mts`、`scripts/testdb.test.ts`、本ファイル。commit は `test: validate test database tmpfs mounts safely`（親は `5fcc259`。hash は次のセッションで記録する）。commit の前に、`git diff --cached --check` が0件であること、秘密情報・想定外の変更・安全ガードの緩和がないことを確かめた。
+- 変更：`scripts/testdb.mts`、`scripts/testdb.test.ts`、本ファイル。commit は `8471705`（`test: validate test database tmpfs mounts safely`。親は `5fcc259`）。commit の前に、`git diff --cached --check` が0件であること、秘密情報・想定外の変更・安全ガードの緩和がないことを確かめた。
 - **修正した理由：** Step 3-10の実施前レビューで、次の想定が確かでないことが分かった。
   - それまでの想定：データ領域の tmpfs は `HostConfig.Tmpfs` にだけ現れ、`inspect` の `Mounts` には初期化用の bind が1つだけある。
   - Docker の公式ドキュメント（Storage › tmpfs mounts）の記載：
@@ -1180,13 +1181,202 @@ npm run test:integration ─► 専用runner
       - 列・型・インデックス・制約・シーケンス・関数・enum型などの、テーブルの中身の定義。
       - スキーマとの差分。これは Step 3-12 の `prisma migrate diff` で照合する。
     - 検討事項（未決定）：Aの「完全に空」の判定に、システム以外のスキーマの、ユーザー定義の型（enum など）・シーケンス・関数がないことを加えるか。途中で失敗した migration の残りを見つけやすくなる。実装の前に決める。
-  - **実DBによる検証は、まだ行っていない。** A・B・C の判定は、まだ実装していない。次の工程で実装する。その工程では、`pg` の許可リストの変更と、`testdb-migrate` の手順8の実装を行う。
+      - → 決定（Step 3-10B の指示）：加える。enum・domain などの型、シーケンス、インデックス、関数・プロシージャ、想定外のスキーマ・拡張も確かめる（3-10B の記録）。
+  - **実DBによる検証は、まだ行っていない。** A・B・C の判定は、Step 3-10B で実装した（下記）。`testdb-migrate` の手順8への組み込みは、まだ行っていない。
 - **未検証のまま残ること:**
   - 実際の `up`・`down`。
   - R7。
   - Compose のラベル（`config_files`・`working_dir`）の実際の値。
   - Docker Desktop が実際にどの形で tmpfs を表すか（A・B・C のどれか）。
   - 実DBへの接続。
+
+**Step 3-10B（migration の前後のDBの状態の判定。実装・単体テスト・PLANの更新だけ）**
+
+- 前提：ブランチ `chore/test-db-isolation`、HEAD `8471705`（Step 3-10A）。Step 3-10A の commit hash `8471705` を、表と3-10Aの記録に記入した。
+- **実DBへの接続・Dockerの操作・migration・Prisma CLI のDB操作・統合テストの実行は、行っていない。** `testdb-migrate` の通常実行モードの強制停止（`IDENTITY_CHECK_NOT_IMPLEMENTED`）と、globalSetup の強制停止は、そのまま残した。新しい判定の関数は、どこからも呼ばない。
+- 作成・変更したファイル（未commit）:
+  - 新規 `lib/testing/testDbState.ts`：状態の判定（`classifyTestDatabase()`・`classifyCatalogInventory()`・`readCatalogInventory()`・`enumNamesFromSchema()`）。`pg` は読み込まない。接続は `connect` として受け取る。
+  - 新規 `lib/testing/testDbConnection.ts`：`pg` を直接 import する唯一のファイル。`connectTestDatabase(url)` を呼んだときだけ、1回接続する（接続タイムアウト10秒、クエリ・文のタイムアウト30秒）。接続に失敗したら、閉じてから元のエラーを投げる。
+  - 新規 `lib/testing/testDbState.test.ts`（84件。レビュー前は81件）、`lib/testing/testDbConnection.test.ts`（4件。`pg` を factory 付きの `vi.mock` で置き換える）。
+  - 変更 `lib/testing/integrationDatabaseCheck.ts`：部品を export して共有できるようにした。`verifyIntegrationDatabase()` の動作は変えていない（既存の54件はそのまま成功）。
+    - 接続の開始・終了を `runReadOnlyCheck()` に切り出した（接続は1回、`BEGIN READ ONLY`、成功・失敗にかかわらず ROLLBACK と `end()`、最初の失敗を優先）。
+    - 本人確認を `assertDatabaseIdentity()` として export した。
+    - migration の履歴の比較を `compareMigrationHistory()`、空DB検査を `findNonEmptyTables()` に分けた。
+    - `@map` などの拒否を `assertSupportedSchema()` に分けた。
+    - エラーコード `TARGET_REJECTED` を追加した。
+  - 変更 `lib/testing/dbConnectionPaths.test.ts`：`pg` の許可リストの追加（下記）と、通常テストの期待件数（29→31）。
+- **責務の分け方:**
+  1. 接続：`testDbConnection.ts` の `connectTestDatabase()`（呼び出し側が渡す）
+  2. 本人確認：`assertDatabaseIdentity()`
+  3. migration の前の空DBの判定、4. migration の後の完了状態の判定：`classifyCatalogInventory()`（カタログの一覧から判定する純粋関数）と、C の候補のときだけ読む履歴・空DB検査
+  5. 接続の終了：`runReadOnlyCheck()`
+  - runner 専用の起動条件（`assertIntegrationProcessEnv()`）は、状態の判定では使わない。`classifyTestDatabase()` は、呼び出し側が検証した接続URLを受け取り、接続の前にもう一度 `assertTestDatabaseTarget()` で確かめる（`env` は空。環境変数の検査は呼び出し側の責任）。
+- **手順:**
+  1. 期待値（テーブル・enum・migration の一覧）と接続URLを、接続の前に検証する。
+  2. 1回だけ接続する。
+  3. `BEGIN READ ONLY`。`SHOW transaction_read_only` が `on` であることを確かめる。
+  4. 本人確認（`current_database() = katana_test`、`current_user`・`session_user` = `katana_test_user`、DBのコメント = `katana-test-db`）。**失敗したら throw し、カタログを読まない（状態を返さない）。**
+  5. カタログの一覧を読む。
+  6. 状態を判定する。
+  7. ROLLBACK して接続を閉じる。
+  - 実行する SQL は SELECT・SHOW・`BEGIN READ ONLY`・ROLLBACK だけ（単体テストで確認）。
+- **PostgreSQL のカタログの検査範囲:**
+  - システムのスキーマは対象外：`pg_catalog`、`information_schema`、`pg_toast*`（`pg_toast_temp_*` を含む）、`pg_temp_*`。
+  - スキーマ（`pg_namespace`）：`public` だけを許す。`public` がなければ B。
+  - 拡張（`pg_extension`）：`plpgsql` だけを許す（なくてもよい）。
+  - リレーション（`pg_class`。`relkind` が `c` 以外のすべて）：テーブル・パーティションテーブル・ビュー・マテリアライズドビュー・外部テーブル・シーケンス・インデックス・パーティションインデックス。
+    - インデックスは対象のテーブル（`pg_index`）を、シーケンスは所有するテーブル（`pg_depend` の `deptype` が `a`・`i`）を一緒に読む。
+  - 型（`pg_type`）：enum・domain・複合型・range・multirange・基本型など。
+    - **二重に数えないもの：** テーブル・ビューなどの行型（リレーションの側で数える）、型ごとに自動で作られる配列型（元の型の側で数える）、独立した複合型の `pg_class` の行（型の側で1回だけ数える）。
+    - range 型と、自動で作られる multirange 型は、別々に数える。
+  - 関数・プロシージャ・集約関数・ウィンドウ関数（`pg_proc`）。
+  - その他のユーザー定義オブジェクト：OID が 16384（FirstNormalObjectId）以上のものを、種類ごとに数える。対象は、演算子・演算子クラス・演算子族・照合順序・変換・キャスト・言語・全文検索の4種類・拡張統計・ルール・トリガー（外部キーの内部トリガーを除く）・ポリシー・イベントトリガー・パブリケーション・外部データラッパー・外部サーバー・デフォルト権限・ラージオブジェクト・アクセスメソッド・変換（23種類。最後の2つは commit の前のレビューで追加した）。
+  - 数えないもの：
+    - 制約・列の既定値（C の定義の一致は Step 3-12 で照合する）。
+    - サブスクリプション・ユーザーマッピング（一般ユーザーが読めないカタログ。作るにはスーパーユーザーの権限が必要）。
+- **A・B・C の判定条件:**
+  - **A**：次をすべて満たす。
+    - スキーマは `public` だけ。
+    - 拡張は `plpgsql` だけ。
+    - リレーション・型・関数・その他のオブジェクトが0件（`_prisma_migrations` もない）。
+  - **C**：A と同じ「想定外のもの」の条件（スキーマ・拡張・関数・その他のオブジェクト）に加えて、次をすべて満たす。
+    - `public` のテーブル（`relkind` が `r`）が、`schema.prisma` の15モデルと `_prisma_migrations` にちょうど一致する。
+    - インデックス・シーケンスは、それらのテーブルのものだけ。インデックスの定義は照合しない。
+    - ビュー・マテリアライズドビュー・外部テーブル・パーティションテーブルがない。
+    - 型は、`public` の enum だけ。名前は `schema.prisma` の5つとちょうど一致する。
+    - migration の履歴が、`prisma/migrations` の名前（今は8件）と完全一致する。失敗・未完了・ロールバック・重複の記録がない。
+    - アプリの15テーブルが空。
+    - 結果には `schemaDiff: "not-verified"` を付ける。列・型の中身・インデックス・制約の一致は、Step 3-12 の `prisma migrate diff` で照合するまで保証しない。
+  - **B**：A にも C にも当たらないものすべて。判定の理由（オブジェクトの名前と件数。20件を超える分は件数だけ）を返す。例：
+    - 履歴が1件・3件だけ、失敗・ロールバック・重複の記録がある。
+    - `_prisma_migrations` だけがある。
+    - 履歴はあるがテーブルが足りない。
+    - enum・シーケンス・関数・domain だけがある。
+    - 想定外のテーブル・ビュー・スキーマ・拡張がある。
+    - データが残っている。
+  - **判定の順序:**
+    - C の構造の条件を満たさないときは、migration の履歴も空DB検査も読まない。想定外のテーブルには触れない。
+    - `_prisma_migrations` が `public` のテーブルとしてないときは、履歴を読まない。
+  - **検査そのものの失敗は B としない。** SQL のエラー・接続の失敗・ROLLBACK や `end()` の失敗・本人確認の失敗は、例外（`QUERY_FAILED`・`CONNECT_FAILED`・`CLOSE_FAILED`・本人確認の各コード）を投げて止まる（fail-closed）。
+  - 件数として読めない値は、オブジェクトがあるものとして扱う。
+- **期待値:**
+  - テーブルは `applicationTablesFromSchema()`、enum は `enumNamesFromSchema()`、migration は `listMigrationNames()` で、実際のファイルから毎回読む。件数は固定しない。
+  - 単体テストでは、今のファイルから読んだ値が15テーブル・5 enum・8件で、名前が一致することを確かめた。新しい migration を追加したときは、このテストの名前の一覧を見直す。
+  - 期待する migration の名前が重複していれば、接続の前に拒否する。
+- **`pg` の許可リストの変更（静的検査の規則1）:**
+  - `lib/testing/dbConnectionPaths.test.ts` に、`ALLOWED_PG_DRIVER_FILES = ["lib/testing/testDbConnection.ts"]`（ファイル単位の完全一致）を追加した。
+  - このファイルでは、パッケージ名がちょうど `pg` の参照だけを許可する。
+    - pg のサブパス・`pg-pool`・`pg-native` は許可しない。
+    - `@prisma/adapter-pg` と PrismaClient も許可しない。
+  - 既存の許可リスト（`lib/prisma.ts`・`prisma/seed.ts`）と、ほかの規則は変えていない。
+  - 規則4では、このファイルをDB接続モジュールとしては扱わず、中の `pg` の参照で判定する。
+    - `testDbConnection.test.ts` は、`pg` を factory 付きの `vi.mock` で置き換えているので、DBに到達しない。
+    - モックを無視すると、`pg` に到達することもテストで確かめた（解析の空振りの検出）。
+  - 追加したテスト：
+    - 完全一致の `pg` だけを許可し、サブパスや別のパスでは検出する。
+    - ファイルが実在し、中身を別のパスに置くと `pg-driver` として検出される。
+- **追加したテストと結果:**
+  - `testDbState.test.ts` 81件（レビューで3件追加し、84件）：本人確認の成功・各不一致、A、A の崩れ（enum・シーケンス・インデックス・関数・プロシージャ・domain・複合型・range・スキーマ・拡張・ビュー・外部テーブル・その他のオブジェクト）、C、B（履歴1件・3件・失敗・ロールバック・重複・余分・空、`_prisma_migrations` だけ、テーブル不足、想定外のテーブル・ビュー・インデックス・シーケンス・型・関数・スキーマ・拡張・トリガー、データあり）、SQL の失敗の fail-closed、接続の解放、SQL の種類、秘密情報。
+  - `testDbConnection.test.ts` 4件：import しただけでは接続しない、1回だけ接続する、接続の失敗時に閉じる。
+  - `dbConnectionPaths.test.ts` は4件増えた（152件）。
+  - 既存の `integrationDatabaseCheck.test.ts` 54件は、変更せずにすべて成功した。
+- **確認済み:**
+  - `npx tsc --noEmit` が成功した。変更・新規の6ファイルの `eslint` も成功した。`git diff --check` は0件。
+  - `npm test` は31ファイル・1029件がすべて成功した（940件＋89件）。レビューの修正の後は1032件（下記）。
+  - `npx vitest list --filesOnly` は31件で、`*.integration.test.*` は0件。
+- **migration runner（`testdb-migrate`）への組み込みの設計（未実施。別工程）:**
+  - `scripts/testdb-migrate.mts` の `verifyDatabaseIdentity` の仮の関数を、`classifyTestDatabase()` を呼ぶ関数に置き換える。
+    - `connect` には `connectTestDatabase` を渡す。
+    - 期待値は、`prisma/schema.prisma` と `prisma/migrations` から読む。
+  - `runTestDbMigrate()` の手順8で、結果に応じて分ける。
+    - A：手順9に進む（`prisma migrate deploy`）。
+    - C：Prisma CLI を起動せずに成功とする。
+    - B：理由を表示して停止する。
+    - 例外：停止する。
+    - そのため、手順8の戻り値の型を変える（今は `Promise<void>`）。
+  - 接続は、確認モードでは行わない。通常実行モードの手順8だけで行う。
+  - 接続の前の条件：
+    - 親のプロセスに `PG*` の環境変数がないことを確かめる。`pg` は、URL にない設定を `PG*` から補うため。
+    - 接続URLは、手順5・6で検証済みの値だけを使う。
+  - migration の後には、もう一度 `classifyTestDatabase()` を呼び、C であることを確かめる（Step 3-12）。
+  - globalSetup への組み込みは別の工程とする。`verifyIntegrationDatabase()` と `connectTestDatabase` を使う。
+- **未実施・未検証のまま残ること:**
+  - `testdb-migrate`・globalSetup への組み込み。どちらも強制停止のまま。
+  - 実DBへの接続。
+    - カタログの SQL が PostgreSQL 15 で実際に動くこと。
+    - `katana_test_user` の権限で読めること（`pg_default_acl`・`pg_largeobject_metadata`・`pg_publication` など）。
+    - 初期化直後のDBが本当に A と判定されること（initdb が作ったオブジェクトの OID が 16384 未満であることを含む）。
+  - `prisma migrate diff` による定義の照合（Step 3-12）。
+  - `reset`（未実装）。
+  - 実際の `up`・`down`、R7、Compose のラベルの実際の値、tmpfs の実際の表し方（Step 3-10A から引き続き）。
+- **カタログ検査のレビュー（commit の前。ユーザーの指示による。2026-11-04）:**
+  - 判断の根拠：PostgreSQL 15 の仕様、`docker/test-db/init/` の2つのスクリプト、8件の migration の SQL。
+    - migration が作るのは、テーブル・enum・インデックス（UNIQUE を含む）・`ALTER TABLE` による制約と外部キーだけ。
+    - 関数・トリガー・シーケンス・ビュー・スキーマ・拡張・`ALTER TYPE` はない。
+    - 途中で作った5テーブルと2つの enum（`Era`・`KatanaType`）は、後の migration で削除済み。
+  - 前提（未検証）：initdb が作る標準のオブジェクトの OID は、すべて 16384 未満。
+    - CREATE DATABASE は template1 をそのまま写すので、OID も変わらない。
+    - 前提が外れると、正常なDBが B になる（安全側で、誤って A・C にはならない）。初回の実DB接続で確かめる。
+  - **クラスタ共通のオブジェクト**（`pg_database` のテストDB自身、ロール `katana_test_user`、`pg_shdescription` のDBのコメント）:
+    - OID は 16384 以上だが、判定には使わない。読むのは、本人確認の `pg_database`（DB名とコメントの照合）だけ。
+    - 初期化スクリプトの次の操作は、どれもクラスタ共通のカタログだけを変え、`katana_test` の中には何も残さない：`CREATE ROLE`、`ALTER DATABASE ... OWNER`、`REVOKE ON DATABASE postgres`、`COMMENT ON DATABASE`、`DO` ブロック。
+  - **スキーマで絞り込むカタログ（OID の条件は使わない）:**
+    | カタログ | 判定 |
+    |---|---|
+    | `pg_namespace` | `public` の OID は 2200（標準）。ほかは B。`pg_` で始まるスキーマは、ユーザーが作れない |
+    | `pg_class` | テーブルの TOAST とその索引は `pg_toast` にあり、対象外。C のインデックス（主キー・UNIQUE・`@@index`）は、対象のテーブルが想定テーブルなら許す。シーケンスは、`pg_depend` の `a`（SERIAL・OWNED BY）・`i`（IDENTITY）で想定テーブルが所有するものだけを許す。今の migration にシーケンスはない |
+    | `pg_type` | テーブルの行型と、enum・行型の配列型（`_UserRole` など）は、二重に数えないように除く。C の enum は5つとちょうど一致すること |
+    | `pg_proc` | plpgsql の関数（ハンドラーなど）は `pg_catalog` にあり、対象外。`public` の関数・プロシージャは A・C のどちらでも B |
+    | `pg_extension` | `plpgsql` だけを名前で許す（その言語・関数は `pg_catalog` にあり、OID は 16384 未満） |
+    - `pg_depend` の内部依存（外部キー・インデックス・型の依存）は、数えない。シーケンスの所有者の判定にだけ使う。
+  - **OID で数えるカタログ（正常な A・C のDBに OID 16384 以上の行が現れないものだけ。全カタログには使っていない）:**
+    | カタログ | 判定 |
+    |---|---|
+    | `pg_operator`・`pg_opclass`・`pg_opfamily`・`pg_collation`・`pg_conversion`・`pg_cast`・`pg_language`・全文検索の4つ | 標準のものは initdb が作る。enum を作っても、キャストや演算子は作られない。照合順序（ICU のものを含む）は initdb が取り込む |
+    | `pg_statistic_ext`・`pg_rewrite`・`pg_policy` | migration では作らない。`pg_rewrite` はビューがあると増えるが、ビューは A・C のどちらでも B |
+    | `pg_trigger` | 外部キーの内部トリガー（`tgisinternal`）は C に正常に存在するので、数えない。CONSTRAINT TRIGGER を含む、ユーザーのトリガーは B |
+    | `pg_event_trigger`・`pg_publication`・`pg_foreign_data_wrapper`・`pg_foreign_server`・`pg_largeobject_metadata` | migration・初期化では作らない |
+    | `pg_default_acl` | 初期化スクリプトは `ALTER DEFAULT PRIVILEGES` を使わないので、行は0件のはず |
+    | `pg_am`・`pg_transform` | レビューで追加した（下記） |
+    - OID で数えないカタログ：
+      - `pg_constraint`・`pg_attrdef`・`pg_enum`・`pg_index`・`pg_depend`・`pg_description`。C では OID 16384 以上の行が正常にある。定義の一致は Step 3-12。
+      - `pg_database`・`pg_authid`・`pg_shdescription`（クラスタ共通）。
+      - `pg_subscription`・`pg_user_mapping`（一般ユーザーが読めない）。
+  - **A・B・C の判定のレビュー結果:** 指示の観点はすべて満たしていた。
+    - A：`public` と標準のオブジェクトを許し、`_prisma_migrations` があれば A にならない。enum・シーケンス・関数などが残っていれば B。
+    - B：A・C のどちらにも当たらないときだけ B。SQL の失敗は B と断定しない。想定外のテーブルからデータを読まない。migration の自動継続・reset はない（関数はDBを変更しない）。
+    - C：15テーブルと `_prisma_migrations`、migration 名8件の完全一致、失敗・未完了・ロールバック・重複なし、5つの enum、全テーブルが空、想定外のオブジェクトなし。`schemaDiff: "not-verified"` を維持し、スキーマの完全一致とは扱わない。
+    - 本人確認は、カタログを読む前に行う。
+  - **見つけて直した問題（検査の漏れ。安全条件は緩めていない）:**
+    - `pg_am`（アクセスメソッド）と `pg_transform`（変換）を数えていなかった。
+      - 原因：一覧の作成時の漏れ。
+      - 影響：これらが残っていても A・C と判定され得た。作るにはスーパーユーザーの権限が要る（`pg_transform` は型の所有者でも作れる）ので、テストDBで起こる可能性は低い。
+      - 修正：OID で数えるカタログに追加した（21種類→23種類）。標準のアクセスメソッドは OID 16384 未満なので、誤って検出することはない。
+    - 単体テストを3件追加した。
+      - その他のオブジェクトの SQL が23のカタログをすべて OID で絞り込み、内部トリガーを除くのは `pg_trigger` だけで、正常なDBに OID 16384 以上の行があるカタログを OID で数えていないこと。
+      - リレーション・型・関数・スキーマの一覧が、OID ではなくスキーマで絞り込み、シーケンスの所有者と暗黙の型の除き方が設計どおりであること。
+      - アクセスメソッドが残っていれば B になること。
+  - **残る限界（記録のみ。今回は直していない）:**
+    - スーパーユーザーが `pg_catalog` にオブジェクトを作った場合、スキーマで絞り込むカタログでは見つけられない。テストDBのアプリのロールは、スーパーユーザーではない。
+    - `search_path` を変えて標準の演算子・関数を隠された場合の対策（`set_config` で検査中だけ `pg_catalog` に固定するなど）はしていない。既存の `verifyIntegrationDatabase()` も同じ。`public` の関数・演算子があれば B になるが、その一覧を読む前に、ほかの検査の SQL が実行される。
+    - `public` スキーマを削除して作り直した場合も、A と判定する（所有者・権限は確かめない）。
+  - **初回の実DB接続のときに確かめること:**
+    1. 6つのカタログの SQL が、PostgreSQL 15 でエラーなく動く。
+    2. `katana_test_user` の権限で、23のカタログ（`pg_default_acl`・`pg_largeobject_metadata`・`pg_publication`・`pg_statistic_ext`・`pg_am`・`pg_transform` など）を読める。
+    3. 初期化直後のDBが A になる。そのとき、OID で数えたその他のオブジェクトの件数が、すべて0（特に照合順序・変換・言語）。
+    4. `migrate deploy` の後のDBが C になる。
+       - インデックスが、すべて想定テーブルのものとして読める。
+       - シーケンスがない。
+       - 型は5つの enum だけ（配列型と行型は除かれる）。
+       - 内部トリガー以外のトリガーがない。
+    5. 本人確認に失敗するDB（DBのコメントなし・別のDB名）では、カタログを読まずに止まる。
+- **最終の確認（レビューの修正の後）:**
+  - `npx tsc --noEmit` が成功した。6つのTSファイルの `eslint` も成功した。`git diff --check` は0件。
+  - `npm test` は31ファイル・1032件がすべて成功した（940件＋92件）。
+    - `testDbState.test.ts` は84件、`testDbConnection.test.ts` は4件。
+    - `dbConnectionPaths.test.ts` は152件で、静的検査の違反は0件。
+  - `npx vitest list --filesOnly` は31件で、`*.integration.test.*` は0件。統合テスト用の設定では6件。
+  - commit は `test: classify test database migration states safely`（親は `8471705`。hash は次のセッションで記録する）。
 
 全Stepに共通する事項:
 
@@ -1424,18 +1614,17 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：`test: validate test database tmpfs mounts safely`（Step 3-10A。親は `5fcc259`）。hash は `git log -1` で確かめ、2章のStepの一覧表の3-10Aの行と、3-Aの3-10Aの「変更」に記録する（この記録は、次の作業とあわせてcommitする）
+   - HEAD：`test: classify test database migration states safely`（Step 3-10B。親は `8471705`）。hash は `git log -1` で確かめ、3-Aの表の3-10Bの行と、3-10Bの記録の「最終の確認」に記録する（この記録は、次の作業とあわせてcommitする）
    - 変更済み（未commit）：なし
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
    - `.env.test` は存在しない（Step 3-7B・3-8B・3-9B・3-9C と、`61f8105` のcommit前の検証で作った一時ファイルは、すべて削除済み）
 3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。**実際の `up`・`down` は、まだ一度も実行していない。R7 も未検証。** Step 3-10の実施前レビューの結果（3-Aの「Step 3-10の実施前レビュー」）を先に読む。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
-   - `testdb-migrate` の接続後の本人確認の実装（設計の提示から。静的検査の `pg` の許可リストの変更を含む）
    - Step 3-10（ユーザーによる `.env.test` の作成と、3つの確認モードの実行）
    - 初回の up の前のチェックリストの確認
-   - `testdb-migrate` の接続後の本人確認と、DBの状態（空・途中まで適用・すべて適用済み）の判定の実装（3-Aの3-10Aの「設計判断」に従う。`pg` の許可リストの変更を含むので、設計を先に示す）
+   - `testdb-migrate` の手順8への状態判定の組み込み（3-Aの3-10Bの「組み込みの設計」に従う。強制停止の解除を含むので、ユーザーの承認を得てから。実DBでの検証は別工程）
    - `reset` の実装（本人確認の後）
 
-   コンテナの起動（Step 3-11）と、R7の確認は、まだ行っていない。接続後のDBの本人確認（migration用スクリプト・globalSetup）も、まだ実装していない。指示されたStep以外には着手しない。
+   コンテナの起動（Step 3-11）と、R7の確認は、まだ行っていない。接続後の本人確認と状態の判定は Step 3-10B で実装して commit したが（初回の実DB接続で確かめることは、3-Aの3-10Bの記録）、migration用スクリプト・globalSetup には、まだ組み込んでいない（どちらも強制停止のまま）。指示されたStep以外には着手しない。
 4. Stepが終わったら報告し、ユーザーの確認を得たうえで、次の2つを更新してからセッションを終える。
    - 3章の「3-A. 実施結果」（結果、設計との違い、未検証の事項、次のStepへの申し送り）
    - 本節の手順2の想定と、手順3の次のStep

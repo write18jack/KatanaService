@@ -11,7 +11,8 @@ import { describe, expect, it } from "vitest";
  * - prisma-client-constructor：`@prisma/client`（サブパス・`.prisma/client` を含む）の PrismaClient を値として参照する
  *   （new・extends・代入・引数・export など）。型の位置での参照、enum・`Prisma` 名前空間の利用は対象外。
  * - prisma-adapter-pg：`@prisma/adapter-pg` を参照する。
- * - pg-driver：`pg`（サブパス・`pg-pool`・`pg-native` を含む）を参照する。
+ * - pg-driver：`pg`（サブパス・`pg-pool`・`pg-native` を含む）を参照する。ALLOWED_PG_DRIVER_FILES のファイルでは、
+ *   パッケージ名が完全に `pg` のものだけを許可する（サブパス・`pg-pool`・`pg-native` と、ほかの規則は許可しない）。
  * - legacy-generated-prisma：`lib/generated/prisma/` を参照する。許可リストのファイルでも禁止。
  * - db-module-reexport：`@/lib/prisma` の再export、PrismaClient・`@prisma/client` 全体の再export。
  * 「参照」は import・export … from・`import x = require()`・require()・import()・import 型・vi.importActual/importMock。
@@ -50,6 +51,12 @@ import { describe, expect, it } from "vitest";
 const ROOT = path.resolve(__dirname, "../..");
 /** 接続を生成してよいファイル（リポジトリ相対のパスで完全一致） */
 const ALLOWED_CONNECTION_FILES = new Set(["lib/prisma.ts", "prisma/seed.ts"]);
+/**
+ * `pg`（パッケージ名の完全一致）だけを直接 import してよいファイル（Step 3-10B。テストDBの読み取り専用の状態判定の接続）。
+ * PrismaClient・@prisma/adapter-pg・pg のサブパスは許可しない。規則4では、DB接続モジュールとしては扱わず、
+ * その中の `pg` の参照で判定する（`pg` を factory 付きの vi.mock で置き換えたテストだけが、DBに到達しない）。
+ */
+const ALLOWED_PG_DRIVER_FILES = new Set(["lib/testing/testDbConnection.ts"]);
 const LEGACY_GENERATED_DIR = "lib/generated/prisma";
 const SOURCE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 /** ルート直下だけで除外するディレクトリ（ビルド生成物など） */
@@ -229,7 +236,7 @@ function findDbConnectionViolations(file: string, source: string): Violation[] {
     if (isLegacyGenerated(file, spec)) report(node, "legacy-generated-prisma", `references "${spec}"`);
     if (allowed) return;
     if (isPrismaAdapterPg(spec)) report(node, "prisma-adapter-pg", `references "${spec}"`);
-    if (isPgDriver(spec)) report(node, "pg-driver", `references "${spec}"`);
+    if (isPgDriver(spec) && !(ALLOWED_PG_DRIVER_FILES.has(file) && spec === "pg")) report(node, "pg-driver", `references "${spec}"`);
   };
 
   // 2回目：違反を探す
@@ -335,7 +342,7 @@ const KNOWN_DB_INTEGRATION_TEST_FILES = [
   "lib/market-analytics/priceTrend.integration.test.ts",
   "lib/market-analytics/soldMetrics.integration.test.ts",
 ];
-const EXPECTED_UNIT_TEST_COUNT = 29;
+const EXPECTED_UNIT_TEST_COUNT = 31;
 const INTEGRATION_TEST_GLOB = "**/*.integration.test.{ts,tsx}";
 const TEST_FILE = /\.test\.tsx?$/;
 const INTEGRATION_TEST_FILE = /\.integration\.test\.tsx?$/;
@@ -679,6 +686,14 @@ describe("DB接続経路（リポジトリの走査）", () => {
     expect(violations).toEqual([]);
   });
 
+  it("pg だけの許可リストのファイルが実在し、その中身は別のパスに置くと pg-driver として検出される", () => {
+    for (const file of ALLOWED_PG_DRIVER_FILES) {
+      expect(files).toContain(file);
+      expect(rulesOf(file, readFileSync(path.join(ROOT, file), "utf8"))).toEqual([]);
+      expect(rulesOf("lib/elsewhere.ts", readFileSync(path.join(ROOT, file), "utf8"))).toEqual(["pg-driver"]);
+    }
+  });
+
   it.each([...ALLOWED_CONNECTION_FILES])("%s の中身は、別のパスに置くと検出される（検査の空振りの検出）", (file) => {
     const source = readFileSync(path.join(ROOT, file), "utf8");
     expect(rulesOf("lib/elsewhere.ts", source)).toEqual(["prisma-adapter-pg", "prisma-client-constructor"]);
@@ -766,6 +781,23 @@ describe("DB接続経路の検査器（インメモリのソース）", () => {
 
   it("許可リストのファイルでは pg の利用を許可する", () => {
     expect(rulesOf("prisma/seed.ts", 'import { Pool } from "pg";\nnew Pool();')).toEqual([]);
+  });
+
+  it("pg だけの許可リストのファイルでは、pg（完全一致）の import だけを許可する", () => {
+    const file = [...ALLOWED_PG_DRIVER_FILES][0];
+    expect(rulesOf(file, 'import pg from "pg";\nnew pg.Client({});')).toEqual([]);
+    expect(rulesOf(file, 'const { Client } = await import("pg");')).toEqual([]);
+    for (const spec of ["pg/lib/client", "pg-pool", "pg-native"]) {
+      expect(rulesOf(file, `import x from "${spec}";`)).toEqual(["pg-driver"]);
+    }
+    expect(rulesOf(file, 'import { PrismaPg } from "@prisma/adapter-pg";')).toEqual(["prisma-adapter-pg"]);
+    expect(rulesOf(file, 'import { PrismaClient } from "@prisma/client";\nnew PrismaClient();')).toEqual(["prisma-client-constructor"]);
+  });
+
+  it("pg だけの許可は、パスが完全一致するファイルに限る", () => {
+    for (const file of ["lib/testing/testDbConnection.mts", "lib/testDbConnection.ts", "scripts/testDbConnection.ts", "lib/testing/testDbState.ts"]) {
+      expect(rulesOf(file, 'import pg from "pg";')).toEqual(["pg-driver"]);
+    }
   });
 
   it("コメントや文字列の中の記述は検出しない", () => {
@@ -866,6 +898,15 @@ describe("テストからの本物のPrisma・テストの分類（リポジト�
     expect(file).toMatch(INTEGRATION_TEST_FILE);
     expect(testFiles).toContain(file);
     expect(analyzeDbDependency(repoHost, file).dbPath).toBeDefined();
+  });
+
+  it("規則4：pg だけの許可リストのファイルのテストは、pg のモックを無視するとDBに到達する（解析の空振りの検出）", () => {
+    const tests = unitTests.filter((file) => [...ALLOWED_PG_DRIVER_FILES].some((allowed) => file === allowed.replace(/\.ts$/, ".test.ts")));
+    expect(tests).toHaveLength(ALLOWED_PG_DRIVER_FILES.size);
+    for (const file of tests) {
+      expect(analyzeDbDependency(repoHost, file).dbPath).toBeUndefined();
+      expect(analyzeDbDependency(repoHost, file, { honorMocks: false }).dbPath?.at(-1)).toBe("pg");
+    }
   });
 
   it("規則4：@/lib/prisma をモックしている通常テストは、モックを無視するとDBに到達する（解析の空振りの検出）", () => {

@@ -20,6 +20,9 @@ import { assertIntegrationProcessEnv } from "./integrationEnv.ts";
  * Dockerの公開ポート（5434）と異なるのが普通なので、判定には使わない（情報として返すだけ）。
  *
  * 例外のメッセージには、接続URL・パスワード・ドライバの元のエラーメッセージを含めない（SQLSTATE などのコードだけを含める）。
+ *
+ * 接続の開始と終了（runReadOnlyCheck）・本人確認（assertDatabaseIdentity）・migration の履歴の比較・空DB検査の部品は、
+ * migration の前後の状態判定（lib/testing/testDbState.ts）でも使う。runner 経由の起動確認（1〜3）は、ここだけで行う。
  */
 
 /** テストDBに付けるコメント（2-1。docker/test-db/init/ の初期化SQLで設定する予定） */
@@ -45,7 +48,8 @@ export type IntegrationDatabaseCheckErrorCode =
   | "MIGRATIONS_MISMATCH"
   | "INVALID_IDENTIFIER"
   | "DATA_PRESENT"
-  | "CLOSE_FAILED";
+  | "CLOSE_FAILED"
+  | "TARGET_REJECTED";
 
 export class IntegrationDatabaseCheckError extends Error {
   readonly code: IntegrationDatabaseCheckErrorCode;
@@ -88,7 +92,7 @@ export type VerifiedIntegrationDatabase = {
 };
 
 /** ドライバのエラーから、表示してよいコード（SQLSTATE・ECONNREFUSED など）だけを取り出す */
-function safeErrorCode(error: unknown): string {
+export function safeErrorCode(error: unknown): string {
   const code = (error as { code?: unknown } | null)?.code;
   return typeof code === "string" && /^[0-9A-Z]{5}$|^E[A-Z_]+$/.test(code) ? code : "unknown";
 }
@@ -101,15 +105,20 @@ export function quoteIdentifier(name: string): string {
   return `"${name}"`;
 }
 
+/** `@map`・`@@map`・`@@schema`（複数スキーマ）を使った schema.prisma を拒否する */
+export function assertSupportedSchema(schemaSource: string): void {
+  if (/@@?map\s*\(|@@schema\s*\(|\bschemas\s*=/.test(schemaSource)) {
+    throw new IntegrationDatabaseCheckError("SCHEMA_UNSUPPORTED", "@map, @@map and multi-schema settings are not supported.");
+  }
+}
+
 /**
  * schema.prisma のモデル名を、実テーブル名として返す。
  * `@@map`・`@map`・`@@schema`（複数スキーマ）は、テーブル名・スキーマの対応を正しく扱えないので拒否する。
  * 暗黙の多対多（`_AToB` テーブル）は列挙しないが、DB側に現れれば UNEXPECTED_RELATIONS で拒否される。
  */
 export function applicationTablesFromSchema(schemaSource: string): string[] {
-  if (/@@?map\s*\(|@@schema\s*\(|\bschemas\s*=/.test(schemaSource)) {
-    throw new IntegrationDatabaseCheckError("SCHEMA_UNSUPPORTED", "@map, @@map and multi-schema settings are not supported.");
-  }
+  assertSupportedSchema(schemaSource);
   const tables = [...schemaSource.matchAll(/^model\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm)].map((match) => match[1]);
   if (tables.length === 0) throw new IntegrationDatabaseCheckError("SCHEMA_UNSUPPORTED", "no models were found in schema.prisma.");
   return tables.sort();
@@ -130,7 +139,7 @@ export function listMigrationNames(migrationsDir: string): string[] {
     .sort();
 }
 
-async function select(client: IntegrationDbClient, step: string, sql: string): Promise<Record<string, unknown>[]> {
+export async function select(client: IntegrationDbClient, step: string, sql: string): Promise<Record<string, unknown>[]> {
   try {
     return (await client.query(sql)).rows;
   } catch (error) {
@@ -140,7 +149,8 @@ async function select(client: IntegrationDbClient, step: string, sql: string): P
 
 const sortedDifference = (a: Iterable<string>, b: ReadonlySet<string>) => [...a].filter((x) => !b.has(x)).sort();
 
-async function assertIdentity(client: IntegrationDbClient): Promise<{ serverPort: number | null }> {
+/** 接続後の本人確認。読み取り専用のトランザクションの中で、DB名・current_user・session_user・DBのコメントを照合する */
+export async function assertDatabaseIdentity(client: IntegrationDbClient): Promise<{ serverPort: number | null }> {
   const [readOnly] = await select(client, "read-only check", "SHOW transaction_read_only");
   if (readOnly?.transaction_read_only !== "on") {
     throw new IntegrationDatabaseCheckError("NOT_READ_ONLY", "the verification transaction is not read-only.");
@@ -203,21 +213,43 @@ async function assertRelations(client: IntegrationDbClient, expectedTables: read
   }
 }
 
-/** 想定した migration がすべて適用済みで、失敗・ロールバック・余分なものがないこと */
-async function assertMigrations(client: IntegrationDbClient, expectedMigrations: readonly string[]): Promise<void> {
-  const rows = await select(
+/** `_prisma_migrations` を読む（public のテーブルとして存在することを確かめた後にだけ呼ぶ） */
+export async function readMigrationHistory(client: IntegrationDbClient): Promise<Record<string, unknown>[]> {
+  return select(
     client,
     "migration listing",
     `SELECT migration_name AS name, finished_at IS NOT NULL AS finished, rolled_back_at IS NOT NULL AS "rolledBack"
        FROM ${quoteIdentifier(APP_SCHEMA)}.${quoteIdentifier(MIGRATIONS_TABLE)}`,
   );
+}
+
+export type MigrationHistoryComparison = {
+  /** 期待するのに、正常に完了した記録がないもの */
+  missing: string[];
+  /** 期待しないのに、正常に完了した記録があるもの */
+  extra: string[];
+  /** 失敗・未完了・ロールバックの記録の件数 */
+  notApplied: number;
+  /** 正常に完了した記録が重複しているか */
+  duplicated: boolean;
+  matches: boolean;
+};
+
+/** migration の履歴を、期待する名前の一覧と完全一致で比べる（件数だけの比較はしない） */
+export function compareMigrationHistory(rows: readonly Record<string, unknown>[], expectedMigrations: readonly string[]): MigrationHistoryComparison {
   const applied = rows.filter((row) => row.finished === true && row.rolledBack === false).map((row) => String(row.name));
   const notApplied = rows.length - applied.length;
-  const expected = new Set(expectedMigrations);
   const appliedSet = new Set(applied);
-  const missing = sortedDifference(expected, appliedSet);
-  const extra = sortedDifference(appliedSet, expected);
-  if (notApplied > 0 || missing.length > 0 || extra.length > 0 || applied.length !== appliedSet.size) {
+  const missing = sortedDifference(new Set(expectedMigrations), appliedSet);
+  const extra = sortedDifference(appliedSet, new Set(expectedMigrations));
+  const duplicated = applied.length !== appliedSet.size;
+  return { missing, extra, notApplied, duplicated, matches: notApplied === 0 && missing.length === 0 && extra.length === 0 && !duplicated };
+}
+
+/** 想定した migration がすべて適用済みで、失敗・ロールバック・余分なものがないこと */
+async function assertMigrations(client: IntegrationDbClient, expectedMigrations: readonly string[]): Promise<void> {
+  const { missing, extra, notApplied, matches } = compareMigrationHistory(await readMigrationHistory(client), expectedMigrations);
+  if (!matches) {
     throw new IntegrationDatabaseCheckError(
       "MIGRATIONS_MISMATCH",
       `migrations do not match (missing: ${missing.length}, extra: ${extra.length}, failed or rolled back: ${notApplied}).`,
@@ -225,20 +257,71 @@ async function assertMigrations(client: IntegrationDbClient, expectedMigrations:
   }
 }
 
-/** アプリケーションの全テーブルに1行もないこと（行数は数えず、存在だけを見る） */
-async function assertEmpty(client: IntegrationDbClient, expectedTables: readonly string[]): Promise<void> {
+/** public の指定したテーブルのうち、1行でもあるものを返す（行数は数えず、存在だけを見る） */
+export async function findNonEmptyTables(client: IntegrationDbClient, tables: readonly string[]): Promise<string[]> {
   const nonEmpty: string[] = [];
-  for (const table of expectedTables) {
+  for (const table of tables) {
     const sql = `SELECT EXISTS (SELECT 1 FROM ${quoteIdentifier(APP_SCHEMA)}.${quoteIdentifier(table)}) AS "hasRows"`;
     const [row] = await select(client, `empty check of ${table}`, sql);
     if (row?.hasRows !== false) nonEmpty.push(table);
   }
+  return nonEmpty;
+}
+
+/** アプリケーションの全テーブルに1行もないこと */
+async function assertEmpty(client: IntegrationDbClient, expectedTables: readonly string[]): Promise<void> {
+  const nonEmpty = await findNonEmptyTables(client, expectedTables);
   if (nonEmpty.length > 0) {
     throw new IntegrationDatabaseCheckError(
       "DATA_PRESENT",
       `tables are not empty: ${nonEmpty.join(", ")}. Recreate the test database (npm run testdb:reset) instead of deleting rows.`,
     );
   }
+}
+
+/**
+ * 検証済みの接続URLで1回だけ接続し、`BEGIN READ ONLY` の中で check を実行する。
+ * 成功・失敗にかかわらず、トランザクションを ROLLBACK で終えて接続を閉じる。失敗が重なったら、最初の失敗を投げる。
+ * 接続に失敗しても、別の接続先は試さない。
+ */
+export async function runReadOnlyCheck<T>(
+  connect: (databaseUrl: string) => Promise<IntegrationDbClient>,
+  databaseUrl: string,
+  check: (client: IntegrationDbClient) => Promise<T>,
+): Promise<T> {
+  let client: IntegrationDbClient;
+  try {
+    client = await connect(databaseUrl);
+  } catch (error) {
+    throw new IntegrationDatabaseCheckError("CONNECT_FAILED", `could not connect to the test database (${safeErrorCode(error)}).`);
+  }
+
+  let failure: unknown;
+  let result: T | undefined;
+  let began = false;
+  try {
+    await select(client, "BEGIN READ ONLY", "BEGIN READ ONLY");
+    began = true;
+    result = await check(client);
+  } catch (error) {
+    failure = error;
+  }
+
+  if (began) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (error) {
+      failure ??= new IntegrationDatabaseCheckError("QUERY_FAILED", `ROLLBACK failed (${safeErrorCode(error)}).`);
+    }
+  }
+  try {
+    await client.end();
+  } catch (error) {
+    failure ??= new IntegrationDatabaseCheckError("CLOSE_FAILED", `the connection could not be closed (${safeErrorCode(error)}).`);
+  }
+
+  if (failure !== undefined) throw failure;
+  return result as T;
 }
 
 /**
@@ -262,43 +345,12 @@ export async function verifyIntegrationDatabase(input: IntegrationDatabaseCheckI
   const target = assertIntegrationProcessEnv(env, developmentEnv);
   const databaseUrl = env.DATABASE_URL as string;
 
-  // 4：接続は1回だけ。失敗しても別の接続先は試さない
-  let client: IntegrationDbClient;
-  try {
-    client = await connect(databaseUrl);
-  } catch (error) {
-    throw new IntegrationDatabaseCheckError("CONNECT_FAILED", `could not connect to the test database (${safeErrorCode(error)}).`);
-  }
-
-  let failure: unknown;
-  let result: VerifiedIntegrationDatabase | undefined;
-  let began = false;
-  try {
-    await select(client, "BEGIN READ ONLY", "BEGIN READ ONLY");
-    began = true;
-    const { serverPort } = await assertIdentity(client); // 5
+  // 4：接続は1回だけ。失敗しても別の接続先は試さない。5〜7の後、成功・失敗にかかわらず接続を閉じる
+  return runReadOnlyCheck(connect, databaseUrl, async (client) => {
+    const { serverPort } = await assertDatabaseIdentity(client); // 5
     await assertRelations(client, expectedTables); // 6
     await assertMigrations(client, input.expectedMigrations); // 6
     await assertEmpty(client, expectedTables); // 7
-    result = { database: target.database, user: target.user, serverPort, tables: expectedTables, migrations: input.expectedMigrations.length };
-  } catch (error) {
-    failure = error;
-  }
-
-  // 成功・失敗にかかわらず、トランザクションを終えて接続を閉じる。最初の失敗を優先して投げる
-  if (began) {
-    try {
-      await client.query("ROLLBACK");
-    } catch (error) {
-      failure ??= new IntegrationDatabaseCheckError("QUERY_FAILED", `ROLLBACK failed (${safeErrorCode(error)}).`);
-    }
-  }
-  try {
-    await client.end();
-  } catch (error) {
-    failure ??= new IntegrationDatabaseCheckError("CLOSE_FAILED", `the connection could not be closed (${safeErrorCode(error)}).`);
-  }
-
-  if (failure !== undefined) throw failure;
-  return result as VerifiedIntegrationDatabase;
+    return { database: target.database, user: target.user, serverPort, tables: expectedTables, migrations: input.expectedMigrations.length };
+  });
 }
