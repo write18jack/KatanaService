@@ -1,7 +1,7 @@
 # 計画：専用テストDBの構築とVitest統合テストの分離
 
 作成日: 2026-10-26
-更新日: 2026-11-04（Step 3-8Bのcommit `d56c8e4`、R12のDockerの読み取り調査、Step 3-9・3-9B（テストDBの構成ファイルとDockerのラッパー。`docker compose config` による照合まで）の実施結果と、そのcommit `61f8105`、Step 3-9C（R14のパスワード検証の共通化）の実施結果とcommit `4553f2f`、Step 3-9D（ラッパーの `up`・`down` の実装と、障害時の down のレビュー。実際の起動・停止は未実施）の実施結果とcommit `5fcc259`、Step 3-10の実施前レビュー、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）の結果とcommit `8471705`、Step 3-10B（migration の前後のDBの状態の判定の実装。単体テストのみ）の結果とcommit `daf5c8b`、Step 3-10C（`testdb-migrate` への状態の判定の組み込み。単体テストのみ。強制停止は維持）の結果を反映）
+更新日: 2026-11-04（Step 3-8Bのcommit `d56c8e4`、R12のDockerの読み取り調査、Step 3-9・3-9B（テストDBの構成ファイルとDockerのラッパー。`docker compose config` による照合まで）の実施結果と、そのcommit `61f8105`、Step 3-9C（R14のパスワード検証の共通化）の実施結果とcommit `4553f2f`、Step 3-9D（ラッパーの `up`・`down` の実装と、障害時の down のレビュー。実際の起動・停止は未実施）の実施結果とcommit `5fcc259`、Step 3-10の実施前レビュー、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）の結果とcommit `8471705`、Step 3-10B（migration の前後のDBの状態の判定の実装。単体テストのみ）の結果とcommit `daf5c8b`、Step 3-10C（`testdb-migrate` への状態の判定の組み込み。単体テストのみ。強制停止は維持）の結果とcommit `92ba359`、Step 3-11の実施前レビュー（初回の Docker 起動の前の安全性レビュー。Docker は読み取りだけで、デーモンは停止中）の結果、Step 3-11A（Docker Desktop の起動後の読み取り専用の確認と、初期化スクリプトのパスワード漏洩の対策）の結果を反映）
 作業ブランチ: `chore/test-db-isolation`（`fix-dashboard` の `6168889` から作成）
 
 ## 状態
@@ -10,7 +10,7 @@
 |---|---|
 | Phase 1：読み取り専用の調査 | **実施済み**（結果は本ファイルの1章） |
 | Phase 2：安全設計 | **設計レビュー完了**（確定設計は本ファイルの2章） |
-| Phase 3：実装 | **実施中**（Step 3-0〜3-8B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712`、Step 3-8A（接続後の本人確認と空DB検査）は `4b788e7` でcommit。Step 3-8B（当初の3-8：`prisma.config.ts` のガードとmigration用スクリプト）は `d56c8e4` でcommit。Step 3-9（テストDBの構成ファイル）とStep 3-9B（Dockerのラッパー `scripts/testdb.mts` の `--check`・`--status`と、`docker compose config` による照合。架空の一時的な `.env.test` で、全項目が一致）は実施済みで、`61f8105` でcommit。Step 3-9C（R14のパスワード検証を共通の関数にまとめ、4つの経路に適用）は実施済みで、`4553f2f` でcommit。Step 3-9D（ラッパーの `--up`・`--down`。`--apply` があるときだけ変更操作を行う）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit。Step 3-10の実施前レビュー（Dockerの読み取り専用の調査を含む）と、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）を実施し、`8471705` でcommit。Step 3-10B（DBの状態 A・B・C の読み取り専用の判定と、`pg` の許可リストの追加。単体テストのみ）を実装し、`daf5c8b` でcommit。Step 3-10C（`testdb-migrate` への組み込み。実DBへの接続の許可は固定で無効のまま）を実装し、最終の安全性レビューの後に `test: integrate guarded migration state checks` でcommit。`reset` は未実装。**コンテナの起動・停止とDBへの接続は、一度も行っていない。** 結果は3章の「3-A. 実施結果」） |
+| Phase 3：実装 | **実施中**（Step 3-0〜3-8B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712`、Step 3-8A（接続後の本人確認と空DB検査）は `4b788e7` でcommit。Step 3-8B（当初の3-8：`prisma.config.ts` のガードとmigration用スクリプト）は `d56c8e4` でcommit。Step 3-9（テストDBの構成ファイル）とStep 3-9B（Dockerのラッパー `scripts/testdb.mts` の `--check`・`--status`と、`docker compose config` による照合。架空の一時的な `.env.test` で、全項目が一致）は実施済みで、`61f8105` でcommit。Step 3-9C（R14のパスワード検証を共通の関数にまとめ、4つの経路に適用）は実施済みで、`4553f2f` でcommit。Step 3-9D（ラッパーの `--up`・`--down`。`--apply` があるときだけ変更操作を行う）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit。Step 3-10の実施前レビュー（Dockerの読み取り専用の調査を含む）と、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）を実施し、`8471705` でcommit。Step 3-10B（DBの状態 A・B・C の読み取り専用の判定と、`pg` の許可リストの追加。単体テストのみ）を実装し、`daf5c8b` でcommit。Step 3-10C（`testdb-migrate` への組み込み。実DBへの接続の許可は固定で無効のまま）を実装し、最終の安全性レビューの後に `92ba359` でcommit。Step 3-11の実施前レビュー（コードの変更なし。起動前の条件・R7 の検証手順・起動失敗時の対処・読み取り専用のDB検証の計画・TOCTOU の方針を記録）を実施。Step 3-11A（Docker Desktop の起動後の読み取り専用の確認と、`01-app-role.sh` のログ漏洩の対策・静的テスト）を実施し、`test: protect test database initialization secrets` でcommit。`reset` は未実装。**コンテナの起動・停止とDBへの接続は、一度も行っていない。** 結果は3章の「3-A. 実施結果」） |
 | Phase 4：検証 | **未着手** |
 
 F-01の判定は **CONDITIONAL PASS のまま**。実DB・Cookie・HTTPでの検証は、Phase 4のE2Eで行う。
@@ -363,7 +363,9 @@ npm run test:integration ─► 専用runner
 | 3-9D | Dockerのラッパーの `--up`・`--down`（`--apply` があるときだけ変更操作）。操作前・操作後の確認、障害時（starting・unhealthy・exited・up の失敗後）の down のレビューと、Compose のラベルの照合の追加。単体テスト、静的検証。**実際の `up`・`down` は実行していない**。R7 は未検証。`reset` は未実装 | `5fcc259`（`test: add guarded test database up and down commands`） |
 | 3-10A | tmpfs の判定の修正（`Mounts`・`HostConfig.Mounts`・`HostConfig.Tmpfs` のどの表し方でも、データ領域の tmpfs と初期化用の bind だけを許可する）。up の後と down の前の両方に適用。migration の前と後の検査の分け方を記録。**実際の `up`・`down`・DBへの接続は行っていない** | `8471705`（`test: validate test database tmpfs mounts safely`。Step 3-10の実施前レビューの記録も含む） |
 | 3-10B | migration の前後のDBの状態（A：完全に空、B：途中まで適用・不整合、C：全件適用済み）の読み取り専用の判定（`lib/testing/testDbState.ts`）と、`pg` を読み込む1ファイル（`lib/testing/testDbConnection.ts`）の追加。DB非接続の単体テスト。**`testdb-migrate`・globalSetup への組み込みと、実DBへの接続は行っていない**（どちらも強制停止のまま）。commit の前のカタログ検査のレビューで、`pg_am`・`pg_transform` の検査漏れを直した | `daf5c8b`（`test: classify test database migration states safely`） |
-| 3-10C | `testdb-migrate` への状態の判定の組み込み（A なら `migrate deploy` の後に別の接続で C を再確認、B は停止、C は Prisma CLI を起動せずに成功）、親のプロセスの `PG*`・`DOTENV_*` の拒否、状態の判定の search_path の固定。DB非接続の単体テスト。**スクリプトの実DBへの接続の許可は固定で無効**（`TESTDB_MIGRATION_LIVE_DISABLED`）。globalSetup は未変更。commit の前の最終の安全性レビューで、問題は見つからなかった | `test: integrate guarded migration state checks`（親は `daf5c8b`。hashは次のセッションで記録する） |
+| 3-10C | `testdb-migrate` への状態の判定の組み込み（A なら `migrate deploy` の後に別の接続で C を再確認、B は停止、C は Prisma CLI を起動せずに成功）、親のプロセスの `PG*`・`DOTENV_*` の拒否、状態の判定の search_path の固定。DB非接続の単体テスト。**スクリプトの実DBへの接続の許可は固定で無効**（`TESTDB_MIGRATION_LIVE_DISABLED`）。globalSetup は未変更。commit の前の最終の安全性レビューで、問題は見つからなかった | `92ba359`（`test: integrate guarded migration state checks`。親は `daf5c8b`。通常テスト1065件成功、静的検査152件・違反0件） |
+| 3-11 実施前レビュー | 初回の Docker 起動の前の安全性レビュー（コードは変更なし。Docker は読み取りだけ。**Docker のデーモンが停止中で、デーモンが必要な確認はできなかった**）。起動前の条件、R7 の検証手順、起動失敗時の対処、読み取り専用のDB検証の計画、TOCTOU の方針を記録 | なし（PLANの更新だけ。未commit） |
+| 3-11A | Docker Desktop の起動後の読み取り専用の確認（記録とすべて一致。テスト用のコンテナ・ボリュームなし、5434番は空き）と、初期化スクリプトのパスワード漏洩の対策（`01-app-role.sh` の最小限の修正と、静的テスト `scripts/testdb-init.test.ts` の追加。通常テスト1076件成功）。実際の初期化・R7・DB接続は未実施 | `test: protect test database initialization secrets`（通常テスト32ファイル・1076件成功、静的検査152件・違反0件。hash は commit の後に記入） |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -1534,7 +1536,214 @@ npm run test:integration ─► 専用runner
     - 実際の Docker の `up`・`down`。
     - R7。
     - `reset`（未実装）。
-  - commit は `test: integrate guarded migration state checks`（親は `daf5c8b`。hash は次のセッションで記録する）。
+  - commit は `92ba359`（`test: integrate guarded migration state checks`。親は `daf5c8b`）。通常テスト1065件成功、静的検査152件・違反0件。hash は、Step 3-11の実施前レビューのセッションで記録した。
+
+**Step 3-11の実施前レビュー（初回の Docker 起動の前の安全性レビュー。ユーザーの指示による。2026-11-05）**
+
+- 前提：ブランチ `chore/test-db-isolation`、HEAD `92ba359`。変更済みのファイルなし。未追跡は pptx と `test-data/` だけ。`.env.test` はない。
+- **このレビューでは、コードを変更していない。** Docker の変更操作（up・down・run・exec・start・stop・restart、ボリュームの変更）、DBへの接続、migration、seed、統合テスト、build、`.env.test` の作成は行っていない。`testdb-migrate` の実行ゲートと globalSetup の強制停止は、そのまま。
+- 読んだファイル：`docker-compose.test.yml`、`docker/test-db/init/01-app-role.sh`・`02-marker.sql`、`scripts/testdb.mts`、`scripts/testdb.test.ts`（範囲は既存の記録で確認）、`lib/testing/testDbConnection.ts`、`lib/testing/testDbState.ts`、`lib/testing/testDbMigrate.ts`、`scripts/testdb-migrate.mts`、`lib/testing/integrationDatabaseCheck.ts`（本人確認の部分）、`.env.test.example`、本ファイル。
+
+- **A. 実行した読み取りの確認と結果（2026-11-05）:**
+  - シェルの環境：`DOCKER_HOST`・`DOCKER_CONTEXT`・`NODE_OPTIONS` は未設定。`PG*`・`DOTENV_*`・`COMPOSE_*` の変数もない。
+  - `docker context show`：`desktop-linux`（期待どおり）。クライアント 29.4.1、`docker compose version`：5.1.3。
+  - **Docker のデーモンは停止中だった**（`Cannot connect to the Docker daemon at unix:///Users/…/.docker/run/docker.sock`）。そのため、次は**今回は確認できていない**：`postgres:15` の有無、開発用ボリュームの有無・記録、`katana-test-db`・`katana-db` の有無、テスト用ボリュームの有無、5434番を公開するコンテナ、`docker compose ls`、ネットワーク。Docker Desktop の起動は、このレビューでは行っていない。
+  - `lsof -nP -iTCP:5434 -sTCP:LISTEN`：待ち受けなし。
+  - `npm run testdb:status`・`npm run testdb:up`（`--apply` なし）：どちらも `TEST_ENV_MISSING` で終了コード1。Docker を呼ぶ前に止まった。
+  - `git check-ignore -v --no-index .env.test`：`.gitignore:36:.env*` で除外される。
+  - `bash -n docker/test-db/init/01-app-role.sh`：成功。Git でのモードは `01-app-role.sh` が `100755`、`02-marker.sql` が `100644`。
+
+- **B. 初期化スクリプトの確認（静的。実際の実行は未検証）:**
+  - 実行の順序：公式イメージの entrypoint は、データディレクトリが空のとき、initdb → 一時的なサーバー（`listen_addresses=''`。UNIX ソケットだけ）を起動 → `POSTGRES_DB`（`katana_test`）を作成 → `/docker-entrypoint-initdb.d/*` を名前順に処理（`01-app-role.sh` → `02-marker.sql`）→ 一時的なサーバーを停止 → 本来のサーバーを起動（TCP で待ち受け）。
+    - `01-app-role.sh` は実行権限があるので、source ではなく別のプロセスとして実行される（shebang は `/usr/bin/env bash`。Debian 系の `postgres:15` には bash がある）。bind マウントで実行権限が保たれることは未検証。保たれずに source された場合も、`exit 1` で entrypoint ごと止まる（安全側）。
+    - `02-marker.sql` は、entrypoint が `psql -v ON_ERROR_STOP=1 --dbname katana_test`（管理用のスーパーユーザー）で実行する。
+  - 確認した事項:
+    | 観点 | 結果 |
+    |---|---|
+    | 対象が `katana_test` だけ | 満たす。`01` は `POSTGRES_DB` を確かめ、`--dbname katana_test` で接続し、`DO` ブロックで `current_database()` も確かめる。`02` も `DO` ブロックで確かめる。`REVOKE ALL ON DATABASE postgres FROM PUBLIC` だけはクラスタ共通の権限の変更（`postgres` DB の中身には触れない） |
+    | アプリ用のロール | `katana_test_user`（`LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`）。スーパーユーザーではない。`katana_test` の所有者になる |
+    | DBの識別コメント | `COMMENT ON DATABASE katana_test IS 'katana-test-db'`。`TEST_DATABASE_MARKER` と同じ値 |
+    | PostgreSQL 15 の構文 | `CREATE ROLE … PASSWORD :'app_password'`（psql の変数を文字列として展開。パスワードは `[A-Za-z0-9_-]` だけなので引用の問題はない）、`ALTER DATABASE … OWNER TO`、`REVOKE ALL ON DATABASE`、`COMMENT ON DATABASE`、`DO $$ … $$` は、どれも PostgreSQL 15 で有効。実行による確認はしていない |
+    | 秘密情報を表示しない | スクリプトは `echo` でパスワードを表示しない。`set -x` もない。ただし下の「残る懸念」の2つがある |
+    | 途中の失敗で止まる | `set -Eeuo pipefail` と `psql -v ON_ERROR_STOP=1`。entrypoint も `set -Eeo pipefail` で、初期化スクリプトの失敗で終了する。`restart: "no"` なので、コンテナは exited のまま残る |
+  - **途中で失敗したときに、不完全なDBが残る可能性:**
+    - `01` が失敗：ロールがない、または所有者の変更の前で止まる。`02` が失敗：ロールはあるが、識別コメントがない。どちらも entrypoint が止まり、本来のサーバー（TCP）は起動しない。healthcheck（TCP の `pg_isready`）は healthy にならない。
+    - データは tmpfs にあるので、コンテナが止まると消える（Docker の仕様。実際の動作は未検証）。そのため、不完全なDBがコンテナの外やボリュームに残ることはない見込み。ただし、R7 で無名のボリュームが作られていた場合は、データディレクトリがボリュームに残り、次に同じコンテナを `docker start` すると初期化が実行されずに不完全なDBで起動し得る。ラッパーは既存のコンテナを起動し直さない（`TEST_CONTAINER_EXISTS`）ので、ラッパーの経路では起きない。
+    - 識別コメントは初期化の最後の手順なので、コメントがあれば初期化は最後まで進んだと判断できる。接続後の本人確認は、コメントがなければ `MARKER_MISMATCH` で止まる。
+  - **残る懸念（このレビューの時点。1・2は Step 3-11A で対策した。下の「Step 3-11A」の記録が正）:**
+    1. 初期化の SQL が失敗すると、PostgreSQL は既定（`log_min_error_statement = error`）で、失敗した文をサーバーのログに書く。`CREATE ROLE … PASSWORD '…'` が失敗した場合、**`docker logs katana-test-db` にアプリ用のパスワードが出る**。障害の調査で `docker logs` を読むときは、出力をそのまま表示・記録しない（下の D）。
+    2. `psql --set=app_password=…` の値は、初期化の間だけ、コンテナの中のプロセスの引数として見える（`docker top` など）。ローカル専用のテストDBなので許容する。
+    3. 管理用のパスワードは、3-9の記録のとおり、コンテナの環境変数（`docker inspect` の `Config.Env`）に残る。調査では `Config.Env` を読まない。
+
+- **C. 初回起動の前提条件と確かめ方（すべて読み取り。1つでも満たさなければ up しない）:**
+  | # | 条件 | 確かめ方 | 今回の結果 |
+  |---|---|---|---|
+  | 1 | `DOCKER_HOST`・`DOCKER_CONTEXT`・`NODE_OPTIONS`・`PG*`・`DOTENV_*`・`COMPOSE_*` がない | `env` | 満たす |
+  | 2 | コンテキストが `desktop-linux` | `docker context show`（ラッパーも確かめる） | 満たす |
+  | 3 | Docker のデーモンが動いている | `docker version --format '{{.Server.Version}}'` | **満たさない（停止中）**。ユーザーが Docker Desktop を起動する |
+  | 4 | `postgres:15` がローカルにある | `docker image inspect postgres:15 --format '{{.Id}} {{json .Config.Volumes}}'`（ラッパーは `IMAGE_MISSING` で止まる。取得はしない） | 未確認（デーモン停止）。3-10の前のレビューでは ID `29342cb52157` |
+  | 5 | 開発用ボリュームがあり、記録が変わっていない | `docker volume inspect katana-web_postgres_data --format '{{.Name}}\t{{.CreatedAt}}\t{{index .Labels "com.docker.compose.project"}}\t{{index .Labels "com.docker.compose.volume"}}'` を、3-9・3-10の記録（2026-07-18T05:42:41Z、`katana-web`・`postgres_data`）と比べる。`docker ps -a --filter volume=katana-web_postgres_data` が空 | 未確認 |
+  | 6 | `katana-db` の有無が記録と同じ（今は存在しない） | `docker ps -a --filter name=^katana-db$` | 未確認 |
+  | 7 | `katana-test-db`・`katana-test` のコンテナ・ボリューム・Compose のプロジェクト・ネットワーク `katana-test_default` がない | `docker ps -a --filter name=^katana-test-db$`、`--filter label=com.docker.compose.project=katana-test`、`docker volume ls --filter label=com.docker.compose.project=katana-test`、`docker compose ls -a`、`docker network ls` | 未確認 |
+  | 8 | 5434番が使われていない | `docker ps -a --filter publish=5434` と `lsof -nP -iTCP:5434 -sTCP:LISTEN` の両方（ラッパーは前者だけ） | `lsof` は待ち受けなし。Docker 側は未確認 |
+  | 9 | すべてのボリュームの一覧を記録する（R7 の比較の基準） | `docker volume ls --format '{{.Name}}'` | 未確認。3-10の前のレビューでは、無名の2つ（`0df3f60a…`・`b655b6e4…`）と `katana-web_postgres_data` |
+  | 10 | `.env.test` が正しく作られている（下の I） | 3つの確認モード | 未作成 |
+  | 11 | Compose 設定の照合 | `npm run testdb:check`（本物の `.env.test` で） | 未実施（`.env.test` がない） |
+  | 12 | `testdb:status` が想定どおり | テスト用のコンテナ・ボリュームがない、5434番の公開がない、開発用の記録が9・5・6と同じ | 未実施（`TEST_ENV_MISSING` で止まることだけ確認） |
+  | 13 | `--apply` なしではコンテナを作らない | `npm run testdb:up`（予定のコマンドの表示だけ）。`mutate` は `apply` がなければ `MUTATION_NOT_ALLOWED`（単体テストで確認済み） | 単体テストでは確認済み。実際の dry run は未実施 |
+  - Docker Desktop を起動すると、再起動ポリシーのあるコンテナが自動で起動し得る。3-10の前の記録では、コンテナは `sample-db`（再起動ポリシー `no`）だけなので、影響はない見込み。起動の後に `docker ps -a` で確かめる。
+
+- **D. R7 とマウントの検査（初回の up の後）:**
+  - ラッパーの起動後の確認（自動。どれか1つでも違えば `POST_CHECK_FAILED`。何も削除しない）：すべてのボリュームの一覧が起動前と同じ、プロジェクトのボリュームがない、`mountMismatches()`（初期化用の読み取り専用の bind 1つと、データ領域の tmpfs だけ）、ポートが `5432/tcp → 127.0.0.1:5434` だけ、Compose のラベル4つ、running・healthy、開発用の記録が同じ。
+  - あわせて、手作業で読み取って記録する（`Config.Env` は読まない）:
+    1. `docker inspect katana-test-db --format '{{json .Mounts}}'`：`Type: bind`、`Source` が `katana-web/docker/test-db/init` の絶対パス、`Destination` が `/docker-entrypoint-initdb.d`、`RW: false` の1件だけ。`Type: volume` があれば R7 は不合格。
+    2. `--format '{{json .HostConfig.Tmpfs}}'`：`/var/lib/postgresql/data` がある（Compose の `tmpfs:` は、この形になる見込み。3-10A の A）。
+    3. `--format '{{json .HostConfig.Mounts}}'`：初期化用の bind（`ReadOnly: true`）だけ。volume 型がない。
+    4. `--format '{{json .Config.Volumes}}'`：イメージの `VOLUME` 宣言（`/var/lib/postgresql/data`）が出る見込み。宣言であって実際のマウントではないので、これだけでは不合格にしない。
+    5. `--format '{{json .Config.Labels}}'`：`com.docker.compose.project=katana-test`、`service=test-db`、`project.config_files` が `katana-web/docker-compose.test.yml` の絶対パス1つ、`project.working_dir` が `katana-web` の絶対パス。Compose のラベルにパスワードは入らない見込み（入っていれば記録しない）。
+    6. `--format '{{json .HostConfig.PortBindings}}'`：`{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"5434"}]}` だけ。`docker ps --filter publish=5434` に出るのは `katana-test-db` だけ。
+    7. `docker volume ls --format '{{.Name}}'` を、起動前（C の9）と比べる。**1つでも増えていれば R7 は不合格**（無名のボリュームの名前を記録し、削除しない）。
+    8. 開発用ボリュームの記録（C の5）と `katana-db` の有無（C の6）が、起動前と同じ。
+    9. `docker network ls`：`katana-test_default` が増えるのは想定どおり（ラッパーは確認していない）。それ以外が増えていない。
+  - 判定：1〜8のすべてが期待どおりのときだけ、R7 を「合格」と記録する。予期しないマウント・ラベル・ポートが1つでもあれば、安全とは判断しない。
+  - **重要な注意（up の前に合意しておくこと）:** Docker Desktop の `inspect` で、bind の `Source` が `/host_mnt/Users/…` のような別の表記になる、または Compose のラベルのパスが期待と違う場合、正常なコンテナでも次の2か所で止まる。
+    - up の後の確認（`POST_CHECK_FAILED`）
+    - down の前の確認（`CONTAINER_INSPECT_MISMATCH`）。**この場合、ラッパーでは片付けられない。**
+    - R7 が不合格（`Type: volume` がある）の場合も同じで、down の前の確認が止まる。
+    - そのときは、`docker rm` などを手作業で実行しない。読み取りの結果を報告して止まり、(a) 照合の条件を実際の表記に合わせて直すか（レビューと単体テストを経た、別のコード変更）、(b) 操作ごとに個別の承認を得て手作業で片付けるかを、ユーザーが決める。条件を緩めて先に進めることはしない。
+    - コンテナが残っても、`127.0.0.1:5434` で待ち受けるだけで、migration・統合テストは実行ゲートで止まっているので、急いで片付ける必要はない。
+
+- **E. 起動に失敗したときの対処（自動の削除・作り直しはしない）:**
+  - どのケースでも、最初に次を読み取りで確かめる：ラッパーのエラーコードと不一致の項目名、`npm run testdb:status`、開発用ボリュームの記録と `katana-db` の有無（起動前と同じか）、`docker volume ls`（起動前と比べる）。
+  - down は、`npm run testdb:down`（`--apply` なし）の確認に通った場合だけ、**別に承認を得て** `npm run testdb:down -- --apply` を実行する。確認に通らない場合は、手作業の削除を自動で行わず、調査の結果を報告して止まる。
+  | ケース | 想定される状態 | 読み取りの調査 | 片付け |
+  |---|---|---|---|
+  | A. Compose が起動の前に失敗（変数展開・ポートの割り当て・イメージなど） | `DOCKER_COMMAND_FAILED`。コンテナがない、または created のまま（ポートの割り当ての失敗など）。ネットワーク `katana-test_default` だけが残ることがある | `testdb:status`、`docker ps -a --filter name=^katana-test-db$ --format '{{.ID}}\t{{.State}}\t{{.Label "com.docker.compose.project"}}'`、`docker network ls`、`lsof -nP -iTCP:5434 -sTCP:LISTEN`（Docker 以外のプロセスが5434番を使っていないか） | コンテナがあれば、down の確認に通る場合だけ承認を得て down。コンテナがなくネットワークだけが残った場合、ラッパーの down は「何もしない」で終わる（ネットワークは残る。害は小さいので、削除するかは別に決める） |
+  | B. コンテナの作成後に初期化が失敗 | `--wait` が失敗し、コンテナは exited（`restart: "no"`）。tmpfs のデータは消えている見込み | `testdb:status`、`docker inspect katana-test-db --format '{{.State.Status}} {{.State.ExitCode}} {{json .State.Error}}'`。ログを読む場合は、**別に承認を得て**、`docker logs katana-test-db 2>&1 \| grep -E 'initdb\.d\|ERROR\|FATAL' \| grep -v -E 'STATEMENT\|PASSWORD'` のように、失敗した文（パスワードを含み得る）を除いて読む。生のログは表示・記録しない | down の確認に通る場合だけ承認を得て down（exited でも down できる。3-9D・3-10A）。原因を直してから、改めて up の承認を得る |
+  | C. PostgreSQL が unhealthy | `--wait` が失敗し、コンテナは running・unhealthy | `testdb:status`、`docker inspect katana-test-db --format '{{json .State.Health}}'`（`pg_isready` の出力だけで、秘密情報はない）。必要なら B と同じ方法でログを読む | 同上 |
+  | D. ラベル・マウントの検査の不一致 | `POST_CHECK_FAILED`。コンテナは running・healthy のまま | D の1〜9を読み取り、どの項目がどう違うかを記録する（パスワード以外） | down の確認に通る場合だけ承認を得て down。通らない場合（上の「重要な注意」）は、報告して止まる |
+  | E. up のタイムアウト（120秒） | `DOCKER_COMMAND_FAILED`。コンテナは starting・unhealthy・healthy のどれか（後から healthy になることがある） | `testdb:status`、`docker inspect … '{{json .State.Health}}'` | ラッパーの起動後の確認が実行されていないので、後から healthy になっても**成功とは扱わない**。down の確認に通る場合だけ承認を得て down し、原因を確かめてから up をやり直す |
+  - どのケースでも、`--volumes`・`-v`・`--remove-orphans`・`docker volume rm`・`prune`・`docker rm -f` は使わない。開発用ボリュームと `katana-db` には、読み取り以外の操作をしない。
+
+- **F. 実DBの読み取り専用の検証（初回の起動の後。今回は接続していない）:**
+  - 確かめること（3-10B・3-10C の「初回の実DB接続のときに確かめること」を含む）:
+    1. 接続先が `127.0.0.1:5434`（URL のガード。DB の中からは公開ポートを確かめられない。`inet_server_port()` は5432になる見込みで、情報として記録するだけ）
+    2. `current_database() = katana_test`、`current_user`・`session_user` = `katana_test_user`、DBのコメント = `katana-test-db`
+    3. 読み取り専用のトランザクションの中で、`pg_catalog.set_config('search_path', 'pg_catalog', true)` が成功して `pg_catalog` を返す
+    4. 6つのカタログの SQL が、`katana_test_user` の権限でエラーなく動く（`pg_default_acl`・`pg_largeobject_metadata`・`pg_publication`・`pg_statistic_ext`・`pg_am`・`pg_transform` を含む23のカタログ）
+    5. 初期化の直後のDBが **A** と判定される（OID 16384 以上のその他のオブジェクトが0件であることを含む）
+  - 使う処理：既存の `classifyTestDatabase()`（`createTestDatabaseClassifier({ root, connect: connectTestDatabase })`）。SQL は `BEGIN READ ONLY`・`set_config`（トランザクションの中だけ）・`SHOW`・SELECT・ROLLBACK だけで、DBを変更しない。
+  - **今の実装の問題：読み取りだけの検証を実行する経路がない。**
+    - `testdb-migrate` の実行ゲートを有効にすると、状態が A のときに、その場で `prisma migrate deploy` まで進む。読み取りだけで止める方法がない。
+    - 確認モード（`--check`）は、DBに接続しない。
+    - globalSetup は強制停止のままで、migration の後の状態（C）を前提にしている。
+    - そのため、`testdb-migrate` の実行ゲートを外して検証することはしない（今回の指示どおり）。
+  - **必要なコード変更（提案。着手には指示と承認が必要）:**
+    - 読み取り専用の検証のモードを、migration の実行ゲートとは**別の**ゲートで追加する。案は次の2つ。
+      - 案1（推奨）：`runTestDbMigrate()` に `--verify` モードを追加する。手順1〜8（引数・Node の起動オプション・`.env.test`・接続先・パスワード・親の `PG*`・`DOTENV_*`・子プロセスの環境変数の検証）をそのまま共有し、判定を1回だけ行って、状態（A・B・C）と本人確認の結果を表示して終わる。**どの状態でも Prisma CLI を起動しない**（`spawn` を呼ばないことを単体テストで確かめる）。
+      - 案2：別のスクリプト（`scripts/testdb-verify.mts`）にする。手順1〜8の重複を避けるため、案1より変更が大きい。
+    - ゲートの分け方：`--verify` には、読み取り専用の判定だけを渡す新しい許可（例：`readOnlyDatabase`）を使う。migration 用の `liveDatabase` は `LIVE_DATABASE_DISABLED` のまま固定する。通常実行モード（引数なし）は、今までどおり `TESTDB_MIGRATION_LIVE_DISABLED` で止まる。
+    - 影響する既存のテスト：「スクリプトが接続の部品（`testDbConnection.ts`・`createTestDatabaseClassifier`）を読み込まない」ことを確かめる単体テスト（3-10C）。`--verify` のために読み込むなら、このテストを「`liveDatabase` には凍結した無効の定数だけを渡す」「接続の部品は `--verify` の経路でだけ使う」に変える必要がある。`pg` の許可リスト（`testDbConnection.ts` の1ファイル）は変えない。
+    - 表示：本人確認の4項目が一致したこと、search_path を固定できたこと、状態（A・B・C）と B の理由、`inet_server_port()` の値。接続URL・パスワードは表示しない。
+  - 実行の経路（コード変更の後）：`env` から `PG*`・`DOTENV_*`・`NODE_OPTIONS` を外した状態で `npm run testdb:migrate -- --verify`（または専用の npm スクリプト）。1回だけ接続し、成功・失敗にかかわらず ROLLBACK と `end()` をする。失敗したら、コードだけを記録して止まる（SQL の権限の問題なら、判定の SQL を直す前に報告する）。
+
+- **G. TOCTOU の検討結果（設計の方針。実装は migration の実行を有効にする工程で行う）:**
+  - 前提：migration の前の判定・Prisma CLI・migration の後の判定は、別々の接続（後ろの2つは別のプロセス）。間で `127.0.0.1:5434` の応答先が入れ替わる可能性は、なくせない。**migration の後の確認だけで、誤った接続を防げるとは扱わない**（後の確認は「検出」で、防止ではない）。
+  - 防止の側（誤った接続先に migration が届かないようにする）:
+    - 接続URLは `127.0.0.1:5434`・`katana_test`・`katana_test_user` に固定されている。開発用DB（5433・`katana`・別の認証情報）にこのURLで届くには、5434番を5433番に中継し、さらに開発用DBに `katana_test_user` と `katana_test` がある必要がある。現実的には起きない。
+    - migration の直前に、5434番の待ち受けが Docker（`katana-test-db`）だけであることを確かめる：`docker ps --filter publish=5434` が `katana-test-db` だけ、`lsof -nP -iTCP:5434 -sTCP:LISTEN` の待ち受けが Docker Desktop のプロセスだけ。
+  - 検出の側（コンテナの識別情報とDBの本人確認の組み合わせ）:
+    1. Docker 側の識別情報 D1（読み取り）：`katana-test-db` のコンテナID、`State.StartedAt`、`katana-test_default` での IP アドレス、ポートの割り当て、Compose のラベル。ラッパーの検査（`containerInspectMismatches`）にも通ること。
+    2. migration の前の判定の中（本人確認と同じ読み取り専用のトランザクション）で、DB側の識別情報 F1 を読む：`inet_server_addr()`（コンテナの中のアドレス）、`pg_postmaster_start_time()`。可能なら `pg_control_system()` の `system_identifier`（`katana_test_user` で実行できるかは未確認）。
+    3. F1 と D1 を照合する：`inet_server_addr()` がコンテナの IP と一致し、`pg_postmaster_start_time()` が `State.StartedAt` より後で、初期化にかかる時間の範囲に収まる。合わなければ migration を始めない。
+    4. `prisma migrate deploy`。
+    5. migration の後の判定で F2 を読み、F1 と完全に一致すること（サーバーが再起動・入れ替わりしていない）。
+    6. 最後にもう一度 D2 を読み、D1 と一致すること（コンテナが入れ替わっていない）。
+    - 4の間に入れ替わった場合でも、5・6で検出できる。ただし、そのときには migration は別のサーバーに届いている。届いた先がテストDBの本人確認に通らないサーバーなら、そのサーバーは変更されているかもしれないが、開発用DBではない（防止の側の理由）。
+  - 実装上の判断（未決定。migration の実行を有効にする工程で決める）：`testdb-migrate` から Docker の読み取りコマンドを呼ぶか（ラッパーの関数を共有するか）、ラッパーに migration を呼ぶ手順（`reset` の一部）を持たせるか。どちらでも、Docker の読み取りは許可リストのコマンドだけにする。
+  - Prisma CLI の接続を親のプロセスから制御する方法（ロックを持ち続けるなど）は、効果がないので使わない（3-10C の記録と同じ）。
+
+- **H. Step 3-11 の完了条件との違い（PLANの3章の節の内容）:**
+  - 「DBのコメントが一致する」は、ラッパーでは確かめられない（DBに接続しない）。F の読み取り専用の検証のモードを実装してから確かめる。そのため、Step 3-11 を次のように分けることを提案する。
+    - **3-11（Docker の起動）**：前提条件（C）→ dry run → 承認 → `testdb:up -- --apply` → 起動後の確認と R7（D）→ 開発用の記録の照合。DBには接続しない。
+    - **3-11B（読み取り専用のDB検証）**：F のコード変更（別の承認）→ 実DBへの読み取り専用の接続（別の承認）→ 本人確認・search_path・カタログ・状態 A。
+  - 2-5の「up の前に `lsof` で5434番を確かめる」は、ラッパーでは `docker ps --filter publish=5434` だけ。手作業の `lsof` で補う（C の8）。
+
+- **I. `.env.test`（今回は作成していない。ユーザーが後続の工程で作る）:**
+  - 必要なキーは3つだけ（ラッパーは、ほかのキーを `TEST_ENV_UNEXPECTED_KEY` で拒否する）:
+    - `DATABASE_URL=postgresql://katana_test_user:<アプリ用のパスワード>@127.0.0.1:5434/katana_test`（クエリパラメータ・フラグメントを付けない）
+    - `KATANA_TEST_DB_PASSWORD=<アプリ用のパスワード>`（URL のパスワードと完全に同じ）
+    - `KATANA_TEST_DB_ADMIN_PASSWORD=<管理用のパスワード>`（アプリ用と違う値）
+  - パスワードの条件：`[A-Za-z0-9_-]` だけ、空でない、`change_me` などの見本の値を含まない、開発用DBのパスワードを流用しない。
+  - 作り方の例（パスワードを画面とシェルの履歴に残さない）：`katana-web/` で `umask 077` の後、`openssl rand -hex 24` で作った2つの値を、シェルの変数を経由して `printf` で `.env.test` に書き込み、変数を `unset` する。`.env.test.example` をコピーしてエディタで書き換えてもよい。
+  - 作った後の確認：`ls -l .env.test` が `-rw-------`、`git status --short` に出ない、`npm run testdb:check`・`npm run test:integration:check`・`npm run testdb:migrate:check` の3つが成功する。
+  - パスワードは、本ファイル・ログ・報告に書かない。DBを作り直すまで、パスワードの変更は反映されない（初期化はデータが空のときだけ）。
+
+- **起動の前に解決すべき問題:**
+  1. Docker のデーモンが停止中。ユーザーが Docker Desktop を起動した後、C の2〜9を読み取りでもう一度確かめる。
+  2. `.env.test` がない（ユーザーが作る。I）。
+  3. bind の `Source`・Compose のラベルのパスの表記が想定と違った場合、ラッパーで片付けられなくなる（D の「重要な注意」）。その場合の扱い（止まって報告し、条件の修正か個別の承認による手作業かを決める）を、up の承認の前に合意しておく。
+  4. 読み取り専用のDB検証の経路がない（F）。Step 3-11 の完了条件「DBのコメントが一致する」を満たすには、コード変更が必要。
+- **残る未検証の事項:**
+  - Docker のデーモンが必要な前提条件（C の3〜9・11〜13）。
+  - 初期化スクリプトの実際の実行（ロールの作成・所有者の変更・コメント）、bind マウントで実行権限が保たれること、healthcheck が初期化の完了まで healthy にならないこと。
+  - tmpfs のデータがコンテナの停止で消えること。
+  - R7、tmpfs の実際の表し方（3-10A の A・B・C のどれか）、bind の `Source` とラベルの実際の値、`compose ps --format json` の形。
+  - 実際の up・down（Compose v5.1.3 での固定の引数の受け付けは、3-10の前のレビューでヘルプにより確認済み）。
+  - 実DBでの SQL・権限・search_path の固定・状態 A の判定。
+  - TOCTOU の対策（G。未実装）。`pg_control_system()` を `katana_test_user` で実行できるか。
+  - `reset`（未実装）、globalSetup への組み込み、`prisma migrate diff`（Step 3-12）。
+- **実DBへの接続と migration は、実施していない。** コンテナの起動・停止も行っていない。
+
+#### Step 3-11A：Docker 起動前の最終安全確認（実施済み。commit `test: protect test database initialization secrets`）
+
+- **前提の確認:** ブランチ `chore/test-db-isolation`、HEAD `92ba359`。変更は PLAN の未commit分だけ。pptx・`test-data/` は未追跡のまま触れていない。
+- **Docker Desktop:** ユーザーが起動した（Claude Code からは起動していない）。最初の確認ではデーモンに接続できず停止し、ユーザーの起動の後に再開した。
+- **読み取り専用の確認の結果（使ったコマンドは、指示の一覧と `docker ps -a --filter`・`docker volume ls --filter`・`docker volume inspect`・`docker inspect sample-db --format`（再起動ポリシーと停止日時だけ）・`docker image ls postgres`。起動・停止・exec・削除はしていない）:**
+  | 項目 | 結果 | 記録との比較 |
+  |---|---|---|
+  | コンテキスト | `desktop-linux` | 一致 |
+  | Docker | クライアント・エンジンとも 29.4.1（Docker Desktop 4.71.0、linux/arm64）。Compose v5.1.3 | 一致 |
+  | コンテナ | `sample-db`（`sample-db-image:latest`、Exited (0)、6か月前に停止。再起動ポリシー `no`、停止日時 2026-05-06）だけ。ポートの公開なし | 一致。**Docker Desktop の起動に伴って起動したコンテナはない** |
+  | `katana-db`・`katana-test-db` | どちらも存在しない。`com.docker.compose.project=katana-test` のコンテナ・ボリュームもない | 一致 |
+  | ボリューム（R7 の比較の基準） | `0df3f60a…`（無名、2026-05-01T07:48:32Z、どのコンテナも使っていない）、`b655b6e4…`（無名、2026-05-04T01:58:29Z、`sample-db` が使う）、`katana-web_postgres_data` の3つだけ | 一致 |
+  | 開発用ボリューム | `katana-web_postgres_data`、作成日時 2026-07-18T05:42:41Z、ラベル `com.docker.compose.project=katana-web`・`com.docker.compose.volume=postgres_data`・`com.docker.compose.version=5.1.3`・`config-hash=3c74db25…`。使っているコンテナはない | 一致 |
+  | `postgres:15` | あり。ID `29342cb52157`（作成 2026-04-22）。`Config.Volumes` は `{"/var/lib/postgresql/data":{}}`（R7 の対象の宣言。初回の up の後に D の手順で確かめる） | 一致 |
+  | 5434番 | `lsof` で待ち受けなし。Docker 側もポートを公開しているコンテナなし | 空き |
+  - 前提条件の表 C のうち、2〜9 は満たす。10〜13（`.env.test` と確認モード・dry run）は未実施。
+- **初期化スクリプトのログ漏洩の確認（静的）:**
+  | 経路 | 修正前 | 対策 |
+  |---|---|---|
+  | サーバーのログ（`docker logs`） | `log_min_error_statement` の既定は `error`。`CREATE ROLE … PASSWORD '…'` が失敗すると、`STATEMENT:` の行に全文（psql が展開した後のパスワードを含む）が出る。`log_statement`・`log_min_duration_statement` の既定は文を出さないが、明示的には止めていない | psql のセッションの最初に `SET log_statement = 'none'`・`log_min_error_statement = 'panic'`・`log_min_duration_statement = -1`・`log_min_duration_sample = -1`（このセッションだけ。どれもスーパーユーザーが変更できる設定で、初期化は管理用のスーパーユーザーで接続する）。失敗しても `ERROR:` の行（メッセージだけ）は残り、文は記録されない。記録自体を防ぐ方式で、後からのマスクには頼らない |
+  | psql の標準エラー | 既定の `VERBOSITY=default` では、位置のある誤り（構文の誤りなど）で `LINE 1: CREATE ROLE … PASSWORD '…'` の抜粋が出る（`docker logs` に入る） | `-v VERBOSITY=terse`（抜粋の代わりに「at character N」だけ）、`-v SHOW_CONTEXT=never` |
+  | psql の ECHO | 使っていない（`-a`・`-e`・`-E`・`--echo-*` なし、`--no-psqlrc` で設定ファイルも読まない） | 変更なし。静的テストで確かめる |
+  | psql の標準出力 | `DO`・`CREATE ROLE` などのコマンドタグだけ | 変更なし |
+  | プロセスの引数 | `--set=app_password=<パスワード>` が、初期化の間だけコンテナの中のプロセスの引数に見えた | psql 15 の `\getenv app_password KATANA_TEST_DB_PASSWORD` で、環境変数から読む。引数には出ない |
+  | シェルのトレース | `set -x` なし。entrypoint もトレースしない | 変更なし。静的テストで確かめる |
+  | 環境変数の表示 | スクリプトは表示しない（エラーメッセージは変数名だけ） | 変更なし |
+  | エラーメッセージ | `refusing to initialize database %`（DB名だけ）など。サーバーのエラー（例：ロールが既にある）にパスワードは入らない | 変更なし |
+  | コンテナの環境変数 | `KATANA_TEST_DB_PASSWORD`・`POSTGRES_PASSWORD` は `Config.Env` に残る | 対策なし（Compose の環境変数で渡す設計のまま）。調査で `Config.Env` を読まない運用を続ける |
+  - `02-marker.sql` は秘密情報を扱わない。entrypoint は `.sql` を ECHO なしの psql で実行する。`docker-compose.test.yml` には `command`・`entrypoint` がなく、サーバーのログの設定を上書きしない。どちらも変更していない。
+  - 初期化の失敗で止まる条件は維持：`set -Eeuo pipefail`、`-v ON_ERROR_STOP=1`。`\getenv` で変数が設定されなかった場合は、`:'app_password'` が展開されず構文の誤りになり、ON_ERROR_STOP で止まる（シェルで空でないことも先に確かめている）。
+  - 残る注意：PostgreSQL のサーバーが PANIC で止まる場合だけは文が記録され得るが、`CREATE ROLE` で PANIC になることは想定しない。障害の調査で `docker logs` を読むときに、E の B の除外のフィルタを使う運用は続ける。
+- **修正したファイル:**
+  - `docker/test-db/init/01-app-role.sh`：上の対策（psql の引数・`SET` の4行・`\getenv`・コメント）。実行権限（100755）は維持。
+  - `scripts/testdb-init.test.ts`（新規、11件）：ファイルの内容だけで確かめる静的テスト。Docker・DBには接続しない。シェルのトレースがない、パスワードの値を展開するのは空かどうかの確認だけ、psql は1回だけでパスワードを引数に渡さない、ECHO・ログファイルを使わず `VERBOSITY=terse`・`SHOW_CONTEXT=never`、パスワードを含む文は `CREATE ROLE` の1つだけ、`\getenv` が `CREATE ROLE` より前、ログの設定4つが `CREATE ROLE` より前で途中で戻さない、`02-marker.sql` が秘密情報を扱わない、Compose がログの設定・`command` を持たない。修正前の `01-app-role.sh` に対しては5件が失敗することを確かめた（一時的に戻して実行し、修正後の内容に戻したことを `cmp` で確認）。
+  - `lib/testing/dbConnectionPaths.test.ts`：通常テストのファイル数 `EXPECTED_UNIT_TEST_COUNT` を31から32に更新（新しいテストファイルの追加による。規則4のテスト名の「25件」は以前から定数と食い違っているが、変更していない）。
+- **静的テストの結果:** `bash -n docker/test-db/init/01-app-role.sh` 成功、`npx tsc --noEmit` 成功、`npm test` 32ファイル・1076件成功（最初の実行では、ファイル数の定数の更新前で1件失敗）、`git diff --check` 成功。実DBを使うテストは実行していない。
+- **初回の up の後に問題が起きたときの方針（ユーザーの指示。D の「重要な注意」と E を、この内容で確定する）:** Mounts の表示形式が想定外、bind の `Source` のパスの不一致、Compose のラベルの不一致、無名のボリュームの作成、up のタイムアウトのどれでも、自動で `down`・`docker rm`・`docker volume rm` を行わない。対象のコンテナID・ラベル・マウント・ポート・開発用ボリュームの状態を読み取りで確かめて報告する。個別の承認を得るまで、手作業で削除しない。
+- **Step 3-11 の未実施の事項:** `.env.test` の作成（ユーザー）、3つの確認モード（`testdb:check`・`test:integration:check`・`testdb:migrate:check`）、`testdb:status`、`testdb:up`（`--apply` なし）、up の承認と `testdb:up -- --apply`、起動後の確認と R7（D）、読み取り専用のDB検証のモード（F。3-11B）。
+- **残る未検証の事項:** 修正した初期化スクリプトの実際の実行（`\getenv`・`SET` の受け付け、失敗時にログに文が出ないこと）、初期化の実際の動作と tmpfs のデータの消え方、R7、bind の `Source`・ラベルの実際の値、実際の up・down、実DBでの検証、TOCTOU の対策（未実装）。
+- **commit の前の最終レビュー（2回目のセッション）:**
+  - `postgres:15` のイメージの環境変数 `PG_VERSION=15.17-1.pgdg13+1`（`docker image inspect` で読み取り）。`\getenv` は psql 15 で追加された機能なので使える。
+  - ログを止める `SET` の4行は、`CREATE ROLE` より前に、同じ psql のセッション（1つの接続）で実行される。`ON_ERROR_STOP=1` なので、`SET` が1つでも失敗すれば psql はその場で終了し（終了コード3）、`set -e` でスクリプトも失敗する。`CREATE ROLE` には進まない。
+  - `\getenv` は、環境変数がなくても失敗しない（psql の変数が未設定のまま）。その場合、`:'app_password'` が展開されずに構文の誤りになり、ON_ERROR_STOP で止まる。文の中にパスワードは入らない。シェルは先に空でないことを確かめている。
+  - `:'app_password'` は、psql が `PQescapeLiteral` で SQL の文字列リテラルとして引用する（引用符・バックスラッシュも安全に扱う）。さらにパスワードは `[A-Za-z0-9_-]` だけに制限されている（R14）。
+  - パスワードはコマンドの引数に入らない。ECHO・`set -x` はない。例外のメッセージ（`RAISE EXCEPTION`）は DB 名だけで、パスワードを含まない。
+  - 最終テスト：`bash -n` 成功、`npx tsc --noEmit` 成功、変更したテストファイル2つの `eslint` 成功、`npm test` 32ファイル・1076件成功、`npx vitest list --filesOnly` は32ファイル（`scripts/testdb-init.test.ts` を含み、`*.integration.test.*` は0件。統合テスト6ファイルは除外）、`dbConnectionPaths.test.ts` の静的検査152件成功・違反0件、`git diff --check` 成功。
+  - **一時的な事象：** 2回目のセッションの最初の `docker image inspect postgres:15` が1回だけ `No such image: postgres:15` を返した。直後の `docker image ls` には `postgres:15`（`29342cb52157`）が表示され、名前を指定した `inspect` も4回続けて成功した。コンテナ・ボリューム・開発用ボリュームの記録は変わっていない。原因は不明（Docker Desktop の起動の直後の一時的な応答の可能性）。ラッパーはイメージがなければ `IMAGE_MISSING` で止まる（安全側）。
+- **まとめ（Step 3-11A の時点）:** Docker 側の起動前の条件は確認済み（`postgres:15` あり、開発用ボリュームは変更なし、5434番は未使用）。初期化のログ漏洩の対策と静的テスト11件を追加し、通常テスト1076件が成功。**実際の初期化の処理、R7 は未検証。DBへの接続は未実施。**
+- **実DBへの接続・migration・コンテナの起動と停止は、実施していない。** `.env.test` は作成していない。
 
 全Stepに共通する事項:
 
@@ -1684,6 +1893,8 @@ npm run test:integration ─► 専用runner
   - 開発用DBの記録が変わっていない。
 - **承認が必要な操作:** Dockerの起動。
 - **停止条件:** 操作前・操作後の確認のどれかが失敗する。5434番ポートが使われている。
+- **実施前レビューの結果（3-Aの「Step 3-11の実施前レビュー」）:** 前提条件・R7 の検証手順・失敗時の対処はそちらが正。完了条件の「DBのコメントが一致する」はラッパーでは確かめられないので、3-11（Docker の起動と R7。DBに接続しない）と 3-11B（読み取り専用のDB検証。コード変更が必要）に分けることを提案している。
+- **Step 3-11A の結果（3-Aの「Step 3-11A」）:** Docker 側の前提条件（C の2〜9）は満たす。初期化スクリプトのログ漏洩の対策は済んだ。初回の up に残る前提は、`.env.test` の作成と3つの確認モード・dry run、D の「重要な注意」の扱いの合意、up の承認。
 
 ### Step 3-12：テストDBへのmigrationの適用と、スキーマの照合
 
@@ -1755,7 +1966,7 @@ npm run test:integration ─► 専用runner
 | R4 | `prisma/seed.ts` と Prisma Studio はガードの外にある | 範囲外 |
 | R5 | `lib/generated/prisma/` が、Gitの除外対象なのに管理されたまま残っている | importは静的検査で防ぐ。整理は別タスク |
 | R6 | 静的検査はASTの解析だが、文字列を組み立てたimport、パッケージ経由の読み込み、`@/*` 以外の別名などはすり抜けられる（3-Aの3-4B・3-5Bに一覧）。判定できない動的importなどは、規則4で「未確認」として失敗させる | 低。レビューで補う |
-| R7 | tmpfsとイメージの `VOLUME` 宣言の関係 | 未検証。静的には確定できない（3-Aの3-9B）。Step 3-9Dで、`testdb --up --apply` の起動後の確認に、すべてのボリュームの一覧の比較と、`inspect` の Mounts・Tmpfs の照合を入れた（最終判定は、初めて起動するとき）。初めて起動した後に、`docker inspect` の `Mounts`・`HostConfig.Tmpfs` と、起動前後の `docker volume ls` で確かめる。既存の無名ボリューム `0df3f60a…`（どのコンテナも使っていない）があることは記録済み |
+| R7 | tmpfsとイメージの `VOLUME` 宣言の関係 | 未検証。静的には確定できない（3-Aの3-9B）。Step 3-9Dで、`testdb --up --apply` の起動後の確認に、すべてのボリュームの一覧の比較と、`inspect` の Mounts・Tmpfs の照合を入れた（最終判定は、初めて起動するとき）。初めて起動した後に、`docker inspect` の `Mounts`・`HostConfig.Tmpfs` と、起動前後の `docker volume ls` で確かめる。既存の無名ボリューム `0df3f60a…`（どのコンテナも使っていない）があることは記録済み。手作業で読み取る項目と合格の条件は、3-Aの「Step 3-11の実施前レビュー」の D で確定した（ボリュームが1つでも増えれば不合格） |
 | R8 | Node 25で `.mts` のスクリプトを動かせるか。Vitest 4の `test.env` と `.env.test` の扱い | `test.env` が親プロセスの値を上書きすることは、Step 3-3でソースを読んで確認済み。`.mts` のrunnerがNode 25でそのまま動くことは、Step 3-7Bの確認モードで確認済み。統合テスト用の設定は `envDir: false` でViteに `.env*` を読ませない（通常実行モードでの確認は未実施） |
 | R12 | Step 3-0で取得したDockerの記録（コンテキスト・ボリューム名・`katana-db`）が残っていない | 解消（Step 3-9で取得し直した：コンテキスト `desktop-linux`、ボリューム `katana-web_postgres_data`）。**調査の時点で、開発用コンテナ `katana-db` は存在しない。** 今後の比較の対象は、開発用ボリュームの名前・作成日時（2026-07-18T05:42:41Z）・ラベル（`com.docker.compose.project=katana-web`・`com.docker.compose.volume=postgres_data`）と、`katana-db` の有無。`testdb --status` がこれらを読み取る。ボリュームへの操作は読み取りだけ |
 | R14 | `.env.test` のパスワードがプレースホルダーのままでもガードを通る。`DATABASE_URL` と `KATANA_TEST_DB_PASSWORD` の一致は、運用で守っている | **一部対策済み・残課題あり。** Step 3-9Cで、共通の `assertTestDatabaseCredentials()`（見本の値・空・文字種・URLとの一致・管理用との違い）を、4つの正規の経路（Dockerのラッパー・統合テストのrunner・`testdb-migrate`・Prisma CLIのテストDBモード）に適用した。残り：(1) runnerを通さずに globalSetup・`lib/prisma.ts` の統合テストモードを起動する経路（パスワードは未検証。今は globalSetup が必ず停止する）、(2) `docker compose` の直接実行、(3) 外部の道具からの接続（対象外）。詳細は3-Aの3-9C |
@@ -1772,14 +1983,14 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：`test: integrate guarded migration state checks`（Step 3-10C。親は `daf5c8b`）。hash は `git log -1` で確かめ、3-Aの表の3-10Cの行と、3-10Cの最終の安全性レビューの記録に記入する（この記録は、次の作業とあわせてcommitする）
-   - 変更済み（未commit）：なし
+   - HEAD：Step 3-11A の commit（`test: protect test database initialization secrets`。親は `92ba359`。hash は 3-A の表）
+   - 変更済み（未commit）：なし（Step 3-11A の commit の hash を記入した後の `docs/PLAN-test-db-isolation.md` だけが変更済みになる場合がある）
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
    - `.env.test` は存在しない（Step 3-7B・3-8B・3-9B・3-9C と、`61f8105` のcommit前の検証で作った一時ファイルは、すべて削除済み）
-3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。**実際の `up`・`down` は、まだ一度も実行していない。R7 も未検証。** Step 3-10の実施前レビューの結果（3-Aの「Step 3-10の実施前レビュー」）を先に読む。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
-   - Step 3-10（ユーザーによる `.env.test` の作成と、3つの確認モードの実行）
-   - 初回の up の前のチェックリストの確認
-   - 実DBへの接続の有効化（スクリプトの `liveDatabase` の変更。3-Aの3-10Cの「強制停止の維持」。ユーザーの承認を得てから。実DBでの検証と、その前の必須の確認を含む）
+3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。**実際の `up`・`down` は、まだ一度も実行していない。R7 も未検証。** Step 3-11の実施前レビューの結果（3-Aの「Step 3-11の実施前レビュー」。前提条件の表 C、R7 の D、失敗時の E、DB検証の F、TOCTOU の G、`.env.test` の I）を先に読む。レビューの時点では Docker のデーモンが停止中だったが、Step 3-11A でユーザーが Docker Desktop を起動し、前提条件 C の2〜9 を満たすことを確かめた（3-Aの「Step 3-11A」）。初期化スクリプトのログ漏洩の対策も 3-11A で済んだ。初回の up の後に問題が起きたときは、自動で削除せず、読み取りで調べて報告し、個別の承認を待つ（3-11A で確定）。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
+   - ユーザーによる `.env.test` の作成（Step 3-10）の後、Docker の状態（C の2〜9）の再確認と、3つの確認モード・`testdb:status`・`testdb:up`（`--apply` なし）の実行
+   - Step 3-11（`testdb:up -- --apply`。別の承認が必要。D の「重要な注意」の扱いを、承認の前に合意する）
+   - 読み取り専用のDB検証のモードの実装（F の案1。`testdb-migrate` の migration の実行ゲートは無効のまま。実装とその後の実DBへの接続は、それぞれ承認が必要）
    - `reset` の実装（本人確認の後）
 
    コンテナの起動（Step 3-11）と、R7の確認は、まだ行っていない。接続後の本人確認と状態の判定は Step 3-10B で実装して commit し、Step 3-10C で migration 用スクリプトの流れに組み込んだ。ただし、スクリプトの実DBへの接続の許可は固定で無効で、通常実行モードは接続の前に必ず止まる。globalSetup には組み込んでおらず、強制停止のまま（初回の実DB接続で確かめることは、3-Aの3-10B・3-10Cの記録）。指示されたStep以外には着手しない。
