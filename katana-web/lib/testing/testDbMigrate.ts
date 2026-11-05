@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { DB_TARGET_ENV, DB_TARGET_TEST } from "../db/prismaCliGuard.ts";
 import {
@@ -7,19 +8,36 @@ import {
   TestDatabaseGuardError,
   type TestDatabaseTarget,
 } from "../db/testDatabaseGuard.ts";
+import {
+  applicationTablesFromSchema,
+  IntegrationDatabaseCheckError,
+  type IntegrationDbClient,
+  listMigrationNames,
+} from "./integrationDatabaseCheck.ts";
 import { DEVELOPMENT_ENV_FILE, inheritAllowedEnv, TEST_ENV_FILE } from "./integrationEnv.ts";
+import { classifyTestDatabase, enumNamesFromSchema, type TestDatabaseState } from "./testDbState.ts";
 
 /**
- * テストDB専用の migration（scripts/testdb-migrate.mts）の本体。2-7の手順のうち、DBに接続しない部分を担う。
+ * テストDB専用の migration（scripts/testdb-migrate.mts）の本体。
  *
- * 外部とのやりとり（env ファイルの読み込み、ファイルの存在確認、接続後の本人確認、子プロセスの起動、表示）は
+ * 外部とのやりとり（env ファイルの読み込み、ファイルの存在確認、DBの状態の判定、子プロセスの起動、表示）は
  * すべて引数で受け取る。そのため、単体テストでは Prisma CLI を起動せず、DBにも接続せずに検証できる。
  *
  * 実行順序（途中で失敗したら、その時点で止める。別の接続先は試さない）:
- * 1. 引数の検証  2. Node の起動オプション（execArgv・NODE_OPTIONS）の確認  3. `.env.test` の読み込み
- * 4. `.env` の開発用DBの接続先の取得  5. テストDBのURLとパスワード（R14）の検証  6. 子プロセスの環境変数の生成（作った後にもう一度検証）
- * 7. 実行する Prisma CLI のコマンドの確認  （確認モードはここで表示して終了する）
- * 8. 接続後の本人確認（DBのコメントの照合。2-7の4）  9. すべて成功した場合だけ子プロセスを起動する
+ * 1. 引数の検証、Node の起動オプション（execArgv・NODE_OPTIONS）の確認  2. `.env.test` の読み込み
+ * 3. `.env` の開発用DBの接続先の取得  4. テストDBのURLの検証（assertTestDatabaseTarget）
+ * 5. パスワードの検証（assertTestDatabaseCredentials。R14）
+ * 6. 親のプロセスの PG*・DOTENV_* の拒否（状態の判定の接続は、このプロセスの中で pg が行い、pg は PG* を読むため）
+ * 7. 子プロセスの環境変数の生成（作った後にもう一度検証）  8. 実行する Prisma CLI のコマンドの確認
+ *    （確認モードはここで表示して終了する。DBには接続しない）
+ * 実DBへの接続の許可（liveDatabase）：無効なら、ここで TESTDB_MIGRATION_LIVE_DISABLED で止まる。
+ * 9〜11. 読み取り専用の接続・本人確認・状態 A・B・C の判定（classifyDatabase。接続は判定ごとに1回で、終わったら閉じる）
+ * 12. A のときだけ、固定のコマンドで Prisma CLI（`migrate deploy`）を起動する。B は理由を表示して止まり、C は起動せずに成功とする
+ * 13. migration の後に、別の接続でもう一度、本人確認と状態の判定を行う  14. C であることを確かめて終了する
+ *
+ * どの状態でも、reset・DROP・TRUNCATE・DELETE・自動復旧・migration の自動継続は行わない。
+ * 判定（9〜11・13）そのものの失敗は、A・B・C のどれとも扱わず、Prisma CLI を起動せずに止まる。
+ * C は、列・インデックス・制約の定義の一致までは保証しない（schemaDiff は not-verified。Step 3-12 の migrate diff）。
  *
  * Prisma CLI のコマンドは `migrate deploy` に固定し、外部から引数を渡せない。`migrate deploy` は未適用の migration を
  * 適用するだけで、DBの作り直し・Prisma Client の生成・seed は行わない。
@@ -44,8 +62,14 @@ export type TestDbMigrateErrorCode =
   | "TEST_ENV_MISSING"
   | "TARGET_REJECTED"
   | "CREDENTIALS_REJECTED"
+  | "UNSAFE_PARENT_ENV"
   | "REQUIRED_FILE_MISSING"
-  | "IDENTITY_CHECK_NOT_IMPLEMENTED";
+  | "TESTDB_MIGRATION_LIVE_DISABLED"
+  | "STATE_CHECK_FAILED"
+  | "DATABASE_STATE_INCONSISTENT"
+  | "MIGRATION_FAILED"
+  | "POST_MIGRATION_CHECK_FAILED"
+  | "POST_MIGRATION_STATE_MISMATCH";
 
 export class TestDbMigrateError extends Error {
   readonly code: TestDbMigrateErrorCode;
@@ -67,6 +91,16 @@ export type SpawnOptions = {
   stdio: "inherit";
 };
 
+/** 検証済みの接続URLで、DBの状態 A・B・C を読み取り専用で判定する（判定ごとに接続し、終わったら閉じる） */
+export type ClassifyDatabase = (input: { databaseUrl: string; developmentDatabaseUrl: string | undefined }) => Promise<TestDatabaseState>;
+
+/**
+ * 実DBへの接続の許可。scripts/testdb-migrate.mts は LIVE_DATABASE_DISABLED を固定で渡す（環境変数・引数では変えられない）。
+ * 有効にするのは、承認を得た後続の工程で、スクリプトのコードを変えたときだけ。単体テストは、偽の判定関数で有効にする。
+ */
+export type LiveDatabaseAccess = { readonly mode: "disabled" } | { readonly mode: "enabled"; readonly classifyDatabase: ClassifyDatabase };
+export const LIVE_DATABASE_DISABLED: LiveDatabaseAccess = Object.freeze({ mode: "disabled" });
+
 export type TestDbMigrateDeps = {
   /** katana-web/ の絶対パス（子プロセスの作業ディレクトリ） */
   root: string;
@@ -80,8 +114,8 @@ export type TestDbMigrateDeps = {
   /** env ファイルを dotenv.parse で読む。ファイルがなければ undefined */
   readEnvFile: (absolutePath: string) => EnvSource | undefined;
   pathExists: (absolutePath: string) => boolean;
-  /** 接続後の本人確認（2-7の4）。通常実行モードで、子プロセスの起動直前にだけ呼ぶ */
-  verifyDatabaseIdentity: (target: TestDatabaseTarget) => Promise<void>;
+  /** 実DBへの接続の許可と、状態の判定。通常実行モードで、確認モードの終了点より後にだけ使う */
+  liveDatabase: LiveDatabaseAccess;
   /** 子プロセスを起動し、終了コードを返す */
   spawn: (command: string, args: readonly string[], options: SpawnOptions) => Promise<number>;
   log: (text: string) => void;
@@ -114,7 +148,41 @@ export function buildTestDbMigrateEnv(parentEnv: EnvSource, verifiedDatabaseUrl:
   return { childEnv: { ...inherited, DATABASE_URL: verifiedDatabaseUrl, [DB_TARGET_ENV]: DB_TARGET_TEST }, droppedKeys };
 }
 
+/**
+ * 状態の判定の関数を作る。期待値（テーブル・enum・migration の名前）は、作るときに schema.prisma と prisma/migrations から読む。
+ * connect には lib/testing/testDbConnection.ts の connectTestDatabase を渡す（pg を読み込むのは、そのファイルだけ）。
+ * まだどこからも呼ばない（scripts/testdb-migrate.mts への組み込みは、実DBへの接続の承認の後）。
+ */
+export function createTestDatabaseClassifier(input: {
+  root: string;
+  connect: (databaseUrl: string) => Promise<IntegrationDbClient>;
+}): ClassifyDatabase {
+  const schemaSource = readFileSync(path.join(input.root, "prisma", "schema.prisma"), "utf8");
+  const expected = {
+    tables: applicationTablesFromSchema(schemaSource),
+    enums: enumNamesFromSchema(schemaSource),
+    migrations: listMigrationNames(path.join(input.root, "prisma", "migrations")),
+  };
+  return ({ databaseUrl, developmentDatabaseUrl }) => classifyTestDatabase({ databaseUrl, developmentDatabaseUrl, expected, connect: input.connect });
+}
+
+/** 判定を実行し、失敗したらコードだけを含むエラーに置き換える（A・B・C のどれとも扱わない） */
+async function classifyOrStop(
+  classify: ClassifyDatabase,
+  input: Parameters<ClassifyDatabase>[0],
+  code: "STATE_CHECK_FAILED" | "POST_MIGRATION_CHECK_FAILED",
+): Promise<TestDatabaseState> {
+  try {
+    return await classify(input);
+  } catch (error) {
+    const detail = error instanceof IntegrationDatabaseCheckError ? error.code : "unknown";
+    const when = code === "STATE_CHECK_FAILED" ? "pre-migration" : "post-migration";
+    throw new TestDbMigrateError(code, `the ${when} database check failed (${detail}); the Prisma CLI was not started for this check.`);
+  }
+}
+
 function formatCheckReport(input: {
+  liveDatabase: LiveDatabaseAccess;
   root: string;
   target: TestDatabaseTarget;
   execPath: string;
@@ -122,14 +190,15 @@ function formatCheckReport(input: {
   childEnv: Record<string, string>;
   droppedKeys: string[];
 }): string {
-  const { root, target, execPath, args, childEnv, droppedKeys } = input;
+  const { liveDatabase, root, target, execPath, args, childEnv, droppedKeys } = input;
   return [
     "[testdb-migrate] check mode: the Prisma CLI was not started and no database connection was made.",
     "",
     `connection target: verified ${target.host}:${target.port}/${target.database} as ${target.user} (${TEST_ENV_FILE} DATABASE_URL; password hidden)`,
     `working directory: ${root}`,
     `command: ${path.basename(execPath)} ${args.map((arg) => (path.isAbsolute(arg) ? path.relative(root, arg) : arg)).join(" ")} (no shell)`,
-    "pre-migration database identity check: required before the Prisma CLI starts (not run in check mode)",
+    "database checks: identity and state (A: empty / B: inconsistent / C: fully migrated) before the Prisma CLI, and again after it (not run in check mode)",
+    `live database access: ${liveDatabase.mode === "enabled" ? "enabled" : "disabled in this build (normal mode stops with TESTDB_MIGRATION_LIVE_DISABLED before connecting)"}`,
     "",
     "child environment:",
     ...Object.keys(childEnv)
@@ -148,7 +217,7 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
   // 1. 引数
   const mode = parseTestDbMigrateArgs(deps.argv);
 
-  // 2. --import・--require などで、スクリプトより先にコードが読み込まれていないこと
+  // 1. --import・--require などで、スクリプトより先にコードが読み込まれていないこと
   if (deps.execArgv.length > 0) {
     throw new TestDbMigrateError("NODE_EXEC_ARGV_PRESENT", "Node.js options for this script are not allowed.");
   }
@@ -156,16 +225,16 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
     throw new TestDbMigrateError("NODE_OPTIONS_PRESENT", "NODE_OPTIONS is set; unset it before running the test database migration.");
   }
 
-  // 3. .env.test（親プロセスの DATABASE_URL は使わない）
+  // 2. .env.test（親プロセスの DATABASE_URL は使わない）
   const testEnv = deps.readEnvFile(path.join(root, TEST_ENV_FILE));
   if (testEnv === undefined) {
     throw new TestDbMigrateError("TEST_ENV_MISSING", `${TEST_ENV_FILE} was not found; create it before running the test database migration.`);
   }
 
-  // 4. 開発用DBの接続先（比較にだけ使う）
+  // 3. 開発用DBの接続先（比較にだけ使う）
   const developmentEnv = deps.readEnvFile(path.join(root, DEVELOPMENT_ENV_FILE));
 
-  // 5. URLの検証（環境変数の検査は、6で作った子プロセスの環境変数に対して行う）と、パスワードの検証（R14）
+  // 4. URLの検証（環境変数の検査は、6・7で行う）と、5. パスワードの検証（R14）
   const databaseUrl = testEnv.DATABASE_URL;
   verifyTarget(databaseUrl, {}, developmentEnv);
   try {
@@ -178,11 +247,21 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
   }
   const verifiedUrl = databaseUrl as string;
 
-  // 6. 子プロセスの環境変数。作った後の最終的な値で、もう一度検証する
+  // 6. 親のプロセスの PG*・DOTENV_*（状態の判定の接続は、このプロセスの pg が行う。確認モードでも同じ判定にする）
+  try {
+    assertTestDatabaseTarget({ databaseUrl: verifiedUrl, env: deps.parentEnv, developmentDatabaseUrl: developmentEnv?.DATABASE_URL });
+  } catch (error) {
+    if (error instanceof TestDatabaseGuardError) {
+      throw new TestDbMigrateError("UNSAFE_PARENT_ENV", `the environment of this process was rejected (${error.code}); unset PG* and DOTENV_* variables.`);
+    }
+    throw error;
+  }
+
+  // 7. 子プロセスの環境変数。作った後の最終的な値で、もう一度検証する
   const { childEnv, droppedKeys } = buildTestDbMigrateEnv(deps.parentEnv, verifiedUrl);
   const target = verifyTarget(childEnv.DATABASE_URL, childEnv, developmentEnv);
 
-  // 7. コマンド（固定）
+  // 8. コマンド（固定）
   for (const relative of REQUIRED_PATHS) {
     if (!deps.pathExists(path.join(root, relative))) {
       throw new TestDbMigrateError("REQUIRED_FILE_MISSING", `${relative} was not found.`);
@@ -191,13 +270,62 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
   const args = [path.join(root, PRISMA_CLI_ENTRY), ...PRISMA_MIGRATE_COMMAND, "--config", path.join(root, PRISMA_CONFIG_FILE)];
 
   if (mode === "check") {
-    deps.log(formatCheckReport({ root, target, execPath: deps.execPath, args, childEnv, droppedKeys }));
+    deps.log(formatCheckReport({ liveDatabase: deps.liveDatabase, root, target, execPath: deps.execPath, args, childEnv, droppedKeys }));
     return 0;
   }
 
-  // 8. 接続後の本人確認（失敗したら throw され、9 には進まない）
-  await deps.verifyDatabaseIdentity(target);
+  // 実DBへの接続の許可（スクリプトでは常に無効。接続・子プロセスの起動の前に止まる）
+  if (deps.liveDatabase.mode !== "enabled") {
+    throw new TestDbMigrateError(
+      "TESTDB_MIGRATION_LIVE_DISABLED",
+      "live database access is disabled in this build; refusing to connect to the test database or start the Prisma CLI.",
+    );
+  }
+  const { classifyDatabase } = deps.liveDatabase;
+  const checkInput = { databaseUrl: verifiedUrl, developmentDatabaseUrl: developmentEnv?.DATABASE_URL };
 
-  // 9. 子プロセス
-  return deps.spawn(deps.execPath, args, { cwd: root, env: childEnv, shell: false, stdio: "inherit" });
+  // 9〜11. 読み取り専用の接続・本人確認・状態の判定
+  const before = await classifyOrStop(classifyDatabase, checkInput, "STATE_CHECK_FAILED");
+  if (before.state === "B") {
+    deps.log(["[testdb-migrate] state B (partially applied, failed or unexpected objects):", ...before.reasons.map((r) => `  - ${r}`)].join("\n"));
+    throw new TestDbMigrateError(
+      "DATABASE_STATE_INCONSISTENT",
+      "the test database is neither empty nor fully migrated; the Prisma CLI was not started. Nothing was reset or repaired.",
+    );
+  }
+  if (before.state === "C") {
+    deps.log(
+      `[testdb-migrate] state C: all ${before.migrations.length} expected migrations are already applied and the tables are empty; ` +
+        "the Prisma CLI was not started. Column, index and constraint definitions were not compared (schema diff not verified; Step 3-12).",
+    );
+    return 0;
+  }
+
+  // 12. A のときだけ、固定のコマンドで migrate deploy（Prisma CLI は自分で別の接続を作る）
+  let exitCode: number;
+  try {
+    exitCode = await deps.spawn(deps.execPath, args, { cwd: root, env: childEnv, shell: false, stdio: "inherit" });
+  } catch {
+    throw new TestDbMigrateError("MIGRATION_FAILED", "the Prisma CLI could not be started. Nothing was reset.");
+  }
+  if (exitCode !== 0) {
+    throw new TestDbMigrateError("MIGRATION_FAILED", `prisma migrate deploy exited with code ${exitCode}. Nothing was reset; check the database state before retrying.`);
+  }
+
+  // 13. migration の後に、別の接続でもう一度、本人確認と状態の判定
+  const after = await classifyOrStop(classifyDatabase, checkInput, "POST_MIGRATION_CHECK_FAILED");
+  if (after.state !== "C") {
+    if (after.state === "B") deps.log(["[testdb-migrate] post-migration state B:", ...after.reasons.map((r) => `  - ${r}`)].join("\n"));
+    throw new TestDbMigrateError(
+      "POST_MIGRATION_STATE_MISMATCH",
+      `after prisma migrate deploy, the test database is in state ${after.state}, not C. Nothing was reset.`,
+    );
+  }
+
+  // 14. C
+  deps.log(
+    `[testdb-migrate] migrations applied; post-migration state C (${after.migrations.length} migrations, empty tables). ` +
+      "Column, index and constraint definitions were not compared (schema diff not verified; Step 3-12).",
+  );
+  return 0;
 }

@@ -26,11 +26,18 @@ import {
  *
  * 実行順序（途中で失敗したら、その時点で止める）:
  * 1. 期待値と接続URLの検証（接続しない）  2. 接続（1回だけ。接続は呼び出し側が `connect` として渡す）
- * 3. `BEGIN READ ONLY`  4. 本人確認（失敗したら throw し、状態の判定に進まない）
+ * 3. `BEGIN READ ONLY` の後、search_path を、このトランザクションの中だけ `pg_catalog` に固定する（下記）
+ * 4. 本人確認（失敗したら throw し、状態の判定に進まない）
  * 5. カタログの一覧の取得  6. 状態の判定（C の候補のときだけ、migration の履歴と空DB検査を読む）
  * 7. 成功・失敗にかかわらず ROLLBACK して接続を閉じる。
  *
  * 検査そのものが失敗した場合（SQLのエラー・接続の失敗・本人確認の失敗）は、状態 B とは扱わず、例外を投げる（fail-closed）。
+ *
+ * search_path：カタログ・public のテーブルはスキーマで修飾しているが、関数（current_database()・count など）と演算子（=・LIKE など）は
+ * search_path で解決される。ロール・DBの設定で `public, pg_catalog` のように pg_catalog を後ろに置かれると、public の同名の関数・演算子が
+ * 先に使われ得る。そのため、最初に `pg_catalog.set_config('search_path', 'pg_catalog', true)`（トランザクションの中だけ有効で、
+ * ROLLBACK で元に戻る。DBは変更しない）を実行し、戻り値が `pg_catalog` であることを確かめてから検査する。
+ * 一時スキーマ（pg_temp）は、リレーションの解決では常に先に探されるが、検査の SQL はリレーションをすべてスキーマで修飾している。
  *
  * C の限界: 列・型の中身・インデックスの定義・制約が schema.prisma と一致することは保証しない
  * （Step 3-12 の `prisma migrate diff` で照合する。まだ実施していない）。
@@ -143,7 +150,7 @@ const OTHER_OBJECT_CATALOGS: readonly (readonly [kind: string, from: string])[] 
 ];
 const OTHER_OBJECTS_SQL = OTHER_OBJECT_CATALOGS.map(
   ([kind, from]) =>
-    `SELECT '${kind}' AS kind, count(*)::int AS count FROM ${from} WHERE oid >= ${FIRST_NORMAL_OBJECT_ID}` +
+    `SELECT '${kind}' AS kind, pg_catalog.count(*)::int AS count FROM ${from} WHERE oid >= ${FIRST_NORMAL_OBJECT_ID}` +
     (from === "pg_catalog.pg_trigger" ? " AND NOT tgisinternal" : ""),
 ).join("\n      UNION ALL ");
 
@@ -190,6 +197,16 @@ export type ClassifyTestDatabaseInput = {
   /** 検証済みの接続URLで、DBに1回だけ接続する */
   connect: (databaseUrl: string) => Promise<IntegrationDbClient>;
 };
+
+/** 検査のトランザクションの中だけ、search_path を pg_catalog に固定する（ROLLBACK で元に戻る） */
+export const PIN_SEARCH_PATH_SQL = `SELECT pg_catalog.set_config('search_path', 'pg_catalog', true) AS "searchPath"`;
+
+async function pinSearchPath(client: IntegrationDbClient): Promise<void> {
+  const [row] = await select(client, "search_path pin", PIN_SEARCH_PATH_SQL);
+  if (row?.searchPath !== "pg_catalog") {
+    throw new IntegrationDatabaseCheckError("SEARCH_PATH_NOT_PINNED", "search_path could not be pinned to pg_catalog.");
+  }
+}
 
 /** schema.prisma の enum の名前。`@map`・`@@map` は拒否する（DBの型名との対応を正しく扱えない） */
 export function enumNamesFromSchema(schemaSource: string): string[] {
@@ -349,6 +366,7 @@ export async function classifyTestDatabase(input: ClassifyTestDatabaseInput): Pr
 
   // 2〜7
   return runReadOnlyCheck(input.connect, input.databaseUrl, async (client): Promise<TestDatabaseState> => {
+    await pinSearchPath(client); // 3
     await assertDatabaseIdentity(client); // 4：失敗したら throw され、状態の判定に進まない
     const inventory = await readCatalogInventory(client); // 5
     const structural = classifyCatalogInventory(inventory, expected); // 6

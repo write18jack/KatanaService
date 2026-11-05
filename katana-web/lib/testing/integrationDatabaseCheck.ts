@@ -49,7 +49,8 @@ export type IntegrationDatabaseCheckErrorCode =
   | "INVALID_IDENTIFIER"
   | "DATA_PRESENT"
   | "CLOSE_FAILED"
-  | "TARGET_REJECTED";
+  | "TARGET_REJECTED"
+  | "SEARCH_PATH_NOT_PINNED";
 
 export class IntegrationDatabaseCheckError extends Error {
   readonly code: IntegrationDatabaseCheckErrorCode;

@@ -1,7 +1,7 @@
 # 計画：専用テストDBの構築とVitest統合テストの分離
 
 作成日: 2026-10-26
-更新日: 2026-11-04（Step 3-8Bのcommit `d56c8e4`、R12のDockerの読み取り調査、Step 3-9・3-9B（テストDBの構成ファイルとDockerのラッパー。`docker compose config` による照合まで）の実施結果と、そのcommit `61f8105`、Step 3-9C（R14のパスワード検証の共通化）の実施結果とcommit `4553f2f`、Step 3-9D（ラッパーの `up`・`down` の実装と、障害時の down のレビュー。実際の起動・停止は未実施）の実施結果とcommit `5fcc259`、Step 3-10の実施前レビュー、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）の結果とcommit `8471705`、Step 3-10B（migration の前後のDBの状態の判定の実装。単体テストのみ）の結果を反映）
+更新日: 2026-11-04（Step 3-8Bのcommit `d56c8e4`、R12のDockerの読み取り調査、Step 3-9・3-9B（テストDBの構成ファイルとDockerのラッパー。`docker compose config` による照合まで）の実施結果と、そのcommit `61f8105`、Step 3-9C（R14のパスワード検証の共通化）の実施結果とcommit `4553f2f`、Step 3-9D（ラッパーの `up`・`down` の実装と、障害時の down のレビュー。実際の起動・停止は未実施）の実施結果とcommit `5fcc259`、Step 3-10の実施前レビュー、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）の結果とcommit `8471705`、Step 3-10B（migration の前後のDBの状態の判定の実装。単体テストのみ）の結果とcommit `daf5c8b`、Step 3-10C（`testdb-migrate` への状態の判定の組み込み。単体テストのみ。強制停止は維持）の結果を反映）
 作業ブランチ: `chore/test-db-isolation`（`fix-dashboard` の `6168889` から作成）
 
 ## 状態
@@ -10,7 +10,7 @@
 |---|---|
 | Phase 1：読み取り専用の調査 | **実施済み**（結果は本ファイルの1章） |
 | Phase 2：安全設計 | **設計レビュー完了**（確定設計は本ファイルの2章） |
-| Phase 3：実装 | **実施中**（Step 3-0〜3-8B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712`、Step 3-8A（接続後の本人確認と空DB検査）は `4b788e7` でcommit。Step 3-8B（当初の3-8：`prisma.config.ts` のガードとmigration用スクリプト）は `d56c8e4` でcommit。Step 3-9（テストDBの構成ファイル）とStep 3-9B（Dockerのラッパー `scripts/testdb.mts` の `--check`・`--status`と、`docker compose config` による照合。架空の一時的な `.env.test` で、全項目が一致）は実施済みで、`61f8105` でcommit。Step 3-9C（R14のパスワード検証を共通の関数にまとめ、4つの経路に適用）は実施済みで、`4553f2f` でcommit。Step 3-9D（ラッパーの `--up`・`--down`。`--apply` があるときだけ変更操作を行う）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit。Step 3-10の実施前レビュー（Dockerの読み取り専用の調査を含む）と、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）を実施し、`8471705` でcommit。Step 3-10B（DBの状態 A・B・C の読み取り専用の判定と、`pg` の許可リストの追加。単体テストのみ）を実装（未commit。どこからも呼ばない）。`reset` は未実装。**コンテナの起動・停止とDBへの接続は、一度も行っていない。** 結果は3章の「3-A. 実施結果」） |
+| Phase 3：実装 | **実施中**（Step 3-0〜3-8B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712`、Step 3-8A（接続後の本人確認と空DB検査）は `4b788e7` でcommit。Step 3-8B（当初の3-8：`prisma.config.ts` のガードとmigration用スクリプト）は `d56c8e4` でcommit。Step 3-9（テストDBの構成ファイル）とStep 3-9B（Dockerのラッパー `scripts/testdb.mts` の `--check`・`--status`と、`docker compose config` による照合。架空の一時的な `.env.test` で、全項目が一致）は実施済みで、`61f8105` でcommit。Step 3-9C（R14のパスワード検証を共通の関数にまとめ、4つの経路に適用）は実施済みで、`4553f2f` でcommit。Step 3-9D（ラッパーの `--up`・`--down`。`--apply` があるときだけ変更操作を行う）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit。Step 3-10の実施前レビュー（Dockerの読み取り専用の調査を含む）と、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）を実施し、`8471705` でcommit。Step 3-10B（DBの状態 A・B・C の読み取り専用の判定と、`pg` の許可リストの追加。単体テストのみ）を実装し、`daf5c8b` でcommit。Step 3-10C（`testdb-migrate` への組み込み。実DBへの接続の許可は固定で無効のまま）を実装し、最終の安全性レビューの後に `test: integrate guarded migration state checks` でcommit。`reset` は未実装。**コンテナの起動・停止とDBへの接続は、一度も行っていない。** 結果は3章の「3-A. 実施結果」） |
 | Phase 4：検証 | **未着手** |
 
 F-01の判定は **CONDITIONAL PASS のまま**。実DB・Cookie・HTTPでの検証は、Phase 4のE2Eで行う。
@@ -362,7 +362,8 @@ npm run test:integration ─► 専用runner
 | 3-9C | R14のパスワード検証の共通化（`assertTestDatabaseCredentials()`。Dockerのラッパー・統合テストのrunner・migration用スクリプト・Prisma CLIのテストDBモードに適用）。DB非接続の単体テストと、3つの確認モードの実行による回帰確認。R14は**一部が残る** | `4553f2f`（`test: centralize test database credential validation`） |
 | 3-9D | Dockerのラッパーの `--up`・`--down`（`--apply` があるときだけ変更操作）。操作前・操作後の確認、障害時（starting・unhealthy・exited・up の失敗後）の down のレビューと、Compose のラベルの照合の追加。単体テスト、静的検証。**実際の `up`・`down` は実行していない**。R7 は未検証。`reset` は未実装 | `5fcc259`（`test: add guarded test database up and down commands`） |
 | 3-10A | tmpfs の判定の修正（`Mounts`・`HostConfig.Mounts`・`HostConfig.Tmpfs` のどの表し方でも、データ領域の tmpfs と初期化用の bind だけを許可する）。up の後と down の前の両方に適用。migration の前と後の検査の分け方を記録。**実際の `up`・`down`・DBへの接続は行っていない** | `8471705`（`test: validate test database tmpfs mounts safely`。Step 3-10の実施前レビューの記録も含む） |
-| 3-10B | migration の前後のDBの状態（A：完全に空、B：途中まで適用・不整合、C：全件適用済み）の読み取り専用の判定（`lib/testing/testDbState.ts`）と、`pg` を読み込む1ファイル（`lib/testing/testDbConnection.ts`）の追加。DB非接続の単体テスト。**`testdb-migrate`・globalSetup への組み込みと、実DBへの接続は行っていない**（どちらも強制停止のまま）。commit の前のカタログ検査のレビューで、`pg_am`・`pg_transform` の検査漏れを直した | `test: classify test database migration states safely`（親は `8471705`。hashは次のセッションで記録する） |
+| 3-10B | migration の前後のDBの状態（A：完全に空、B：途中まで適用・不整合、C：全件適用済み）の読み取り専用の判定（`lib/testing/testDbState.ts`）と、`pg` を読み込む1ファイル（`lib/testing/testDbConnection.ts`）の追加。DB非接続の単体テスト。**`testdb-migrate`・globalSetup への組み込みと、実DBへの接続は行っていない**（どちらも強制停止のまま）。commit の前のカタログ検査のレビューで、`pg_am`・`pg_transform` の検査漏れを直した | `daf5c8b`（`test: classify test database migration states safely`） |
+| 3-10C | `testdb-migrate` への状態の判定の組み込み（A なら `migrate deploy` の後に別の接続で C を再確認、B は停止、C は Prisma CLI を起動せずに成功）、親のプロセスの `PG*`・`DOTENV_*` の拒否、状態の判定の search_path の固定。DB非接続の単体テスト。**スクリプトの実DBへの接続の許可は固定で無効**（`TESTDB_MIGRATION_LIVE_DISABLED`）。globalSetup は未変更。commit の前の最終の安全性レビューで、問題は見つからなかった | `test: integrate guarded migration state checks`（親は `daf5c8b`。hashは次のセッションで記録する） |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -571,7 +572,7 @@ npm run test:integration ─► 専用runner
 
   本人確認と子プロセスの起動は行わない。
 - **設計との違い:**
-  - 2-7の4（DBのコメントの照合）は、DBへの接続が必要なため実装していない。スクリプトは、本人確認の関数として、必ず `IDENTITY_CHECK_NOT_IMPLEMENTED` を投げる仮の関数を渡している。そのため、**`npm run testdb:migrate` の通常実行モードは、Prisma CLIを起動する前に必ず停止する**（runnerのglobalSetupと同じく、安全側に倒した形）。
+  - 2-7の4（DBのコメントの照合）は、DBへの接続が必要なため実装していない。スクリプトは、本人確認の関数として、必ず `IDENTITY_CHECK_NOT_IMPLEMENTED` を投げる仮の関数を渡している。そのため、**`npm run testdb:migrate` の通常実行モードは、Prisma CLIを起動する前に必ず停止する**（runnerのglobalSetupと同じく、安全側に倒した形）。→ Step 3-10C で、仮の関数を、実DBへの接続の許可（固定で無効。`TESTDB_MIGRATION_LIVE_DISABLED`）に置き換えた。停止する位置（すべての検証の後、接続と Prisma CLI の起動の前）は同じ。
   - 次の2つは、設計（2-7）にはなかった拒否条件として追加した：テストモードなしでテストDBに見えるURLを使う場合（`TEST_URL_WITHOUT_TEST_TARGET`）と、`KATANA_DB_TARGET` が `test` 以外の値の場合（`TARGET_INVALID`）。
   - 静的検査の許可リスト（2-4・3-4）には、`scripts/testdb*` を加えていない。このスクリプトは `pg` もPrisma Clientも読み込まないため。
 - 確認済み:
@@ -1376,7 +1377,164 @@ npm run test:integration ─► 専用runner
     - `testDbState.test.ts` は84件、`testDbConnection.test.ts` は4件。
     - `dbConnectionPaths.test.ts` は152件で、静的検査の違反は0件。
   - `npx vitest list --filesOnly` は31件で、`*.integration.test.*` は0件。統合テスト用の設定では6件。
-  - commit は `test: classify test database migration states safely`（親は `8471705`。hash は次のセッションで記録する）。
+  - commit は `daf5c8b`（`test: classify test database migration states safely`。親は `8471705`）。通常テスト1032件成功、静的検査152件・違反0件。
+
+**Step 3-10C（`testdb-migrate` への状態の判定の組み込み。実装・単体テスト・PLANの更新だけ）**
+
+- 前提：ブランチ `chore/test-db-isolation`、HEAD `daf5c8b`（Step 3-10B）。Step 3-10B の hash を、表と3-10Bの記録に記入した。
+- **実DBへの接続・Dockerの操作・Prisma CLI の起動・migration・統合テストの実行は、行っていない。** スクリプトの通常実行モードは、今も必ず停止する（下記の「強制停止」）。globalSetup は変更していない。
+- 変更したファイル（未commit）:
+  - `lib/testing/testDbMigrate.ts`：14手順の流れ、A・B・C の分岐、migration の後の再判定、`createTestDatabaseClassifier()`、実DBへの接続の許可（`LiveDatabaseAccess`）。
+  - `scripts/testdb-migrate.mts`：仮の本人確認の関数を、固定の `LIVE_DATABASE_DISABLED` に置き換えた。
+  - `lib/testing/testDbState.ts`：search_path の固定と、`count` のスキーマ修飾。
+  - `lib/testing/integrationDatabaseCheck.ts`：エラーコード `SEARCH_PATH_NOT_PINNED` の追加だけ。
+  - `lib/testing/testDbMigrate.test.ts`、`lib/testing/testDbState.test.ts`。
+  - `pg` の許可リスト・静的検査の規則・テストファイルの数は変えていない。
+- **手順（`runTestDbMigrate()`）:**
+  1. 引数と、Node の起動オプション（execArgv・NODE_OPTIONS）を確かめる。
+  2. `.env.test` を読む。
+  3. `.env`（開発用DB）を読む。
+  4. `assertTestDatabaseTarget()` で接続URLを確かめる。
+  5. `assertTestDatabaseCredentials()` でパスワードを確かめる。
+  6. **新規**：親のプロセスの `PG*`・`DOTENV_*` を拒否する（`UNSAFE_PARENT_ENV`）。
+     - 状態の判定の接続は、このプロセスの中で `pg` が行い、`pg` は URL にない設定を `PG*` から補うため。
+     - 確認モードでも同じように拒否する。
+  7. 子プロセスの環境変数を作り、もう一度確かめる。
+  8. Prisma CLI のファイルと、固定のコマンドを確かめる（確認モードはここで終わる）。
+  - ここで、実DBへの接続の許可を確かめる。無効なら止まる。
+  9〜11. 状態を判定する（`classifyDatabase`）：読み取り専用の接続、search_path の固定、本人確認、A・B・C の判定。
+  12. A のときだけ `migrate deploy` を起動する。
+  13. 別の接続で、もう一度判定する。
+  14. C であることを確かめて終わる。
+  - 既存の1〜8の順序と条件は、6の追加のほかは変えていない。
+- **状態ごとの動作:**
+  | 状態 | 動作 |
+  |---|---|
+  | A | 固定のコマンドで `migrate deploy` を1回だけ起動する。終了コードが0なら、別の接続で再判定する（本人確認を含む）。C なら成功。A のまま・B なら `POST_MIGRATION_STATE_MISMATCH`、再判定そのものの失敗なら `POST_MIGRATION_CHECK_FAILED`。終了コードが0でない・起動できないなら `MIGRATION_FAILED` で、再判定はしない |
+  | B | 理由を表示して `DATABASE_STATE_INCONSISTENT` で止まる。Prisma CLI は起動しない |
+  | C | Prisma CLI を起動せずに成功する。表示は「schema diff not verified; Step 3-12」で、スキーマの完全一致とは表示しない |
+  | 判定の失敗 | 接続・本人確認・SQL・search_path の固定・接続を閉じる処理の失敗は、`STATE_CHECK_FAILED` で止まる。A・B・C のどれとも扱わず、Prisma CLI は起動しない。メッセージには元のエラーのコードだけを含める（想定外の例外は `unknown`） |
+  - どの場合も、reset・自動復旧・migration の再実行はしない。失敗のメッセージには「Nothing was reset」を含める。
+- **強制停止の維持:**
+  - `IDENTITY_CHECK_NOT_IMPLEMENTED` を `TESTDB_MIGRATION_LIVE_DISABLED` に置き換えた。
+  - `runTestDbMigrate()` は、`liveDatabase` が `{ mode: "enabled", classifyDatabase }` のときだけ判定に進む。それ以外は、すべての検証の後、接続と Prisma CLI の起動の前に止まる。
+  - スクリプトは `liveDatabase: LIVE_DATABASE_DISABLED`（凍結した定数）を固定で渡す。環境変数・引数では変えられない。
+  - スクリプトは、接続の部品（`testDbConnection.ts`・`createTestDatabaseClassifier`・`pg`）を読み込まない。
+  - 単体テストでは、上の2点と globalSetup の強制停止を、コメントを除いたソースで確かめる。
+  - **接続を有効にするには、スクリプトのコードの変更が必要**（`liveDatabase: { mode: "enabled", classifyDatabase: createTestDatabaseClassifier({ root, connect: connectTestDatabase }) }`）。これは承認を得た後続の工程で行う。
+  - 偽の依存関係は、`runTestDbMigrate()` の引数でしか渡せない。スクリプトは、外部の入力から依存関係を作らない。
+- **接続と子プロセスの分け方:**
+  - `createTestDatabaseClassifier({ root, connect })` は、作るときに `schema.prisma`・`prisma/migrations` から期待値を読む（接続しない）。呼ぶたびに `classifyTestDatabase()` で1回だけ接続する。
+  - 接続は `connectTestDatabase()` を再利用する。`pg` を読み込むファイルは増やしていない。
+  - 判定には、検証済みの `.env.test` の URL だけを渡す。migration の前と後で同じ値を使い、別のURLへの接続し直しはしない。
+  - 接続は次の3つで、それぞれ別。
+    1. migration の前の判定（読み取り専用。終わったら閉じる）。
+    2. Prisma CLI（子プロセスが自分で作る。`DATABASE_URL` は同じ検証済みの値）。
+    3. migration の後の判定（読み取り専用）。
+- **TOCTOU のリスク（残る）:**
+  - 1の判定を閉じてから2の Prisma CLI が接続するまでの間に、DBの中身や、`127.0.0.1:5434` で応答するサーバーが変わる可能性がある（コンテナの入れ替えなど）。
+  - 対策：
+    - 3で本人確認と C をもう一度確かめる。
+    - ポートは `127.0.0.1` にだけ公開している。
+    - 間隔は短い。
+  - 防げないこと：2の時点で別のDBに migration が適用されること。そのDBが本人確認に通らない限り、3で失敗として検出する。
+  - 親のプロセスでロックを持ち続けても、Prisma CLI の接続を制御できないので、使っていない。
+- **search_path の確認結果:**
+  - カタログは、すべて `pg_catalog.` で修飾していた。`public` のテーブルは `"public"."名前"` で修飾し、名前は `quoteIdentifier()`（英数字と `_` だけ）で検証してから引用していた。URL などの外部の入力は、SQL に連結していない（定数とカタログで照合した名前だけ）。
+  - 問題：関数（`current_database()`・`shobj_description()`・`inet_server_port()`・`count`）と演算子（`=`・`<>`・`>=`・`LIKE`）は、修飾していなかった。
+    - ロール・DBの設定で `search_path` が `public, pg_catalog` のように pg_catalog を後ろに置いていると、public に作られた同名の関数・演算子が先に使われ、判定を偽れる。
+  - 修正（状態の判定だけ）：
+    - `BEGIN READ ONLY` の直後に `SELECT pg_catalog.set_config('search_path', 'pg_catalog', true)` を実行する。トランザクションの中だけ有効で、ROLLBACK で戻る。DBは変更しない。
+    - 戻り値が `pg_catalog` であることを確かめ、違えば `SEARCH_PATH_NOT_PINNED` で止まる。
+    - `count` は `pg_catalog.count` に修飾した。
+    - 一時スキーマはリレーションの解決では先に探されるが、検査の SQL のリレーションは、すべて修飾している。
+  - 追加したテスト：
+    - search_path の固定が本人確認より前に行われること。
+    - 固定に失敗したら止まること（戻り値の違い・SQL の失敗）。
+    - FROM・JOIN の対象がすべて `pg_catalog.pg_*` か `"public"."…"` で、URL を含まないこと。
+  - 対応していないもの：既存の `verifyIntegrationDatabase()`（統合テストの globalSetup 用）は固定していない。既存の54件のテストを変えないため。globalSetup に組み込むときに、同じ固定を加える。
+  - **実DB接続を有効にする前の必須の確認：** PostgreSQL 15 で、読み取り専用トランザクションの中の `set_config(..., true)` が成功し、`pg_catalog` を返すこと。
+- **追加したテストと結果:**
+  - `testDbMigrate.test.ts` は26件増えた。
+    - A→C の正常な流れ（呼び出しの順序、判定の引数、`migrate deploy` 1回）。
+    - B・C で Prisma CLI を起動しないこと。
+    - migration の前の判定の6種類の失敗。
+    - `migrate deploy` の失敗と、起動の失敗。
+    - A→A・A→B の異常な遷移。
+    - migration の後の本人確認・カタログ・接続を閉じる処理の失敗。
+    - 親のプロセスの `PGHOST`・`PGPASSWORD`・`PGOPTIONS`・`DOTENV_CONFIG_PATH` の拒否。
+    - 強制停止（実行経路、前の検証の失敗が先に出ること、定数の凍結、スクリプトと globalSetup のソース）。
+    - `createTestDatabaseClassifier` が作るときに接続せず、開発用の URL では接続せずに拒否すること。
+    - 確認モードの表示。
+  - 既存のテストのうち、動作が変わったものに合わせて直したもの（どれも条件を厳しくする方向）：
+    - 終了コードを返す → `MIGRATION_FAILED` で止まる。
+    - 親の `PG*`・`DOTENV_*` を落として続ける → 拒否する。
+    - 確認モードで親の `PGHOST` を許す → 拒否する。
+  - `testDbState.test.ts` は7件増えた（84→91件）。
+  - パスワードの検証（見本の値・不一致・文字種など）の既存のテストは、そのまま成功した。
+- **確認済み:**
+  - `npx tsc --noEmit` が成功した。変更した6ファイルの `eslint` も成功した。`git diff --check` は0件。
+  - `npm test` は31ファイル・1065件がすべて成功した（1032件＋33件）。
+  - `dbConnectionPaths.test.ts` は152件が成功し、静的検査の違反は0件（許可リストは変えていない）。
+  - `npx vitest list --filesOnly` は31件で、`*.integration.test.*` は0件。統合テスト用の設定では6件。
+- **未実施・未検証のまま残ること:**
+  - 実DBへの接続（強制停止の解除は、承認を得た後続の工程）。
+    - 3-10B の「初回の実DB接続のときに確かめること」5項目。
+    - 上の search_path の確認。
+    - A→`migrate deploy`→C の実際の流れ。
+  - globalSetup への組み込みと、`verifyIntegrationDatabase()` の search_path の固定。
+  - `prisma migrate diff` による定義の照合（Step 3-12）。
+  - `reset`（未実装）。
+  - TOCTOU（上記）。
+  - 実際の `up`・`down`、R7、Compose のラベル、tmpfs の実際の表し方（Step 3-10A から引き続き）。
+- **commit の前の最終の安全性レビュー（ユーザーの指示による。2026-11-05。コードの変更なし）:**
+  - 前提：HEAD `daf5c8b`、`.env.test` なし。globalSetup・接続先のガード（`lib/db/`）・`integrationEnv.ts`・`testDbConnection.ts`・`dbConnectionPaths.test.ts`・`prisma.config.ts` は、HEAD から変わっていない。
+  - **実行ゲート:** 問題なし。
+    - スクリプトは `liveDatabase: LIVE_DATABASE_DISABLED`（凍結した定数）だけを渡す。
+      - `process.env`・`process.argv` は、親の環境変数と引数として渡すだけで、許可の値には使わない。
+      - `createTestDatabaseClassifier`・`connectTestDatabase` の名前は、ヘッダーのコメントにしか現れない。
+    - `runTestDbMigrate()` の中の順序は次のとおり。
+      1. 確認モードの終了（DBに接続しない）
+      2. 許可の確認（`liveDatabase.mode !== "enabled"` なら `TESTDB_MIGRATION_LIVE_DISABLED`）
+      3. 最初の判定（接続）
+      4. `spawn`
+      - そのため、無効のときは、接続と Prisma CLI の起動の両方より前に止まる。
+    - 有効な判定の関数を渡しているのは単体テストだけ。`createTestDatabaseClassifier` と `connectTestDatabase` を組み合わせて呼ぶコードはない。
+    - import した時点では、`testDbMigrate.ts`・`testDbState.ts` は定数の定義だけで、接続も子プロセスの起動もしない。`pg` を読み込むのは `testDbConnection.ts` だけ（静的検査で確認）。
+    - globalSetup の強制停止は変わっていない。
+  - **search_path と SQL の順序:** 問題なし。`classifyTestDatabase()` の SQL は次の順に実行する。
+    1. 接続（1回）
+    2. `BEGIN READ ONLY`
+    3. `pg_catalog.set_config('search_path', 'pg_catalog', true)`（戻り値が `pg_catalog` でなければ `SEARCH_PATH_NOT_PINNED` で止まり、本人確認に進まない）
+    4. `SHOW transaction_read_only`
+    5. 本人確認
+    6. カタログの6つの一覧
+    7. C の候補のときだけ、migration の履歴と空DB検査
+    8. ROLLBACK
+    9. `end()`
+    - 失敗しても、ROLLBACK（BEGIN の後なら）と `end()` は必ず行う。
+    - `public` のテーブルは `"public"."名前"` で修飾し、名前は検証してから引用する。システムカタログは `pg_catalog.` で修飾する。
+  - **A・B・C とエラーの扱い:** 3-10C の記録のとおりで、問題なし。
+    - A は `migrate deploy` を1回だけ起動し、別の接続で本人確認を含めて再判定する。C でなければ失敗する。
+    - B・C は Prisma CLI を起動しない。C は「schema diff not verified」と表示する。
+    - 判定の失敗は、どれも成功とは扱わない。別のURLへは接続し直さない。メッセージにはコードだけを含める。自動の修復・reset はない。
+  - **最終の確認:**
+    - `npx tsc --noEmit` が成功した。変更した6つのTSファイルの `eslint` も成功した。`git diff --check` は0件。
+    - `npm test` は31ファイル・1065件がすべて成功した。
+    - `dbConnectionPaths.test.ts` は152件で、違反は0件。
+    - `npx vitest list --filesOnly` は31件で、統合テストは0件。統合テスト用の設定では6件。
+    - DBへの接続・Dockerの操作・Prisma CLI の起動は、行っていない。
+  - **実DBで確かめていないこと（検証済みではない）:**
+    - PostgreSQL 15 での SQL の実際の動作。
+    - search_path の固定の実際の動作。
+    - 実際の A→`migrate deploy`→C。
+    - TOCTOU のリスク。
+    - `prisma migrate diff`（Step 3-12）。
+    - globalSetup への組み込み。
+    - 実際の Docker の `up`・`down`。
+    - R7。
+    - `reset`（未実装）。
+  - commit は `test: integrate guarded migration state checks`（親は `daf5c8b`。hash は次のセッションで記録する）。
 
 全Stepに共通する事項:
 
@@ -1614,17 +1772,17 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：`test: classify test database migration states safely`（Step 3-10B。親は `8471705`）。hash は `git log -1` で確かめ、3-Aの表の3-10Bの行と、3-10Bの記録の「最終の確認」に記録する（この記録は、次の作業とあわせてcommitする）
+   - HEAD：`test: integrate guarded migration state checks`（Step 3-10C。親は `daf5c8b`）。hash は `git log -1` で確かめ、3-Aの表の3-10Cの行と、3-10Cの最終の安全性レビューの記録に記入する（この記録は、次の作業とあわせてcommitする）
    - 変更済み（未commit）：なし
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
    - `.env.test` は存在しない（Step 3-7B・3-8B・3-9B・3-9C と、`61f8105` のcommit前の検証で作った一時ファイルは、すべて削除済み）
 3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。**実際の `up`・`down` は、まだ一度も実行していない。R7 も未検証。** Step 3-10の実施前レビューの結果（3-Aの「Step 3-10の実施前レビュー」）を先に読む。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
    - Step 3-10（ユーザーによる `.env.test` の作成と、3つの確認モードの実行）
    - 初回の up の前のチェックリストの確認
-   - `testdb-migrate` の手順8への状態判定の組み込み（3-Aの3-10Bの「組み込みの設計」に従う。強制停止の解除を含むので、ユーザーの承認を得てから。実DBでの検証は別工程）
+   - 実DBへの接続の有効化（スクリプトの `liveDatabase` の変更。3-Aの3-10Cの「強制停止の維持」。ユーザーの承認を得てから。実DBでの検証と、その前の必須の確認を含む）
    - `reset` の実装（本人確認の後）
 
-   コンテナの起動（Step 3-11）と、R7の確認は、まだ行っていない。接続後の本人確認と状態の判定は Step 3-10B で実装して commit したが（初回の実DB接続で確かめることは、3-Aの3-10Bの記録）、migration用スクリプト・globalSetup には、まだ組み込んでいない（どちらも強制停止のまま）。指示されたStep以外には着手しない。
+   コンテナの起動（Step 3-11）と、R7の確認は、まだ行っていない。接続後の本人確認と状態の判定は Step 3-10B で実装して commit し、Step 3-10C で migration 用スクリプトの流れに組み込んだ。ただし、スクリプトの実DBへの接続の許可は固定で無効で、通常実行モードは接続の前に必ず止まる。globalSetup には組み込んでおらず、強制停止のまま（初回の実DB接続で確かめることは、3-Aの3-10B・3-10Cの記録）。指示されたStep以外には着手しない。
 4. Stepが終わったら報告し、ユーザーの確認を得たうえで、次の2つを更新してからセッションを終える。
    - 3章の「3-A. 実施結果」（結果、設計との違い、未検証の事項、次のStepへの申し送り）
    - 本節の手順2の想定と、手順3の次のStep

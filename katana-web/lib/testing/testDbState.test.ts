@@ -62,6 +62,8 @@ function migratedInventory(): CatalogInventory {
 
 type FakeDb = {
   readOnly: string;
+  /** set_config の戻り値（search_path の固定の結果） */
+  searchPath: string;
   identity: Record<string, unknown>[];
   inventory: CatalogInventory;
   migrations: Record<string, unknown>[];
@@ -76,6 +78,7 @@ const finished = (name: string) => ({ name, finished: true, rolledBack: false })
 function db(inventory: CatalogInventory = migratedInventory()): FakeDb {
   return {
     readOnly: "on",
+    searchPath: "pg_catalog",
     identity: [
       { database: "katana_test", currentUser: "katana_test_user", sessionUser: "katana_test_user", marker: TEST_DATABASE_MARKER, serverPort: 5432 },
     ],
@@ -96,6 +99,7 @@ function fakeConnection(state: FakeDb) {
     const { inventory } = state;
     if (statement === "BEGIN READ ONLY") return ["BEGIN", []];
     if (statement === "ROLLBACK") return ["ROLLBACK", []];
+    if (statement.includes("set_config('search_path'")) return ["PIN", [{ searchPath: state.searchPath }]];
     if (statement === "SHOW transaction_read_only") return ["SHOW", [{ transaction_read_only: state.readOnly }]];
     if (statement.includes("current_database()")) return ["IDENTITY", state.identity];
     if (statement.includes("pg_catalog.pg_operator")) return ["OTHER", inventory.otherObjects];
@@ -199,7 +203,7 @@ describe("classifyTestDatabase：本人確認", () => {
   it("本人確認に成功し、migration 前の完全に空のDBを A と判定する。SELECT だけを行い、ROLLBACK して接続を閉じる", async () => {
     const { value, log, connect, endedCount } = input(db(emptyInventory()));
     await expect(classifyTestDatabase(value)).resolves.toEqual({ state: "A" });
-    expect(log).toEqual(["CONNECT test-url", "BEGIN", "SHOW", "IDENTITY", "SCHEMAS", "EXTENSIONS", "RELATIONS", "TYPES", "ROUTINES", "OTHER", "ROLLBACK"]);
+    expect(log).toEqual(["CONNECT test-url", "BEGIN", "PIN", "SHOW", "IDENTITY", "SCHEMAS", "EXTENSIONS", "RELATIONS", "TYPES", "ROUTINES", "OTHER", "ROLLBACK"]);
     expect(connect).toHaveBeenCalledTimes(1);
     expect(endedCount()).toBe(1);
   });
@@ -216,9 +220,45 @@ describe("classifyTestDatabase：本人確認", () => {
     const { value, log, endedCount } = input(state);
     const error = await failureOf(value);
     expect(error).toMatchObject({ code });
-    expect(log).toEqual(["CONNECT test-url", "BEGIN", "SHOW", "IDENTITY", "ROLLBACK"]);
+    expect(log).toEqual(["CONNECT test-url", "BEGIN", "PIN", "SHOW", "IDENTITY", "ROLLBACK"]);
     expect(endedCount()).toBe(1);
     expect(error.message).not.toMatch(/postgres"|katana-dev-db|"katana"/);
+  });
+
+  it.each([["public, pg_catalog"], ['"$user", public'], [""]])(
+    "search_path を pg_catalog に固定できなかった（戻り値 %j）場合は、本人確認の前に拒否する",
+    async (searchPath) => {
+      const { value, log, endedCount } = input({ ...db(emptyInventory()), searchPath });
+      await expect(classifyTestDatabase(value)).rejects.toMatchObject({ code: "SEARCH_PATH_NOT_PINNED" });
+      expect(log).toEqual(["CONNECT test-url", "BEGIN", "PIN", "ROLLBACK"]);
+      expect(endedCount()).toBe(1);
+    },
+  );
+
+  it("search_path の固定は、トランザクションの中だけ有効な set_config で行う（SET 文・セッション全体の変更は使わない）", async () => {
+    const { value, statements } = input(db(emptyInventory()));
+    await classifyTestDatabase(value);
+    expect(statements[1]).toBe(`SELECT pg_catalog.set_config('search_path', 'pg_catalog', true) AS "searchPath"`);
+  });
+
+  it("search_path の固定の SQL が失敗したら、QUERY_FAILED で止まり、本人確認に進まない", async () => {
+    const { value, log } = input({ ...db(emptyInventory()), failOn: /set_config/ });
+    await expect(classifyTestDatabase(value)).rejects.toMatchObject({ code: "QUERY_FAILED" });
+    expect(log).not.toContain("IDENTITY");
+  });
+
+  it("検査の SQL は、テーブル・カタログをすべてスキーマで修飾し、外部の入力（URL など）を含まない", async () => {
+    for (const state of [db(emptyInventory()), db()]) {
+      const { value, statements } = input(state);
+      await classifyTestDatabase(value);
+      for (const sql of statements) {
+        for (const match of sql.matchAll(/\b(?:FROM|JOIN)\s+(?!\()([^\s)]+)/g)) {
+          expect(match[1]).toMatch(/^(pg_catalog\.pg_[a-z_]+|"public"\."[A-Za-z0-9_]+")$/);
+        }
+        expect(sql).not.toContain("127.0.0.1");
+        expect(sql).not.toContain("katana_test_user:");
+      }
+    }
   });
 
   it("トランザクションが読み取り専用でない場合は拒否する", async () => {
@@ -317,7 +357,7 @@ describe("classifyTestDatabase：C（全件適用済み）", () => {
       migrations: MIGRATIONS,
       schemaDiff: "not-verified",
     });
-    expect(log.slice(0, 11)).toEqual(["CONNECT test-url", "BEGIN", "SHOW", "IDENTITY", "SCHEMAS", "EXTENSIONS", "RELATIONS", "TYPES", "ROUTINES", "OTHER", "MIGRATIONS"]);
+    expect(log.slice(0, 12)).toEqual(["CONNECT test-url", "BEGIN", "PIN", "SHOW", "IDENTITY", "SCHEMAS", "EXTENSIONS", "RELATIONS", "TYPES", "ROUTINES", "OTHER", "MIGRATIONS"]);
     expect(log.filter((entry) => entry.startsWith("EXISTS"))).toEqual(TABLES.map((name) => `EXISTS ${name}`));
     expect(log.at(-1)).toBe("ROLLBACK");
     expect(endedCount()).toBe(1);
@@ -401,6 +441,7 @@ describe("classifyTestDatabase：検査の失敗（fail-closed）と接続の解
     ["migration の履歴", /"_prisma_migrations"/],
     ["空DB検査", /SELECT EXISTS/],
     ["本人確認", /current_database\(\)/],
+    ["search_path の固定", /set_config/],
   ])("%sのSQLが失敗したら、B と断定せずに QUERY_FAILED で止め、ROLLBACK して接続を閉じる", async (_label, failOn) => {
     const { value, log, endedCount } = input({ ...db(), failOn });
     const error = await failureOf(value);
