@@ -42,6 +42,10 @@ import {
  * C の限界: 列・型の中身・インデックスの定義・制約が schema.prisma と一致することは保証しない
  * （Step 3-12 の `prisma migrate diff` で照合する。まだ実施していない）。
  *
+ * 権限（Step 3-11D）：inspectTestDatabase は、同じ読み取り専用のトランザクションの中で、本人確認の後に
+ * migration に必要な権限（public の USAGE・CREATE、DBの所有者、DBの CREATE）も読む。権限は状態 A・B・C とは別の結果で、
+ * 権限が足りなくても状態の判定は変わらない（B にはしない）。不足をどう扱うかは、呼び出し側が決める。
+ *
  * 例外・判定の理由には、接続URL・パスワード・ドライバの元のエラーメッセージを含めない（SQLSTATE などのコードと、オブジェクトの名前だけ）。
  */
 
@@ -198,6 +202,53 @@ export type ClassifyTestDatabaseInput = {
   connect: (databaseUrl: string) => Promise<IntegrationDbClient>;
 };
 
+/** migration に必要な権限（current_user = katana_test_user から見た値） */
+export type TestDatabasePrivileges = {
+  /** public スキーマの USAGE */
+  publicUsage: boolean;
+  /** public スキーマの CREATE（テーブル・型・インデックス・_prisma_migrations を作る） */
+  publicCreate: boolean;
+  /** current_user が、接続しているDBの所有者（初期化スクリプトの設計。PostgreSQL 15 の public の CREATE は所有者だけにある） */
+  databaseOwner: boolean;
+  /** 接続しているDBの CREATE（所有者には既定である。今の migration の SQL には不要だが、所有者の設計の確認として必須にする） */
+  databaseCreate: boolean;
+};
+
+export type TestDatabaseInspection = { state: TestDatabaseState; privileges: TestDatabasePrivileges };
+
+const PRIVILEGE_KEYS = ["publicUsage", "publicCreate", "databaseOwner", "databaseCreate"] as const satisfies readonly (keyof TestDatabasePrivileges)[];
+
+/**
+ * 権限を読む（SELECT だけ。search_path を固定し、本人確認に通った後にだけ呼ぶ）。
+ * 2引数の has_*_privilege は current_user で評価する。DBの所有者は pg_database.datdba で照合する。
+ */
+export const PRIVILEGES_SQL = `SELECT pg_catalog.has_schema_privilege('public', 'USAGE') AS "publicUsage",
+            pg_catalog.has_schema_privilege('public', 'CREATE') AS "publicCreate",
+            pg_catalog.pg_get_userbyid(d.datdba) = current_user AS "databaseOwner",
+            pg_catalog.has_database_privilege(d.oid, 'CREATE') AS "databaseCreate"
+       FROM pg_catalog.pg_database d
+      WHERE d.datname = pg_catalog.current_database()`;
+
+export async function readTestDatabasePrivileges(client: IntegrationDbClient): Promise<TestDatabasePrivileges> {
+  const rows = await select(client, "privilege query", PRIVILEGES_SQL);
+  const [row] = rows;
+  // 1行で、4つとも真偽値であること（読めない値を「権限あり」とは扱わない）
+  if (rows.length !== 1 || !PRIVILEGE_KEYS.every((key) => typeof row[key] === "boolean")) {
+    throw new IntegrationDatabaseCheckError("PRIVILEGES_UNAVAILABLE", "the migration privileges could not be read.");
+  }
+  return {
+    publicUsage: row.publicUsage as boolean,
+    publicCreate: row.publicCreate as boolean,
+    databaseOwner: row.databaseOwner as boolean,
+    databaseCreate: row.databaseCreate as boolean,
+  };
+}
+
+/** 足りない権限の名前（すべてあれば空） */
+export function missingMigrationPrivileges(privileges: TestDatabasePrivileges): string[] {
+  return PRIVILEGE_KEYS.filter((key) => privileges[key] !== true);
+}
+
 /** 検査のトランザクションの中だけ、search_path を pg_catalog に固定する（ROLLBACK で元に戻る） */
 export const PIN_SEARCH_PATH_SQL = `SELECT pg_catalog.set_config('search_path', 'pg_catalog', true) AS "searchPath"`;
 
@@ -348,12 +399,8 @@ function normalizeExpectation(expected: TestDatabaseExpectation): TestDatabaseEx
   return { tables, enums, migrations };
 }
 
-/**
- * テストDBに接続し、本人確認の後、状態 A・B・C を判定する。DBは変更しない。
- * 本人確認・SQL・接続に失敗したら、状態を返さずに IntegrationDatabaseCheckError を投げる。
- */
-export async function classifyTestDatabase(input: ClassifyTestDatabaseInput): Promise<TestDatabaseState> {
-  // 1：接続する前に、期待値と接続先を検証する（呼び出し側の検証に加えて、もう一度）
+/** 1：接続する前に、期待値と接続先を検証する（呼び出し側の検証に加えて、もう一度） */
+function prepareCheck(input: ClassifyTestDatabaseInput): TestDatabaseExpectation {
   const expected = normalizeExpectation(input.expected);
   try {
     assertTestDatabaseTarget({ databaseUrl: input.databaseUrl, env: {}, developmentDatabaseUrl: input.developmentDatabaseUrl });
@@ -363,29 +410,57 @@ export async function classifyTestDatabase(input: ClassifyTestDatabaseInput): Pr
     }
     throw error;
   }
+  return expected;
+}
 
+/**
+ * テストDBに接続し、本人確認の後、状態 A・B・C を判定する。DBは変更しない。
+ * 本人確認・SQL・接続に失敗したら、状態を返さずに IntegrationDatabaseCheckError を投げる。
+ */
+export async function classifyTestDatabase(input: ClassifyTestDatabaseInput): Promise<TestDatabaseState> {
+  const expected = prepareCheck(input);
   // 2〜7
   return runReadOnlyCheck(input.connect, input.databaseUrl, async (client): Promise<TestDatabaseState> => {
     await pinSearchPath(client); // 3
     await assertDatabaseIdentity(client); // 4：失敗したら throw され、状態の判定に進まない
-    const inventory = await readCatalogInventory(client); // 5
-    const structural = classifyCatalogInventory(inventory, expected); // 6
-    if (structural.state !== "C-candidate") return structural;
-
-    const history = compareMigrationHistory(await readMigrationHistory(client), expected.migrations);
-    if (!history.matches) {
-      return {
-        state: "B",
-        reasons: [
-          `migration history does not match (missing: ${history.missing.length}, extra: ${history.extra.length}, ` +
-            `failed or rolled back: ${history.notApplied}, duplicated: ${history.duplicated ? "yes" : "no"})`,
-          ...listed("missing migrations", history.missing),
-          ...listed("unexpected migrations", history.extra),
-        ],
-      };
-    }
-    const nonEmpty = await findNonEmptyTables(client, expected.tables);
-    if (nonEmpty.length > 0) return { state: "B", reasons: listed("tables are not empty", nonEmpty) };
-    return { state: "C", tables: [...expected.tables], migrations: [...expected.migrations], schemaDiff: "not-verified" };
+    return classifyAfterIdentity(client, expected);
   });
+}
+
+/**
+ * classifyTestDatabase と同じ手順で、本人確認の後に権限も読む（同じ読み取り専用のトランザクション）。
+ * 状態の判定は classifyTestDatabase と同じ（権限は判定に影響しない）。権限の SQL が失敗したら、状態を返さずに throw する。
+ */
+export async function inspectTestDatabase(input: ClassifyTestDatabaseInput): Promise<TestDatabaseInspection> {
+  const expected = prepareCheck(input);
+  return runReadOnlyCheck(input.connect, input.databaseUrl, async (client): Promise<TestDatabaseInspection> => {
+    await pinSearchPath(client);
+    await assertDatabaseIdentity(client); // 失敗したら throw され、権限の検査・状態の判定に進まない
+    const privileges = await readTestDatabasePrivileges(client);
+    const state = await classifyAfterIdentity(client, expected);
+    return { state, privileges };
+  });
+}
+
+/** 5〜6：本人確認の後の、カタログの一覧の取得と状態の判定 */
+async function classifyAfterIdentity(client: IntegrationDbClient, expected: TestDatabaseExpectation): Promise<TestDatabaseState> {
+  const inventory = await readCatalogInventory(client); // 5
+  const structural = classifyCatalogInventory(inventory, expected); // 6
+  if (structural.state !== "C-candidate") return structural;
+
+  const history = compareMigrationHistory(await readMigrationHistory(client), expected.migrations);
+  if (!history.matches) {
+    return {
+      state: "B",
+      reasons: [
+        `migration history does not match (missing: ${history.missing.length}, extra: ${history.extra.length}, ` +
+          `failed or rolled back: ${history.notApplied}, duplicated: ${history.duplicated ? "yes" : "no"})`,
+        ...listed("missing migrations", history.missing),
+        ...listed("unexpected migrations", history.extra),
+      ],
+    };
+  }
+  const nonEmpty = await findNonEmptyTables(client, expected.tables);
+  if (nonEmpty.length > 0) return { state: "B", reasons: listed("tables are not empty", nonEmpty) };
+  return { state: "C", tables: [...expected.tables], migrations: [...expected.migrations], schemaDiff: "not-verified" };
 }

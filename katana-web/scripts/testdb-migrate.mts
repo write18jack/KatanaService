@@ -16,8 +16,9 @@
  *
  * 読み取り専用の検証モード（--verify）だけは、実DBへの接続を許可する（Step 3-11B で個別の承認を得て有効化）。
  * 許可は migration 用とは別の readOnlyDatabase で、コードに固定している（環境変数・引数では変えられない）。
- * 接続の部品（connectTestDatabase・createTestDatabaseClassifier）は、--verify の判定が呼ばれたときにだけ使う。
- * 判定は BEGIN READ ONLY の中の SELECT・SHOW と ROLLBACK だけで、Prisma CLI は起動しない（lib/testing/testDbMigrate.ts）。
+ * 接続の部品（connectTestDatabase・createTestDatabaseInspector）は、--verify の判定が呼ばれたときにだけ使う。
+ * 判定（状態 A・B・C と、migration に必要な権限の読み取り）は BEGIN READ ONLY の中の SELECT・SHOW と ROLLBACK だけで、
+ * Prisma CLI は起動しない（lib/testing/testDbMigrate.ts）。
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -25,7 +26,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { IntegrationRunnerError, readEnvFile } from "../lib/testing/integrationEnv.ts";
 import { connectTestDatabase } from "../lib/testing/testDbConnection.ts";
-import { createTestDatabaseClassifier, LIVE_DATABASE_DISABLED, runTestDbMigrate, TestDbMigrateError } from "../lib/testing/testDbMigrate.ts";
+import { createTestDatabaseInspector, LIVE_DATABASE_DISABLED, runTestDbMigrate, TestDbMigrateError } from "../lib/testing/testDbMigrate.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -43,7 +44,7 @@ runTestDbMigrate({
   // 期待値のファイルの読み込みと接続は、--verify の判定が呼ばれたときにだけ行う
   readOnlyDatabase: {
     mode: "enabled-read-only",
-    classifyDatabase: (input) => createTestDatabaseClassifier({ root: ROOT, connect: connectTestDatabase })(input),
+    inspectDatabase: (input) => createTestDatabaseInspector({ root: ROOT, connect: connectTestDatabase })(input),
   },
   spawn: (command, args, options) =>
     new Promise((resolve, reject) => {

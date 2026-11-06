@@ -10,6 +10,9 @@ import {
   classifyTestDatabase,
   type ClassifyTestDatabaseInput,
   enumNamesFromSchema,
+  inspectTestDatabase,
+  missingMigrationPrivileges,
+  PRIVILEGES_SQL,
   type TestDatabaseExpectation,
 } from "./testDbState";
 
@@ -68,6 +71,8 @@ type FakeDb = {
   inventory: CatalogInventory;
   migrations: Record<string, unknown>[];
   nonEmpty: Set<string>;
+  /** 権限の SQL の応答（inspectTestDatabase だけが読む） */
+  privileges: Record<string, unknown>[];
   /** この正規表現に一致するSQLで、ドライバのエラーを投げる */
   failOn?: RegExp;
   failEnd?: boolean;
@@ -85,6 +90,7 @@ function db(inventory: CatalogInventory = migratedInventory()): FakeDb {
     inventory,
     migrations: MIGRATIONS.map(finished),
     nonEmpty: new Set(),
+    privileges: [{ publicUsage: true, publicCreate: true, databaseOwner: true, databaseCreate: true }],
   };
 }
 
@@ -101,6 +107,7 @@ function fakeConnection(state: FakeDb) {
     if (statement === "ROLLBACK") return ["ROLLBACK", []];
     if (statement.includes("set_config('search_path'")) return ["PIN", [{ searchPath: state.searchPath }]];
     if (statement === "SHOW transaction_read_only") return ["SHOW", [{ transaction_read_only: state.readOnly }]];
+    if (statement.includes("has_schema_privilege")) return ["PRIVILEGES", state.privileges];
     if (statement.includes("current_database()")) return ["IDENTITY", state.identity];
     if (statement.includes("pg_catalog.pg_operator")) return ["OTHER", inventory.otherObjects];
     if (statement.includes("pg_catalog.pg_type t")) return ["TYPES", inventory.types];
@@ -554,6 +561,108 @@ describe("classifyTestDatabase：検査の失敗（fail-closed）と接続の解
         expect(sql).toMatch(/^(SELECT|SHOW|BEGIN READ ONLY$|ROLLBACK$)/);
         expect(sql).not.toMatch(/\b(TRUNCATE|DELETE|DROP|CREATE|ALTER|INSERT|UPDATE|GRANT|REVOKE|COMMENT|SET|COPY|LOCK|VACUUM|CALL|DO)\b/i);
         expect(sql).not.toContain(";");
+      }
+    }
+  });
+});
+
+describe("inspectTestDatabase：migration に必要な権限（Step 3-11D）", () => {
+  const ALL = { publicUsage: true, publicCreate: true, databaseOwner: true, databaseCreate: true };
+
+  it("本人確認の後、カタログの一覧の前に、同じ読み取り専用のトランザクションで権限を読む", async () => {
+    const { value, log, endedCount } = input(db(emptyInventory()));
+    await expect(inspectTestDatabase(value)).resolves.toEqual({ state: { state: "A" }, privileges: ALL });
+    expect(log.slice(0, 6)).toEqual(["CONNECT test-url", "BEGIN", "PIN", "SHOW", "IDENTITY", "PRIVILEGES"]);
+    expect(log.at(-1)).toBe("ROLLBACK");
+    expect(endedCount()).toBe(1);
+  });
+
+  it.each([
+    ["public USAGE", { publicUsage: false }, ["publicUsage"]],
+    ["public CREATE", { publicCreate: false }, ["publicCreate"]],
+    ["DBの所有者", { databaseOwner: false }, ["databaseOwner"]],
+    ["DBの CREATE", { databaseCreate: false }, ["databaseCreate"]],
+    ["すべて", { publicUsage: false, publicCreate: false, databaseOwner: false, databaseCreate: false }, ["publicUsage", "publicCreate", "databaseOwner", "databaseCreate"]],
+  ])("%s が不足していても、状態の判定は変わらない（A・C・B のどれでも）", async (_label, lacking, missing) => {
+    const cases: [CatalogInventory, string][] = [
+      [emptyInventory(), "A"],
+      [migratedInventory(), "C"],
+      [{ ...emptyInventory(), relations: [rel("Shop")] }, "B"],
+    ];
+    for (const [inventory, expectedState] of cases) {
+      const state = { ...db(inventory), privileges: [{ ...ALL, ...lacking }] };
+      const plain = await classifyTestDatabase(input(state).value);
+      const inspected = await inspectTestDatabase(input(state).value);
+      expect(inspected.state).toEqual(plain);
+      expect(inspected.state.state).toBe(expectedState);
+      expect(missingMigrationPrivileges(inspected.privileges)).toEqual(missing);
+    }
+  });
+
+  it("すべての権限があれば、不足は空", () => {
+    expect(missingMigrationPrivileges(ALL)).toEqual([]);
+  });
+
+  it.each([
+    ["0行", []],
+    ["2行", [ALL, ALL]],
+    ["真偽値でない値（文字列の 't'）", [{ ...ALL, publicCreate: "t" }]],
+    ["NULL", [{ ...ALL, databaseOwner: null }]],
+    ["項目の不足", [{ publicUsage: true, publicCreate: true, databaseOwner: true }]],
+  ])("権限の応答が %s なら、権限ありとは扱わず PRIVILEGES_UNAVAILABLE で止まる（状態を返さない）", async (_label, rows) => {
+    const { value, log, endedCount } = input({ ...db(emptyInventory()), privileges: rows as Record<string, unknown>[] });
+    await expect(inspectTestDatabase(value)).rejects.toMatchObject({ code: "PRIVILEGES_UNAVAILABLE" });
+    expect(log).not.toContain("RELATIONS");
+    expect(log.at(-1)).toBe("ROLLBACK");
+    expect(endedCount()).toBe(1);
+  });
+
+  it("権限の SQL が失敗したら QUERY_FAILED で止まり、ドライバのメッセージを含めない", async () => {
+    const { value, log, endedCount } = input({ ...db(emptyInventory()), failOn: /has_schema_privilege/ });
+    const error = await inspectTestDatabase(value).catch((e: Error) => e);
+    expect(error).toMatchObject({ code: "QUERY_FAILED" });
+    expect((error as Error).message).toContain("privilege query failed (42501)");
+    expectNoSecrets((error as Error).message);
+    expect(log).not.toContain("RELATIONS");
+    expect(endedCount()).toBe(1);
+  });
+
+  it("本人確認に失敗したら、権限を読まない", async () => {
+    const state = db(emptyInventory());
+    state.identity = [{ ...state.identity[0], marker: null }];
+    const { value, log } = input(state);
+    await expect(inspectTestDatabase(value)).rejects.toMatchObject({ code: "MARKER_MISMATCH" });
+    expect(log).not.toContain("PRIVILEGES");
+  });
+
+  it("search_path を固定できなければ、本人確認にも権限の読み取りにも進まない", async () => {
+    const { value, log } = input({ ...db(emptyInventory()), searchPath: "public, pg_catalog" });
+    await expect(inspectTestDatabase(value)).rejects.toMatchObject({ code: "SEARCH_PATH_NOT_PINNED" });
+    expect(log).not.toContain("IDENTITY");
+    expect(log).not.toContain("PRIVILEGES");
+  });
+
+  it("権限の SQL は SELECT だけで、関数・カタログをスキーマで修飾し、外部の入力を含まない", () => {
+    const sql = PRIVILEGES_SQL.replace(/\s+/g, " ").trim();
+    expect(sql).toMatch(/^SELECT /);
+    expect(sql).not.toContain(";");
+    // 'USAGE'・'CREATE' は権限の名前の文字列。それを除いて、DBを変更する文がないこと
+    expect(sql.replace(/'[^']*'/g, "''")).not.toMatch(/\b(TRUNCATE|DELETE|DROP|CREATE|ALTER|INSERT|UPDATE|GRANT|REVOKE|COMMENT|SET|COPY|LOCK|VACUUM|CALL|DO)\b/i);
+    expect(sql).toContain("pg_catalog.has_schema_privilege('public', 'USAGE')");
+    expect(sql).toContain("pg_catalog.has_schema_privilege('public', 'CREATE')");
+    expect(sql).toContain("pg_catalog.pg_get_userbyid(d.datdba) = current_user");
+    expect(sql).toContain("pg_catalog.has_database_privilege(d.oid, 'CREATE')");
+    expect(sql).toContain("FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database()");
+    expect(sql).not.toMatch(/\$\d|katana|postgresql:/);
+  });
+
+  it("inspectTestDatabase の SQL も、SELECT・SHOW・BEGIN READ ONLY・ROLLBACK だけ", async () => {
+    for (const state of [db(emptyInventory()), db()]) {
+      const { value, statements } = input(state);
+      await inspectTestDatabase(value);
+      for (const sql of statements) {
+        expect(sql).toMatch(/^(SELECT|SHOW|BEGIN READ ONLY$|ROLLBACK$)/);
+        expect(sql.replace(/'[^']*'/g, "''")).not.toMatch(/\b(TRUNCATE|DELETE|DROP|CREATE|ALTER|INSERT|UPDATE|GRANT|REVOKE|COMMENT|COPY|LOCK|VACUUM|CALL|DO)\b/i);
       }
     }
   });

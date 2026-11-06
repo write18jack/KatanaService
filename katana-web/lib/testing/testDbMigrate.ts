@@ -18,7 +18,15 @@ import {
   TEST_DATABASE_MARKER,
 } from "./integrationDatabaseCheck.ts";
 import { DEVELOPMENT_ENV_FILE, inheritAllowedEnv, TEST_ENV_FILE } from "./integrationEnv.ts";
-import { classifyTestDatabase, enumNamesFromSchema, type TestDatabaseState } from "./testDbState.ts";
+import {
+  classifyTestDatabase,
+  enumNamesFromSchema,
+  inspectTestDatabase,
+  missingMigrationPrivileges,
+  type TestDatabaseInspection,
+  type TestDatabasePrivileges,
+  type TestDatabaseState,
+} from "./testDbState.ts";
 
 /**
  * テストDB専用の migration（scripts/testdb-migrate.mts）の本体。
@@ -34,8 +42,9 @@ import { classifyTestDatabase, enumNamesFromSchema, type TestDatabaseState } fro
  * 7. 子プロセスの環境変数の生成（作った後にもう一度検証）  8. 実行する Prisma CLI のコマンドの確認
  *    （確認モードはここで表示して終了する。DBには接続しない）
  * 実DBへの接続の許可（liveDatabase）：無効なら、ここで TESTDB_MIGRATION_LIVE_DISABLED で止まる。
- * 9〜11. 読み取り専用の接続・本人確認・状態 A・B・C の判定（classifyDatabase。接続は判定ごとに1回で、終わったら閉じる）
- * 12. A のときだけ、固定のコマンドで Prisma CLI（`migrate deploy`）を起動する。B は理由を表示して止まり、C は起動せずに成功とする
+ * 9〜11. 読み取り専用の接続・本人確認・状態 A・B・C の判定と、migration に必要な権限の読み取り（inspectDatabase。接続は判定ごとに1回で、終わったら閉じる）
+ * 12. A のときだけ、権限がすべてそろっていることを確かめてから、固定のコマンドで Prisma CLI（`migrate deploy`）を起動する
+ *     （不足なら MIGRATION_PRIVILEGES_INSUFFICIENT で止まる）。B は理由を表示して止まり、C は起動せずに成功とする
  * 13. migration の後に、別の接続でもう一度、本人確認と状態の判定を行う  14. C であることを確かめて終了する
  *
  * 読み取り専用の検証モード（`--verify`。Step 3-11B）は、1〜7を共有した後、通常実行モードとは別の経路に分かれる:
@@ -75,6 +84,7 @@ export type TestDbMigrateErrorCode =
   | "TESTDB_MIGRATION_LIVE_DISABLED"
   | "TESTDB_VERIFY_LIVE_DISABLED"
   | "VERIFY_CHECK_FAILED"
+  | "MIGRATION_PRIVILEGES_INSUFFICIENT"
   | "STATE_CHECK_FAILED"
   | "DATABASE_STATE_INCONSISTENT"
   | "MIGRATION_FAILED"
@@ -103,12 +113,14 @@ export type SpawnOptions = {
 
 /** 検証済みの接続URLで、DBの状態 A・B・C を読み取り専用で判定する（判定ごとに接続し、終わったら閉じる） */
 export type ClassifyDatabase = (input: { databaseUrl: string; developmentDatabaseUrl: string | undefined }) => Promise<TestDatabaseState>;
+/** 状態の判定と同じ読み取り専用のトランザクションで、migration に必要な権限も読む（状態の判定は ClassifyDatabase と同じ） */
+export type InspectDatabase = (input: Parameters<ClassifyDatabase>[0]) => Promise<TestDatabaseInspection>;
 
 /**
  * 実DBへの接続の許可。scripts/testdb-migrate.mts は LIVE_DATABASE_DISABLED を固定で渡す（環境変数・引数では変えられない）。
  * 有効にするのは、承認を得た後続の工程で、スクリプトのコードを変えたときだけ。単体テストは、偽の判定関数で有効にする。
  */
-export type LiveDatabaseAccess = { readonly mode: "disabled" } | { readonly mode: "enabled"; readonly classifyDatabase: ClassifyDatabase };
+export type LiveDatabaseAccess = { readonly mode: "disabled" } | { readonly mode: "enabled"; readonly inspectDatabase: InspectDatabase };
 export const LIVE_DATABASE_DISABLED: LiveDatabaseAccess = Object.freeze({ mode: "disabled" });
 
 /**
@@ -118,7 +130,7 @@ export const LIVE_DATABASE_DISABLED: LiveDatabaseAccess = Object.freeze({ mode: 
  */
 export type ReadOnlyDatabaseAccess =
   | { readonly mode: "disabled" }
-  | { readonly mode: "enabled-read-only"; readonly classifyDatabase: ClassifyDatabase };
+  | { readonly mode: "enabled-read-only"; readonly inspectDatabase: InspectDatabase };
 export const READ_ONLY_DATABASE_DISABLED: ReadOnlyDatabaseAccess = Object.freeze({ mode: "disabled" });
 
 export type TestDbMigrateDeps = {
@@ -180,13 +192,36 @@ export function createTestDatabaseClassifier(input: {
   root: string;
   connect: (databaseUrl: string) => Promise<IntegrationDbClient>;
 }): ClassifyDatabase {
-  const schemaSource = readFileSync(path.join(input.root, "prisma", "schema.prisma"), "utf8");
-  const expected = {
+  const expected = readExpectation(input.root);
+  return ({ databaseUrl, developmentDatabaseUrl }) => classifyTestDatabase({ databaseUrl, developmentDatabaseUrl, expected, connect: input.connect });
+}
+
+/** createTestDatabaseClassifier と同じ期待値で、状態の判定と権限の読み取りを行う関数を作る（--verify・migration の前後で使う） */
+export function createTestDatabaseInspector(input: {
+  root: string;
+  connect: (databaseUrl: string) => Promise<IntegrationDbClient>;
+}): InspectDatabase {
+  const expected = readExpectation(input.root);
+  return ({ databaseUrl, developmentDatabaseUrl }) => inspectTestDatabase({ databaseUrl, developmentDatabaseUrl, expected, connect: input.connect });
+}
+
+function readExpectation(root: string) {
+  const schemaSource = readFileSync(path.join(root, "prisma", "schema.prisma"), "utf8");
+  return {
     tables: applicationTablesFromSchema(schemaSource),
     enums: enumNamesFromSchema(schemaSource),
-    migrations: listMigrationNames(path.join(input.root, "prisma", "migrations")),
+    migrations: listMigrationNames(path.join(root, "prisma", "migrations")),
   };
-  return ({ databaseUrl, developmentDatabaseUrl }) => classifyTestDatabase({ databaseUrl, developmentDatabaseUrl, expected, connect: input.connect });
+}
+
+/** 権限の表示（値は真偽値だけ） */
+function formatPrivileges(privileges: TestDatabasePrivileges): string[] {
+  return [
+    `public USAGE: ${privileges.publicUsage}`,
+    `public CREATE: ${privileges.publicCreate}`,
+    `database owner is ${EXPECTED_USER}: ${privileges.databaseOwner}`,
+    `database CREATE: ${privileges.databaseCreate}`,
+  ];
 }
 
 const CHECK_LABELS = {
@@ -196,13 +231,13 @@ const CHECK_LABELS = {
 } as const;
 
 /** 判定を実行し、失敗したらコードだけを含むエラーに置き換える（A・B・C のどれとも扱わない） */
-async function classifyOrStop(
-  classify: ClassifyDatabase,
+async function inspectOrStop(
+  inspect: InspectDatabase,
   input: Parameters<ClassifyDatabase>[0],
   code: keyof typeof CHECK_LABELS,
-): Promise<TestDatabaseState> {
+): Promise<TestDatabaseInspection> {
   try {
-    return await classify(input);
+    return await inspect(input);
   } catch (error) {
     const detail = error instanceof IntegrationDatabaseCheckError ? error.code : "unknown";
     throw new TestDbMigrateError(code, `the ${CHECK_LABELS[code]} database check failed (${detail}); the Prisma CLI was not started for this check.`);
@@ -236,25 +271,32 @@ async function runReadOnlyVerify(input: {
     );
   }
 
-  const state = await classifyOrStop(deps.readOnlyDatabase.classifyDatabase, checkInput, "VERIFY_CHECK_FAILED");
-  const header = [
-    `[testdb-migrate] verify mode: read-only check of ${target.host}:${target.port}/${target.database} as ${target.user} (password hidden).`,
-    `identity: current_database() = ${EXPECTED_DATABASE}, current_user = session_user = ${EXPECTED_USER}, database comment = "${TEST_DATABASE_MARKER}"; search_path pinned to pg_catalog.`,
-    "the Prisma CLI was not started; nothing was migrated, reset or changed (the transaction was rolled back).",
-  ];
-  if (state.state === "B") {
-    deps.log([...header, "state B (partially applied, failed or unexpected objects):", ...state.reasons.map((r) => `  - ${r}`)].join("\n"));
-    throw new TestDbMigrateError("DATABASE_STATE_INCONSISTENT", "the test database is neither empty nor fully migrated. Nothing was reset or repaired.");
-  }
+  const { state, privileges } = await inspectOrStop(deps.readOnlyDatabase.inspectDatabase, checkInput, "VERIFY_CHECK_FAILED");
+  const missing = missingMigrationPrivileges(privileges);
+  // 状態と権限は別々に表示する（権限が足りなくても、状態の判定は変えない）
   deps.log(
     [
-      ...header,
-      state.state === "A"
-        ? "state A: the database is empty (no migrations applied)."
-        : `state C: all ${state.migrations.length} expected migrations are applied and the tables are empty. ` +
-          "Column, index and constraint definitions were not compared (schema diff not verified; Step 3-12).",
+      `[testdb-migrate] verify mode: read-only check of ${target.host}:${target.port}/${target.database} as ${target.user} (password hidden).`,
+      `identity: current_database() = ${EXPECTED_DATABASE}, current_user = session_user = ${EXPECTED_USER}, database comment = "${TEST_DATABASE_MARKER}"; search_path pinned to pg_catalog.`,
+      "the Prisma CLI was not started; nothing was migrated, reset or changed (the transaction was rolled back).",
+      ...(state.state === "A"
+        ? ["database state: A (the database is empty; no migrations applied)"]
+        : state.state === "C"
+          ? [
+              `database state: C (all ${state.migrations.length} expected migrations are applied and the tables are empty; ` +
+                "column, index and constraint definitions were not compared: schema diff not verified, Step 3-12)",
+            ]
+          : ["database state: B (partially applied, failed or unexpected objects)", ...state.reasons.map((r) => `  - ${r}`)]),
+      "migration privileges:",
+      ...formatPrivileges(privileges).map((line) => `  ${line}`),
     ].join("\n"),
   );
+  if (state.state === "B") {
+    throw new TestDbMigrateError("DATABASE_STATE_INCONSISTENT", "the test database is neither empty nor fully migrated. Nothing was reset or repaired.");
+  }
+  if (missing.length > 0) {
+    throw new TestDbMigrateError("MIGRATION_PRIVILEGES_INSUFFICIENT", `${EXPECTED_USER} lacks privileges required for migrations (${missing.join(", ")}). Nothing was granted or changed.`);
+  }
   return 0;
 }
 
@@ -364,10 +406,10 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
       "live database access is disabled in this build; refusing to connect to the test database or start the Prisma CLI.",
     );
   }
-  const { classifyDatabase } = deps.liveDatabase;
+  const { inspectDatabase } = deps.liveDatabase;
 
-  // 9〜11. 読み取り専用の接続・本人確認・状態の判定
-  const before = await classifyOrStop(classifyDatabase, checkInput, "STATE_CHECK_FAILED");
+  // 9〜11. 読み取り専用の接続・本人確認・状態の判定・権限の読み取り
+  const { state: before, privileges } = await inspectOrStop(inspectDatabase, checkInput, "STATE_CHECK_FAILED");
   if (before.state === "B") {
     deps.log(["[testdb-migrate] state B (partially applied, failed or unexpected objects):", ...before.reasons.map((r) => `  - ${r}`)].join("\n"));
     throw new TestDbMigrateError(
@@ -383,7 +425,15 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
     return 0;
   }
 
-  // 12. A のときだけ、固定のコマンドで migrate deploy（Prisma CLI は自分で別の接続を作る）
+  // 12. A のときだけ。必要な権限がすべてあることを確かめてから、固定のコマンドで migrate deploy（Prisma CLI は自分で別の接続を作る）
+  const missing = missingMigrationPrivileges(privileges);
+  if (missing.length > 0) {
+    deps.log(["[testdb-migrate] state A, but migration privileges are missing:", ...formatPrivileges(privileges).map((line) => `  ${line}`)].join("\n"));
+    throw new TestDbMigrateError(
+      "MIGRATION_PRIVILEGES_INSUFFICIENT",
+      `${EXPECTED_USER} lacks privileges required for migrations (${missing.join(", ")}); the Prisma CLI was not started. Nothing was granted or changed.`,
+    );
+  }
   let exitCode: number;
   try {
     exitCode = await deps.spawn(deps.execPath, args, { cwd: root, env: childEnv, shell: false, stdio: "inherit" });
@@ -395,7 +445,7 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
   }
 
   // 13. migration の後に、別の接続でもう一度、本人確認と状態の判定
-  const after = await classifyOrStop(classifyDatabase, checkInput, "POST_MIGRATION_CHECK_FAILED");
+  const { state: after } = await inspectOrStop(inspectDatabase, checkInput, "POST_MIGRATION_CHECK_FAILED");
   if (after.state !== "C") {
     if (after.state === "B") deps.log(["[testdb-migrate] post-migration state B:", ...after.reasons.map((r) => `  - ${r}`)].join("\n"));
     throw new TestDbMigrateError(

@@ -13,6 +13,8 @@ import {
   buildTestDbMigrateEnv,
   type ClassifyDatabase,
   createTestDatabaseClassifier,
+  createTestDatabaseInspector,
+  type InspectDatabase,
   LIVE_DATABASE_DISABLED,
   parseTestDbMigrateArgs,
   READ_ONLY_DATABASE_DISABLED,
@@ -21,7 +23,7 @@ import {
   TestDbMigrateError,
   type TestDbMigrateErrorCode,
 } from "./testDbMigrate";
-import { enumNamesFromSchema, type TestDatabaseState } from "./testDbState";
+import { enumNamesFromSchema, type TestDatabasePrivileges, type TestDatabaseState } from "./testDbState";
 
 // Prisma CLI を起動せず、DBにも接続しない。ファイル・子プロセス・DBの状態の判定は、すべて偽の関数で置き換える
 const ROOT = "/fake/katana-web";
@@ -46,6 +48,8 @@ const codeOf = (file: string) =>
 const STATE_A: TestDatabaseState = { state: "A" };
 const STATE_C: TestDatabaseState = { state: "C", tables: ["Shop"], migrations: ["m1", "m2", "m3"], schemaDiff: "not-verified" };
 const STATE_B: TestDatabaseState = { state: "B", reasons: ["migration history does not match (missing: 5, extra: 0, failed or rolled back: 0, duplicated: no)"] };
+/** migration に必要な権限がすべてある（初期化スクリプトの設計どおり） */
+const ALL_PRIVILEGES: TestDatabasePrivileges = { publicUsage: true, publicCreate: true, databaseOwner: true, databaseCreate: true };
 
 type Fake = {
   deps: TestDbMigrateDeps;
@@ -53,7 +57,7 @@ type Fake = {
   /** 状態の判定（実DBへの接続の代わり） */
   classify: Mock<ClassifyDatabase>;
   /** 読み取り専用の検証モード（--verify）の判定（liveDatabase とは別の偽の関数） */
-  verify: Mock<ClassifyDatabase>;
+  verify: Mock<InspectDatabase>;
   logs: string[];
   /** 呼ばれた順の記録 */
   calls: string[];
@@ -73,7 +77,9 @@ function fake(
     verifyStates?: (TestDatabaseState | Error)[];
     readOnlyDisabled?: boolean;
     /** --verify の判定を、偽の関数ではなくこの関数にする（本物の判定と偽のDBクライアントを組み合わせるとき） */
-    readOnlyClassifier?: ClassifyDatabase;
+    readOnlyInspector?: InspectDatabase;
+    /** 偽の判定が返す権限（既定はすべてあり）。migration 用・--verify 用の両方に使う */
+    privileges?: Partial<TestDatabasePrivileges>;
   } = {},
 ): Fake {
   const calls: string[] = [];
@@ -97,13 +103,14 @@ function fake(
     return next;
   });
   const verifyStates = [...(overrides.verifyStates ?? [STATE_A])];
-  const verify = vi.fn<ClassifyDatabase>(async (input) => {
+  const privileges = { ...ALL_PRIVILEGES, ...overrides.privileges };
+  const verify = vi.fn<InspectDatabase>(async (input) => {
     calls.push("verify");
-    if (overrides.readOnlyClassifier) return overrides.readOnlyClassifier(input);
+    if (overrides.readOnlyInspector) return overrides.readOnlyInspector(input);
     const next = verifyStates.shift();
     if (next === undefined) throw new Error("unexpected verify call in test");
     if (next instanceof Error) throw next;
-    return next;
+    return { state: next, privileges };
   });
   const spawn = vi.fn<TestDbMigrateDeps["spawn"]>(async () => {
     calls.push("spawn");
@@ -120,8 +127,10 @@ function fake(
       calls.push(`exists:${path.relative(ROOT, absolutePath)}`);
       return !(overrides.missingPaths ?? []).includes(path.relative(ROOT, absolutePath));
     },
-    liveDatabase: overrides.liveDisabled ? LIVE_DATABASE_DISABLED : { mode: "enabled", classifyDatabase: classify },
-    readOnlyDatabase: overrides.readOnlyDisabled ? READ_ONLY_DATABASE_DISABLED : { mode: "enabled-read-only", classifyDatabase: verify },
+    liveDatabase: overrides.liveDisabled
+      ? LIVE_DATABASE_DISABLED
+      : { mode: "enabled", inspectDatabase: async (input) => ({ state: await classify(input), privileges }) },
+    readOnlyDatabase: overrides.readOnlyDisabled ? READ_ONLY_DATABASE_DISABLED : { mode: "enabled-read-only", inspectDatabase: verify },
     spawn,
     log: (text) => logs.push(text),
   };
@@ -354,7 +363,8 @@ describe("runTestDbMigrate：実DBへの接続の許可（強制停止）", () =
     }
     // 接続の部品は、import と readOnlyDatabase の中の1か所だけ
     const readOnlyBlock = source.slice(source.indexOf("readOnlyDatabase: {"), source.indexOf("},", source.indexOf("readOnlyDatabase: {")));
-    for (const part of ["connectTestDatabase", "createTestDatabaseClassifier"]) {
+    expect(source).not.toContain("createTestDatabaseClassifier");
+    for (const part of ["connectTestDatabase", "createTestDatabaseInspector"]) {
       expect(source.match(new RegExp(part, "g"))).toHaveLength(2);
       expect(readOnlyBlock).toContain(part);
     }
@@ -539,7 +549,7 @@ describe("runTestDbMigrate：読み取り専用の検証モード（--verify）"
     expect(output).toContain("verify mode: read-only check of 127.0.0.1:5434/katana_test as katana_test_user (password hidden)");
     expect(output).toContain(`current_user = session_user = katana_test_user, database comment = "${TEST_DATABASE_MARKER}"; search_path pinned to pg_catalog.`);
     expect(output).toContain("the Prisma CLI was not started; nothing was migrated");
-    expect(output).toContain("state A: the database is empty");
+    expect(output).toContain("database state: A (the database is empty; no migrations applied)");
     for (const secret of SECRETS) expect(output).not.toContain(secret);
   });
 
@@ -547,8 +557,8 @@ describe("runTestDbMigrate：読み取り専用の検証モード（--verify）"
     const f = fake({ argv: ["--verify"], verifyStates: [STATE_C] });
     await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
     expect(f.spawn).not.toHaveBeenCalled();
-    expect(f.logs.join("\n")).toContain("state C: all 3 expected migrations are applied and the tables are empty.");
-    expect(f.logs.join("\n")).toContain("schema diff not verified; Step 3-12");
+    expect(f.logs.join("\n")).toContain("database state: C (all 3 expected migrations are applied and the tables are empty;");
+    expect(f.logs.join("\n")).toContain("schema diff not verified, Step 3-12");
   });
 
   it("B なら、理由を表示して失敗する（Prisma CLI を起動せず、reset・自動復旧もしない）", async () => {
@@ -557,7 +567,7 @@ describe("runTestDbMigrate：読み取り専用の検証モード（--verify）"
     expect(error.message).toContain("Nothing was reset or repaired.");
     expect(f.spawn).not.toHaveBeenCalled();
     expect(f.classify).not.toHaveBeenCalled();
-    expect(f.logs.join("\n")).toContain("state B (partially applied, failed or unexpected objects):\n  - migration history does not match");
+    expect(f.logs.join("\n")).toContain("database state: B (partially applied, failed or unexpected objects)\n  - migration history does not match");
   });
 
   it.each<IntegrationDatabaseCheckErrorCode>([
@@ -638,7 +648,7 @@ describe("runTestDbMigrate：読み取り専用の検証モード（--verify）"
   });
 });
 
-/** 本物の判定（createTestDatabaseClassifier → classifyTestDatabase）に渡す、偽のDBクライアント。実DBには接続しない */
+/** 本物の判定（createTestDatabaseInspector → inspectTestDatabase）に渡す、偽のDBクライアント。実DBには接続しない */
 function fakeDatabase(options: {
   state?: "A" | "B" | "C";
   identity?: Record<string, unknown>;
@@ -647,6 +657,8 @@ function fakeDatabase(options: {
   failOn?: string;
   rollbackFails?: boolean;
   connectFails?: boolean;
+  /** 権限の SQL の応答（既定はすべて true） */
+  privilegeRows?: Record<string, unknown>[];
 } = {}) {
   const schemaSource = readFileSync(path.join(REPO_ROOT, "prisma", "schema.prisma"), "utf8");
   const tables = applicationTablesFromSchema(schemaSource);
@@ -661,6 +673,7 @@ function fakeDatabase(options: {
       if (options.failOn !== undefined && sql.includes(options.failOn)) throw Object.assign(new Error(`failed at ${TEST_URL}`), { code: "42501" });
       if (sql === "ROLLBACK" && options.rollbackFails) throw Object.assign(new Error(`rollback failed ${PASSWORD}`), { code: "57P01" });
       if (sql.includes("set_config")) return { rows: [{ searchPath: options.searchPath ?? "pg_catalog" }] };
+      if (sql.includes("has_schema_privilege")) return { rows: options.privilegeRows ?? [{ ...ALL_PRIVILEGES }] };
       if (sql.includes("transaction_read_only")) return { rows: [{ transaction_read_only: "on" }] };
       if (sql.includes("current_database() AS database")) {
         return {
@@ -687,21 +700,21 @@ function fakeDatabase(options: {
     if (options.connectFails) throw Object.assign(new Error(`connect ECONNREFUSED ${TEST_URL}`), { code: "ECONNREFUSED" });
     return client;
   });
-  return { connect, queries, end, classifier: createTestDatabaseClassifier({ root: REPO_ROOT, connect }) };
+  return { connect, queries, end, inspector: createTestDatabaseInspector({ root: REPO_ROOT, connect }) };
 }
 
-/** DBを変更する SQL がないこと（読み取り専用のトランザクション・SHOW・SELECT・ROLLBACK だけ） */
+/** DBを変更する SQL がないこと（読み取り専用のトランザクション・SHOW・SELECT・ROLLBACK だけ）。権限の名前の文字列リテラル（'CREATE' など）は除いて調べる */
 function expectReadOnlyQueries(queries: readonly string[]) {
   for (const sql of queries) {
     expect(sql.trim()).toMatch(/^(BEGIN READ ONLY|ROLLBACK|SHOW |SELECT )/);
-    expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|CREATE|ALTER|DROP|GRANT|REVOKE|COMMIT|COPY|VACUUM|CALL)\b/i);
+    expect(sql.replace(/'[^']*'/g, "''")).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|CREATE|ALTER|DROP|GRANT|REVOKE|COMMIT|COPY|VACUUM|CALL)\b/i);
   }
   expect(queries).not.toContain("COMMIT");
 }
 
 describe("runTestDbMigrate：--verify と本物の判定（偽のDBクライアント。実DBには接続しない）", () => {
   const run = async (db: ReturnType<typeof fakeDatabase>) => {
-    const f = fake({ argv: ["--verify"], readOnlyClassifier: db.classifier });
+    const f = fake({ argv: ["--verify"], readOnlyInspector: db.inspector });
     return { f, result: runTestDbMigrate(f.deps) };
   };
 
@@ -719,14 +732,14 @@ describe("runTestDbMigrate：--verify と本物の判定（偽のDBクライア�
     expect(db.end).toHaveBeenCalledTimes(1);
     expectReadOnlyQueries(db.queries);
     expect(f.spawn).not.toHaveBeenCalled();
-    expect(f.logs.join("\n")).toContain("state A");
+    expect(f.logs.join("\n")).toContain("database state: A");
   });
 
   it("C：期待する migration がすべて適用済みで、テーブルが空なら成功する（読み取りの SQL だけ）", async () => {
     const db = fakeDatabase({ state: "C" });
     const { f, result } = await run(db);
     await expect(result).resolves.toBe(0);
-    expect(f.logs.join("\n")).toContain("state C");
+    expect(f.logs.join("\n")).toContain("database state: C");
     expect(db.queries.some((sql) => sql.includes("_prisma_migrations"))).toBe(true);
     expect(db.queries.some((sql) => sql.startsWith("SELECT EXISTS"))).toBe(true);
     expect(db.queries.at(-1)).toBe("ROLLBACK");
@@ -804,9 +817,111 @@ describe("runTestDbMigrate：--verify と本物の判定（偽のDBクライア�
 
   it("接続先の検証に失敗したら、本物の判定でも接続しない", async () => {
     const db = fakeDatabase();
-    const f = fake({ argv: ["--verify"], readOnlyClassifier: db.classifier, files: { ".env.test": { ...GOOD_TEST_ENV, DATABASE_URL: DEV_URL } } });
+    const f = fake({ argv: ["--verify"], readOnlyInspector: db.inspector, files: { ".env.test": { ...GOOD_TEST_ENV, DATABASE_URL: DEV_URL } } });
     await expectStopped(f, "TARGET_REJECTED");
     expect(db.connect).not.toHaveBeenCalled();
+  });
+});
+
+describe("migration に必要な権限（Step 3-11D）", () => {
+  const LACKING: [string, Partial<TestDatabasePrivileges>, string][] = [
+    ["public USAGE", { publicUsage: false }, "publicUsage"],
+    ["public CREATE", { publicCreate: false }, "publicCreate"],
+    ["DBの所有者", { databaseOwner: false }, "databaseOwner"],
+    ["DBの CREATE", { databaseCreate: false }, "databaseCreate"],
+  ];
+
+  it("--verify：すべての権限があれば、状態と4つの権限を別々の行で表示して成功する", async () => {
+    for (const state of [STATE_A, STATE_C]) {
+      const f = fake({ argv: ["--verify"], verifyStates: [state] });
+      await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+      const output = f.logs.join("\n");
+      expect(output).toContain(`database state: ${state.state}`);
+      expect(output).toContain(
+        "migration privileges:\n  public USAGE: true\n  public CREATE: true\n  database owner is katana_test_user: true\n  database CREATE: true",
+      );
+      expect(f.spawn).not.toHaveBeenCalled();
+      expect(f.classify).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(LACKING)("--verify：%s が不足していれば、状態は A のまま表示し、MIGRATION_PRIVILEGES_INSUFFICIENT で失敗する", async (_label, lacking, key) => {
+    const f = fake({ argv: ["--verify"], privileges: lacking });
+    const error = await expectError(f, "MIGRATION_PRIVILEGES_INSUFFICIENT");
+    expect(error.message).toContain(`(${key})`);
+    expect(error.message).toContain("Nothing was granted or changed.");
+    const output = f.logs.join("\n");
+    expect(output).toContain("database state: A (the database is empty; no migrations applied)");
+    expect(output).not.toContain("database state: B");
+    expect(output).toMatch(/: false$/m);
+    expect(f.spawn).not.toHaveBeenCalled();
+  });
+
+  it("--verify：状態 B は、権限が不足していても B として失敗する（権限の不足を B とは扱わず、B の判定も変えない）", async () => {
+    const f = fake({ argv: ["--verify"], verifyStates: [STATE_B], privileges: { publicCreate: false } });
+    await expectError(f, "DATABASE_STATE_INCONSISTENT");
+    expect(f.logs.join("\n")).toContain("public CREATE: false");
+  });
+
+  it.each(LACKING)("migration の事前検査：A でも %s が不足していれば、Prisma CLI を起動せずに止まる", async (_label, lacking, key) => {
+    const f = fake({ privileges: lacking });
+    const error = await expectError(f, "MIGRATION_PRIVILEGES_INSUFFICIENT");
+    expect(error.message).toContain(`(${key})`);
+    expect(error.message).toContain("the Prisma CLI was not started");
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.classify).toHaveBeenCalledTimes(1);
+    expect(f.logs.join("\n")).toContain("state A, but migration privileges are missing:");
+  });
+
+  it("migration の事前検査：すべての権限があれば、今までどおり A で migrate deploy に進む（単体テストの偽の許可でだけ）", async () => {
+    const f = fake();
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("権限の検査を追加しても、スクリプトの migration 用の許可は無効のまま（通常実行モードは接続せずに止まる）", async () => {
+    await expectStopped(fake({ liveDisabled: true }), "TESTDB_MIGRATION_LIVE_DISABLED");
+    const source = codeOf("scripts/testdb-migrate.mts");
+    expect(source).toMatch(/^\s*liveDatabase: LIVE_DATABASE_DISABLED,$/m);
+    expect(source).not.toMatch(/mode:\s*["']enabled["']/);
+  });
+
+  it("本物の判定と偽のDB：権限が不足していても状態は A と判定され、--verify は不足として失敗する", async () => {
+    const db = fakeDatabase({ state: "A", privilegeRows: [{ ...ALL_PRIVILEGES, publicCreate: false }] });
+    const f = fake({ argv: ["--verify"], readOnlyInspector: db.inspector });
+    await expectError(f, "MIGRATION_PRIVILEGES_INSUFFICIENT");
+    expect(f.logs.join("\n")).toContain("database state: A");
+    expect(f.logs.join("\n")).toContain("public CREATE: false");
+    expect(db.queries.at(-1)).toBe("ROLLBACK");
+    expect(db.end).toHaveBeenCalledTimes(1);
+    expectReadOnlyQueries(db.queries);
+  });
+
+  it("本物の判定と偽のDB：権限の SQL は本人確認の後、カタログの一覧の前に1回だけ送る", async () => {
+    const db = fakeDatabase({ state: "A" });
+    await expect(runTestDbMigrate(fake({ argv: ["--verify"], readOnlyInspector: db.inspector }).deps)).resolves.toBe(0);
+    const privilegeIndex = db.queries.findIndex((sql) => sql.includes("has_schema_privilege"));
+    expect(db.queries.filter((sql) => sql.includes("has_schema_privilege"))).toHaveLength(1);
+    expect(privilegeIndex).toBeGreaterThan(db.queries.findIndex((sql) => sql.includes("current_database() AS database")));
+    expect(privilegeIndex).toBeLessThan(db.queries.findIndex((sql) => sql.includes("pg_catalog.pg_namespace n")));
+  });
+
+  it.each<[string, Parameters<typeof fakeDatabase>[0], string]>([
+    ["権限の SQL の失敗", { failOn: "has_schema_privilege" }, "QUERY_FAILED"],
+    ["権限の応答が読めない", { privilegeRows: [{ publicUsage: "t" }] }, "PRIVILEGES_UNAVAILABLE"],
+    ["本人確認の失敗", { identity: { currentUser: "postgres" } }, "CURRENT_USER_MISMATCH"],
+    ["search_path の固定の失敗", { searchPath: "public" }, "SEARCH_PATH_NOT_PINNED"],
+  ])("本物の判定と偽のDB：%s なら、状態を表示せず VERIFY_CHECK_FAILED で止まる（生のエラー・秘密情報を出さない）", async (_label, options, code) => {
+    const db = fakeDatabase({ state: "A", ...options });
+    const f = fake({ argv: ["--verify"], readOnlyInspector: db.inspector });
+    const error = await expectError(f, "VERIFY_CHECK_FAILED");
+    expect(error.message).toContain(`(${code})`);
+    expect(f.logs).toEqual([]);
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(db.end).toHaveBeenCalledTimes(1);
+    if (code !== "QUERY_FAILED" && code !== "PRIVILEGES_UNAVAILABLE") {
+      expect(db.queries.some((sql) => sql.includes("has_schema_privilege"))).toBe(false);
+    }
   });
 });
 
@@ -816,7 +931,7 @@ describe("--verify の静的な確認（ソース）", () => {
     const expected = [
       "  readOnlyDatabase: {",
       '    mode: "enabled-read-only",',
-      "    classifyDatabase: (input) => createTestDatabaseClassifier({ root: ROOT, connect: connectTestDatabase })(input),",
+      "    inspectDatabase: (input) => createTestDatabaseInspector({ root: ROOT, connect: connectTestDatabase })(input),",
       "  },",
     ].join("\n");
     expect(source).toContain(expected);
