@@ -365,7 +365,9 @@ npm run test:integration ─► 専用runner
 | 3-10B | migration の前後のDBの状態（A：完全に空、B：途中まで適用・不整合、C：全件適用済み）の読み取り専用の判定（`lib/testing/testDbState.ts`）と、`pg` を読み込む1ファイル（`lib/testing/testDbConnection.ts`）の追加。DB非接続の単体テスト。**`testdb-migrate`・globalSetup への組み込みと、実DBへの接続は行っていない**（どちらも強制停止のまま）。commit の前のカタログ検査のレビューで、`pg_am`・`pg_transform` の検査漏れを直した | `daf5c8b`（`test: classify test database migration states safely`） |
 | 3-10C | `testdb-migrate` への状態の判定の組み込み（A なら `migrate deploy` の後に別の接続で C を再確認、B は停止、C は Prisma CLI を起動せずに成功）、親のプロセスの `PG*`・`DOTENV_*` の拒否、状態の判定の search_path の固定。DB非接続の単体テスト。**スクリプトの実DBへの接続の許可は固定で無効**（`TESTDB_MIGRATION_LIVE_DISABLED`）。globalSetup は未変更。commit の前の最終の安全性レビューで、問題は見つからなかった | `92ba359`（`test: integrate guarded migration state checks`。親は `daf5c8b`。通常テスト1065件成功、静的検査152件・違反0件） |
 | 3-11 実施前レビュー | 初回の Docker 起動の前の安全性レビュー（コードは変更なし。Docker は読み取りだけ。**Docker のデーモンが停止中で、デーモンが必要な確認はできなかった**）。起動前の条件、R7 の検証手順、起動失敗時の対処、読み取り専用のDB検証の計画、TOCTOU の方針を記録 | なし（PLANの更新だけ。未commit） |
-| 3-11A | Docker Desktop の起動後の読み取り専用の確認（記録とすべて一致。テスト用のコンテナ・ボリュームなし、5434番は空き）と、初期化スクリプトのパスワード漏洩の対策（`01-app-role.sh` の最小限の修正と、静的テスト `scripts/testdb-init.test.ts` の追加。通常テスト1076件成功）。実際の初期化・R7・DB接続は未実施 | `test: protect test database initialization secrets`（通常テスト32ファイル・1076件成功、静的検査152件・違反0件。hash は commit の後に記入） |
+| 3-11A | Docker Desktop の起動後の読み取り専用の確認（記録とすべて一致。テスト用のコンテナ・ボリュームなし、5434番は空き）と、初期化スクリプトのパスワード漏洩の対策（`01-app-role.sh` の最小限の修正と、静的テスト `scripts/testdb-init.test.ts` の追加。通常テスト1076件成功）。実際の初期化・R7・DB接続は未実施 | `25197cf`（`test: protect test database initialization secrets`。親は `92ba359`。通常テスト32ファイル・1076件成功、静的検査152件・違反0件） |
+| 3-11 | テストDBのコンテナの初回起動（ユーザーが実施。実行のログは本ファイルにない）。起動後の状態を Step 3-11B の最初に読み取りで確認：`katana-test-db` は running・healthy、テスト用のボリューム0件、全ボリューム3件で変化なし、開発用ボリュームは変更なし、R7 は今回の起動では合格。DBの中の本人確認・migration は未実施 | なし |
+| 3-11B | 読み取り専用のDB検証モード（`testdb-migrate --verify`、`npm run testdb:verify`）の実装と単体テスト。接続の許可は migration 用とは別の固定の無効値（`READ_ONLY_DATABASE_DISABLED`）で、`TESTDB_VERIFY_LIVE_DISABLED` で接続の前に止まる。通常テスト32ファイル・1125件成功、静的検査152件・違反0件。この commit の時点では実DBへの接続は未実施 | `test: add guarded read-only database verification`（hash は commit の後に記入） |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -1695,7 +1697,7 @@ npm run test:integration ─► 専用runner
   - `reset`（未実装）、globalSetup への組み込み、`prisma migrate diff`（Step 3-12）。
 - **実DBへの接続と migration は、実施していない。** コンテナの起動・停止も行っていない。
 
-#### Step 3-11A：Docker 起動前の最終安全確認（実施済み。commit `test: protect test database initialization secrets`）
+#### Step 3-11A：Docker 起動前の最終安全確認（実施済み。commit `25197cf`）
 
 - **前提の確認:** ブランチ `chore/test-db-isolation`、HEAD `92ba359`。変更は PLAN の未commit分だけ。pptx・`test-data/` は未追跡のまま触れていない。
 - **Docker Desktop:** ユーザーが起動した（Claude Code からは起動していない）。最初の確認ではデーモンに接続できず停止し、ユーザーの起動の後に再開した。
@@ -1744,6 +1746,55 @@ npm run test:integration ─► 専用runner
   - **一時的な事象：** 2回目のセッションの最初の `docker image inspect postgres:15` が1回だけ `No such image: postgres:15` を返した。直後の `docker image ls` には `postgres:15`（`29342cb52157`）が表示され、名前を指定した `inspect` も4回続けて成功した。コンテナ・ボリューム・開発用ボリュームの記録は変わっていない。原因は不明（Docker Desktop の起動の直後の一時的な応答の可能性）。ラッパーはイメージがなければ `IMAGE_MISSING` で止まる（安全側）。
 - **まとめ（Step 3-11A の時点）:** Docker 側の起動前の条件は確認済み（`postgres:15` あり、開発用ボリュームは変更なし、5434番は未使用）。初期化のログ漏洩の対策と静的テスト11件を追加し、通常テスト1076件が成功。**実際の初期化の処理、R7 は未検証。DBへの接続は未実施。**
 - **実DBへの接続・migration・コンテナの起動と停止は、実施していない。** `.env.test` は作成していない。
+
+#### Step 3-11：テストDBの初回起動（ユーザーが実施）
+
+- Step 3-11A の commit は `25197cf`。その後、ユーザーが `.env.test` を作成し、テストDBのコンテナを起動した。起動のコマンドの出力・3つの確認モードと dry run の結果は、本ファイルに記録がない（Claude Code は実行していない）。
+- Step 3-11B のセッションの最初に、読み取り専用の Docker の操作（`docker ps -a`・`docker volume ls`・`docker volume inspect`・`docker inspect --format`（`Config.Env` は読まない）・`lsof`）で、次を確かめた（2026-11-07）:
+  | 項目 | 結果 |
+  |---|---|
+  | `katana-test-db` | running・healthy。`postgres:15`。`State.StartedAt` 2026-11-06T22:46:49Z。再起動ポリシー `no` |
+  | ポート | `HostConfig.PortBindings` は `{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"5434"}]}` だけ。`docker ps --filter publish=5434` は `katana-test-db` だけ。`lsof` の待ち受けは Docker Desktop のプロセスの `127.0.0.1:5434` だけ |
+  | Compose のラベル | `project=katana-test`・`service=test-db`・`config_files` は `katana-web/docker-compose.test.yml` の絶対パス・`working_dir` は `katana-web` の絶対パス |
+  | Mounts | `Type: bind`・`Source` は `katana-web/docker/test-db/init` の絶対パス（`/host_mnt` の表記ではない）・`Destination: /docker-entrypoint-initdb.d`・`RW: false` の1件だけ。`volume` 型はない |
+  | `HostConfig.Mounts` | `null`（bind は `Mounts` にだけ出る） |
+  | `HostConfig.Tmpfs` | `{"/var/lib/postgresql/data":""}`（tmpfs のオプションが空の形） |
+  | `Config.Volumes` | `{"/var/lib/postgresql/data":{}}`（イメージの宣言。実際のマウントではない） |
+  | ボリューム | 全部で3件（`0df3f60a…`・`b655b6e4…`・`katana-web_postgres_data`）で、起動前と同じ。`katana-test` のボリュームは0件 |
+  | 開発用ボリューム | `katana-web_postgres_data`、作成日時 2026-07-18T05:42:41Z、ラベル `katana-web`・`postgres_data`。変更なし |
+  | ほかのコンテナ | `sample-db`（停止中）だけ。`katana-db` はない |
+- **R7：今回の実際の起動では合格**（無名のボリュームは作られず、データ領域は tmpfs）。D の1〜8 を満たす（9 のネットワークは確認していない）。
+- **未実施：** DBの中の本人確認（DB名・ユーザー・DBのコメント）、状態 A の判定、migration、down。初期化スクリプトが実際に最後まで動いたこと（ロール・所有者・コメント）は、healthy になったことからの推定で、DBの中では確かめていない。
+
+#### Step 3-11B：読み取り専用のDB検証モードの実装（実施済み。commit `test: add guarded read-only database verification`）
+
+- **変更したファイル:**
+  - `lib/testing/testDbMigrate.ts`：`--verify` のモード、読み取り専用の接続の許可（`ReadOnlyDatabaseAccess`・`READ_ONLY_DATABASE_DISABLED`）、`runReadOnlyVerify()`、エラーコード `TESTDB_VERIFY_LIVE_DISABLED`・`VERIFY_CHECK_FAILED`、確認モードの表示に `--verify` の許可の状態を追加。
+  - `scripts/testdb-migrate.mts`：`readOnlyDatabase: READ_ONLY_DATABASE_DISABLED` を固定で渡す（接続の部品は読み込まない）。
+  - `package.json`：`"testdb:verify": "node scripts/testdb-migrate.mts --verify"` を追加。
+  - `lib/testing/testDbMigrate.test.ts`：テストを49件追加（63件 → 112件）。
+- **`--verify` の処理の順序:**
+  1. 引数の検証（`--verify` だけ。ほかの引数との組み合わせは `ARGUMENTS_INVALID`）、Node の起動オプション・`NODE_OPTIONS` の拒否
+  2. `.env.test`・`.env` の読み込み
+  3. 接続先の検証（`assertTestDatabaseTarget`）と認証情報の検証（`assertTestDatabaseCredentials`。R14）
+  4. 親のプロセスの `PG*`・`DOTENV_*` の拒否と、子プロセス用の環境変数での再検証（既存の手順を共有。`PG*` の拒否は URL の検証と同じ関数で行うため、3の後。どちらも接続の前）
+  5. ここで通常実行モード・確認モードと分かれる（Prisma CLI のコマンドを組み立てない）。`prisma/schema.prisma`・`prisma/migrations` の存在の確認（Prisma CLI の存在は確かめない）
+  6. 読み取り専用の接続の許可の確認（無効なら `TESTDB_VERIFY_LIVE_DISABLED` で、接続の前に止まる）
+  7. 判定（既存の `classifyTestDatabase()`）：検証済みのURLで1回だけ接続 → `BEGIN READ ONLY` → `search_path` を `pg_catalog` に固定 → `SHOW transaction_read_only` → 本人確認（`current_database() = katana_test`、`current_user`・`session_user` = `katana_test_user`、DBのコメント = `katana-test-db`）→ カタログの一覧 → 状態の判定 → ROLLBACK → 接続の解放（成功・失敗にかかわらず）
+  8. 結果の表示（接続先は `host:port/database as user` だけで、パスワード・URL は表示しない）
+- **状態の扱い:** A は成功（空のDB）。C は成功（schema diff は未検証と表示。Step 3-12）。B は理由を表示して `DATABASE_STATE_INCONSISTENT` で失敗。判定そのものの失敗（本人確認・search_path・SQL・接続・ROLLBACK・接続の解放）は、A・B・C のどれとも扱わず `VERIFY_CHECK_FAILED`（コードだけを表示）。
+- **migration の禁止:** `--verify` の経路（`runReadOnlyVerify`）は、`spawn`・`liveDatabase`・Prisma CLI のコマンドを参照しない（ソースの静的テストで確認）。判定の SQL は `BEGIN READ ONLY`・`SELECT`・`SHOW`・`ROLLBACK` だけ（偽のDBクライアントで、送られた SQL をすべて確認）。
+- **接続の許可の分離:** `--verify` の許可（`readOnlyDatabase`。`mode: "enabled-read-only"`）と migration の許可（`liveDatabase`。`mode: "enabled"`）は、別の型・別の値で、共有しない。スクリプトはどちらも固定の無効値を渡し、環境変数・引数では変えられない。`--verify` の許可を有効にするのは、個別の承認を得た後続の工程で、スクリプトの `readOnlyDatabase` だけを `createTestDatabaseClassifier({ root, connect: connectTestDatabase })` を使う値に変えたとき（`liveDatabase` は無効のまま）。その時点で、3-10C の「スクリプトが接続の部品を読み込まない」テストを、「`liveDatabase` は無効の定数だけ、接続の部品は `readOnlyDatabase` だけで使う」に変える必要がある。
+- **既存の機能への影響:** 通常実行モード（migration）は、今までどおり `TESTDB_MIGRATION_LIVE_DISABLED` で止まる（`npm run testdb:migrate` で確認）。確認モードは、表示が1行増えただけ。globalSetup は変更していない（強制停止のまま）。
+- **追加したテスト（49件）:** `--verify` の引数（組み合わせの拒否5件を含む）、A・C の成功と B の拒否、判定の失敗のコード9種類（DB名・current_user・session_user・コメントの不一致、search_path、読み取り専用でない、SQL、接続、接続の解放）と想定外の例外、許可が無効なら接続しない、許可を migration 用と共有しない、通常実行モードの強制停止、確認モードの表示、Prisma CLI がなくても動く、接続前の検証の失敗10種類（開発用DB・別のホスト・別のポート・パスワードの不一致・見本の値・`.env.test` がない・`PG*`・`DOTENV_*`・`NODE_OPTIONS`・Node の起動オプション）、本物の判定と偽のDBクライアントの組み合わせ（A・B・C、本人確認の不一致4種類、search_path、SQL の失敗、接続の失敗、ROLLBACK の失敗、接続の解放、送られた SQL がすべて読み取り）、ソースの静的な確認（固定の無効値、許可の分離、`--verify` の経路が Prisma CLI を参照しない、npm スクリプト）。すべての失敗のテストで、メッセージ・表示に接続URL・パスワードが含まれないことを確かめる。許可の確認を一時的に外すと3件が失敗することを確かめた（元に戻したことを `cmp` で確認）。
+- **静的検証:** `npx tsc --noEmit` 成功、変更した3つの TypeScript ファイルの `eslint` 成功、`npm test` 32ファイル・1125件成功（1076件＋49件）、`npx vitest list --filesOnly` は32ファイルで `*.integration.test.*` は0件、`dbConnectionPaths.test.ts` の静的検査152件・違反0件、`git diff --check` 成功。
+- **実際のスクリプトの確認（DBに接続しない）:** `npm run testdb:migrate:check` は成功し、`read-only verification (--verify): disabled in this build` を表示。`npm run testdb:verify` は `TESTDB_VERIFY_LIVE_DISABLED` で止まり（終了コード1）、`npm run testdb:migrate` は `TESTDB_MIGRATION_LIVE_DISABLED` で止まった。どちらも表示に秘密情報はない。
+  - 気づいた点：確認モードの「親の環境から落とした変数」に `NODE_TLS_REJECT_UNAUTHORIZED` が出る（ユーザーのシェルで設定されている。子プロセスには渡さない）。Node の警告が1行出る。`--verify` の接続は `127.0.0.1` で TLS を使わない見込みなので、判定には影響しない見込み。
+- **実DBへの接続の前に残る課題:**
+  1. スクリプトの `readOnlyDatabase` を有効にするコード変更（個別の承認が必要）と、それに合わせた 3-10C の静的テストの変更。
+  2. 実際の接続（個別の承認が必要）。初回の結果は A の見込み。B・失敗なら報告して止まる。
+  3. 実DBで初めて確かめること：23のカタログ（`pg_default_acl`・`pg_largeobject_metadata`・`pg_publication`・`pg_statistic_ext`・`pg_am`・`pg_transform` を含む）の SQL を `katana_test_user` で実行できるか、`set_config` が成功するか、OID 16384 以上のその他のオブジェクトが0件か。
+  4. TOCTOU の対策（G）は未実装。`--verify` は DB を変更しないので、読み取りの検証には影響しない。migration を有効にする前に実装する。
 
 全Stepに共通する事項:
 
@@ -1983,17 +2034,17 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：Step 3-11A の commit（`test: protect test database initialization secrets`。親は `92ba359`。hash は 3-A の表）
-   - 変更済み（未commit）：なし（Step 3-11A の commit の hash を記入した後の `docs/PLAN-test-db-isolation.md` だけが変更済みになる場合がある）
+   - HEAD：`25197cf`（`test: protect test database initialization secrets`。Step 3-11A。親は `92ba359`）
+   - 変更済み（未commit）：`docs/PLAN-test-db-isolation.md`（Step 3-11A の hash・Step 3-11 の起動の確認・Step 3-11B の記録）、`lib/testing/testDbMigrate.ts`・`lib/testing/testDbMigrate.test.ts`・`scripts/testdb-migrate.mts`・`package.json`（Step 3-11B の `--verify`）。ユーザーの指示があればcommitする
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
-   - `.env.test` は存在しない（Step 3-7B・3-8B・3-9B・3-9C と、`61f8105` のcommit前の検証で作った一時ファイルは、すべて削除済み）
-3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。**実際の `up`・`down` は、まだ一度も実行していない。R7 も未検証。** Step 3-11の実施前レビューの結果（3-Aの「Step 3-11の実施前レビュー」。前提条件の表 C、R7 の D、失敗時の E、DB検証の F、TOCTOU の G、`.env.test` の I）を先に読む。レビューの時点では Docker のデーモンが停止中だったが、Step 3-11A でユーザーが Docker Desktop を起動し、前提条件 C の2〜9 を満たすことを確かめた（3-Aの「Step 3-11A」）。初期化スクリプトのログ漏洩の対策も 3-11A で済んだ。初回の up の後に問題が起きたときは、自動で削除せず、読み取りで調べて報告し、個別の承認を待つ（3-11A で確定）。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
-   - ユーザーによる `.env.test` の作成（Step 3-10）の後、Docker の状態（C の2〜9）の再確認と、3つの確認モード・`testdb:status`・`testdb:up`（`--apply` なし）の実行
-   - Step 3-11（`testdb:up -- --apply`。別の承認が必要。D の「重要な注意」の扱いを、承認の前に合意する）
-   - 読み取り専用のDB検証のモードの実装（F の案1。`testdb-migrate` の migration の実行ゲートは無効のまま。実装とその後の実DBへの接続は、それぞれ承認が必要）
+   - `.env.test` はユーザーが作成済み（`-rw-------`。中身は表示しない）
+   - テストDBのコンテナ `katana-test-db` が起動している場合がある（Step 3-11。データは tmpfs）。`docker ps -a` で確かめる
+3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。Step 3-11 で、ユーザーがテストDBを初めて起動した（R7 は今回の起動で合格。3-Aの「Step 3-11」）。`down` はまだ実行していない。Step 3-11の実施前レビューの結果（3-Aの「Step 3-11の実施前レビュー」。前提条件の表 C、R7 の D、失敗時の E、DB検証の F、TOCTOU の G、`.env.test` の I）を先に読む。レビューの時点では Docker のデーモンが停止中だったが、Step 3-11A でユーザーが Docker Desktop を起動し、前提条件 C の2〜9 を満たすことを確かめた（3-Aの「Step 3-11A」）。初期化スクリプトのログ漏洩の対策も 3-11A で済んだ。初回の up の後に問題が起きたときは、自動で削除せず、読み取りで調べて報告し、個別の承認を待つ（3-11A で確定）。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
+   - Step 3-11B の変更のcommit（指示があれば）
+   - `--verify` の接続を有効にするコード変更と、実DBへの読み取り専用の接続（それぞれ個別の承認が必要。3-Aの「Step 3-11B」の残る課題）
    - `reset` の実装（本人確認の後）
 
-   コンテナの起動（Step 3-11）と、R7の確認は、まだ行っていない。接続後の本人確認と状態の判定は Step 3-10B で実装して commit し、Step 3-10C で migration 用スクリプトの流れに組み込んだ。ただし、スクリプトの実DBへの接続の許可は固定で無効で、通常実行モードは接続の前に必ず止まる。globalSetup には組み込んでおらず、強制停止のまま（初回の実DB接続で確かめることは、3-Aの3-10B・3-10Cの記録）。指示されたStep以外には着手しない。
+   接続後の本人確認と状態の判定は Step 3-10B で実装して commit し、Step 3-10C で migration 用スクリプトの流れに組み込んだ。ただし、スクリプトの実DBへの接続の許可は固定で無効で、通常実行モードは接続の前に必ず止まる。globalSetup には組み込んでおらず、強制停止のまま（初回の実DB接続で確かめることは、3-Aの3-10B・3-10Cの記録）。指示されたStep以外には着手しない。
 4. Stepが終わったら報告し、ユーザーの確認を得たうえで、次の2つを更新してからセッションを終える。
    - 3章の「3-A. 実施結果」（結果、設計との違い、未検証の事項、次のStepへの申し送り）
    - 本節の手順2の想定と、手順3の次のStep

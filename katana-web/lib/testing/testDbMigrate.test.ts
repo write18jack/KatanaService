@@ -1,19 +1,27 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it, type Mock, vi } from "vitest";
-import { IntegrationDatabaseCheckError, type IntegrationDbClient, TEST_DATABASE_MARKER } from "./integrationDatabaseCheck";
+import {
+  applicationTablesFromSchema,
+  IntegrationDatabaseCheckError,
+  type IntegrationDatabaseCheckErrorCode,
+  type IntegrationDbClient,
+  listMigrationNames,
+  TEST_DATABASE_MARKER,
+} from "./integrationDatabaseCheck";
 import {
   buildTestDbMigrateEnv,
   type ClassifyDatabase,
   createTestDatabaseClassifier,
   LIVE_DATABASE_DISABLED,
   parseTestDbMigrateArgs,
+  READ_ONLY_DATABASE_DISABLED,
   runTestDbMigrate,
   type TestDbMigrateDeps,
   TestDbMigrateError,
   type TestDbMigrateErrorCode,
 } from "./testDbMigrate";
-import type { TestDatabaseState } from "./testDbState";
+import { enumNamesFromSchema, type TestDatabaseState } from "./testDbState";
 
 // Prisma CLI を起動せず、DBにも接続しない。ファイル・子プロセス・DBの状態の判定は、すべて偽の関数で置き換える
 const ROOT = "/fake/katana-web";
@@ -44,6 +52,8 @@ type Fake = {
   spawn: Mock<TestDbMigrateDeps["spawn"]>;
   /** 状態の判定（実DBへの接続の代わり） */
   classify: Mock<ClassifyDatabase>;
+  /** 読み取り専用の検証モード（--verify）の判定（liveDatabase とは別の偽の関数） */
+  verify: Mock<ClassifyDatabase>;
   logs: string[];
   /** 呼ばれた順の記録 */
   calls: string[];
@@ -59,6 +69,11 @@ function fake(
     /** 判定の結果（呼ばれた順。Error なら throw する）。既定は migration の前が A、後が C */
     states?: (TestDatabaseState | Error)[];
     liveDisabled?: boolean;
+    /** --verify の判定の結果（呼ばれた順。Error なら throw する）。既定は A */
+    verifyStates?: (TestDatabaseState | Error)[];
+    readOnlyDisabled?: boolean;
+    /** --verify の判定を、偽の関数ではなくこの関数にする（本物の判定と偽のDBクライアントを組み合わせるとき） */
+    readOnlyClassifier?: ClassifyDatabase;
   } = {},
 ): Fake {
   const calls: string[] = [];
@@ -81,6 +96,15 @@ function fake(
     if (next instanceof Error) throw next;
     return next;
   });
+  const verifyStates = [...(overrides.verifyStates ?? [STATE_A])];
+  const verify = vi.fn<ClassifyDatabase>(async (input) => {
+    calls.push("verify");
+    if (overrides.readOnlyClassifier) return overrides.readOnlyClassifier(input);
+    const next = verifyStates.shift();
+    if (next === undefined) throw new Error("unexpected verify call in test");
+    if (next instanceof Error) throw next;
+    return next;
+  });
   const spawn = vi.fn<TestDbMigrateDeps["spawn"]>(async () => {
     calls.push("spawn");
     return 0;
@@ -97,10 +121,11 @@ function fake(
       return !(overrides.missingPaths ?? []).includes(path.relative(ROOT, absolutePath));
     },
     liveDatabase: overrides.liveDisabled ? LIVE_DATABASE_DISABLED : { mode: "enabled", classifyDatabase: classify },
+    readOnlyDatabase: overrides.readOnlyDisabled ? READ_ONLY_DATABASE_DISABLED : { mode: "enabled-read-only", classifyDatabase: verify },
     spawn,
     log: (text) => logs.push(text),
   };
-  return { deps, spawn, classify, logs, calls };
+  return { deps, spawn, classify, verify, logs, calls };
 }
 
 /** 指定したコードで止まり、メッセージ・表示に秘密情報が含まれないこと */
@@ -123,6 +148,7 @@ async function expectStopped(f: Fake, code: TestDbMigrateErrorCode) {
   const error = await expectError(f, code);
   expect(f.spawn).not.toHaveBeenCalled();
   expect(f.classify).not.toHaveBeenCalled();
+  expect(f.verify).not.toHaveBeenCalled();
   return error;
 }
 
@@ -135,12 +161,25 @@ const EXPECTED_ARGS = [
 ];
 
 describe("parseTestDbMigrateArgs", () => {
-  it("引数なしは通常実行、--check だけは確認モード", () => {
+  it("引数なしは通常実行、--check だけは確認モード、--verify だけは読み取り専用の検証モード", () => {
     expect(parseTestDbMigrateArgs([])).toBe("run");
     expect(parseTestDbMigrateArgs(["--check"])).toBe("check");
+    expect(parseTestDbMigrateArgs(["--verify"])).toBe("verify");
   });
 
-  it.each([[["--check", "--check"]], [["--schema", "x"]], [["reset"]], [["--", "migrate", "reset"]], [["--CHECK"]], [["--force"]]])(
+  it.each([
+    [["--check", "--check"]],
+    [["--schema", "x"]],
+    [["reset"]],
+    [["--", "migrate", "reset"]],
+    [["--CHECK"]],
+    [["--force"]],
+    [["--verify", "--check"]],
+    [["--check", "--verify"]],
+    [["--verify", "--verify"]],
+    [["--verify", "--apply"]],
+    [["--verify=true"]],
+  ])(
     "%j は拒否する（Prisma CLI へ引数を渡さない）",
     (args) => {
       expect(() => parseTestDbMigrateArgs(args)).toThrow(TestDbMigrateError);
@@ -477,6 +516,324 @@ describe("runTestDbMigrate：停止条件（子プロセスを起動しない）
     for (const missing of ["node_modules/prisma/build/index.js", "prisma.config.ts", "prisma/migrations"]) {
       await expectStopped(fake({ missingPaths: [missing] }), "REQUIRED_FILE_MISSING");
     }
+  });
+});
+
+describe("runTestDbMigrate：読み取り専用の検証モード（--verify）", () => {
+  it("A なら、検証の後に読み取り専用の判定を1回だけ行い、Prisma CLI も migration 用の判定も使わずに成功する", async () => {
+    const f = fake({ argv: ["--verify"] });
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.verify).toHaveBeenCalledTimes(1);
+    expect(f.verify).toHaveBeenCalledWith({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL });
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.classify).not.toHaveBeenCalled();
+    // 引数・Node の起動オプション → .env.test → .env → 接続先・パスワード・親の環境変数の検証 → 期待値のファイル → 判定、の順
+    expect(f.calls).toEqual(["read:.env.test", "read:.env", "exists:prisma/schema.prisma", "exists:prisma/migrations", "verify"]);
+    const output = f.logs.join("\n");
+    expect(output).toContain("verify mode: read-only check of 127.0.0.1:5434/katana_test as katana_test_user (password hidden)");
+    expect(output).toContain(`current_user = session_user = katana_test_user, database comment = "${TEST_DATABASE_MARKER}"; search_path pinned to pg_catalog.`);
+    expect(output).toContain("the Prisma CLI was not started; nothing was migrated");
+    expect(output).toContain("state A: the database is empty");
+    for (const secret of SECRETS) expect(output).not.toContain(secret);
+  });
+
+  it("C なら成功する。schema diff は未検証と表示する", async () => {
+    const f = fake({ argv: ["--verify"], verifyStates: [STATE_C] });
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.logs.join("\n")).toContain("state C: all 3 expected migrations are applied and the tables are empty.");
+    expect(f.logs.join("\n")).toContain("schema diff not verified; Step 3-12");
+  });
+
+  it("B なら、理由を表示して失敗する（Prisma CLI を起動せず、reset・自動復旧もしない）", async () => {
+    const f = fake({ argv: ["--verify"], verifyStates: [STATE_B] });
+    const error = await expectError(f, "DATABASE_STATE_INCONSISTENT");
+    expect(error.message).toContain("Nothing was reset or repaired.");
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.classify).not.toHaveBeenCalled();
+    expect(f.logs.join("\n")).toContain("state B (partially applied, failed or unexpected objects):\n  - migration history does not match");
+  });
+
+  it.each<IntegrationDatabaseCheckErrorCode>([
+    "DATABASE_MISMATCH",
+    "CURRENT_USER_MISMATCH",
+    "SESSION_USER_MISMATCH",
+    "MARKER_MISMATCH",
+    "SEARCH_PATH_NOT_PINNED",
+    "NOT_READ_ONLY",
+    "QUERY_FAILED",
+    "CONNECT_FAILED",
+    "CLOSE_FAILED",
+  ])("判定が %s で失敗したら、A・B・C のどれとも扱わずに止まる", async (code) => {
+    const f = fake({ argv: ["--verify"], verifyStates: [new IntegrationDatabaseCheckError(code, `detail with ${TEST_URL}`)] });
+    const error = await expectError(f, "VERIFY_CHECK_FAILED");
+    expect(error.message).toContain(`read-only verification database check failed (${code})`);
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.logs).toEqual([]);
+  });
+
+  it("想定外の例外は、元のメッセージを表示せずに unknown として止まる", async () => {
+    const f = fake({ argv: ["--verify"], verifyStates: [new Error(`boom ${TEST_URL}`)] });
+    const error = await expectError(f, "VERIFY_CHECK_FAILED");
+    expect(error.message).toContain("(unknown)");
+  });
+
+  it("読み取り専用の接続の許可が無効なら、すべての検証の後、接続せずに止まる", async () => {
+    const f = fake({ argv: ["--verify"], readOnlyDisabled: true });
+    const error = await expectStopped(f, "TESTDB_VERIFY_LIVE_DISABLED");
+    expect(error.message).toContain("refusing to connect");
+    expect(f.calls.at(-1)).toBe("exists:prisma/migrations");
+  });
+
+  it("許可は migration 用と共有しない：migration 用が無効でも --verify は動き、--verify 用が無効なら migration 用の判定も使わない", async () => {
+    const liveOff = fake({ argv: ["--verify"], liveDisabled: true });
+    await expect(runTestDbMigrate(liveOff.deps)).resolves.toBe(0);
+    expect(liveOff.verify).toHaveBeenCalledTimes(1);
+
+    const readOnlyOff = fake({ argv: ["--verify"], readOnlyDisabled: true });
+    await expectStopped(readOnlyOff, "TESTDB_VERIFY_LIVE_DISABLED");
+    expect(readOnlyOff.classify).not.toHaveBeenCalled();
+  });
+
+  it("通常実行モードは、--verify の許可が有効でも、migration 用の許可が無効なら TESTDB_MIGRATION_LIVE_DISABLED で止まる", async () => {
+    const f = fake({ liveDisabled: true });
+    await expectStopped(f, "TESTDB_MIGRATION_LIVE_DISABLED");
+  });
+
+  it("確認モードは、--verify の許可の状態を表示するだけで接続しない", async () => {
+    const enabled = fake({ argv: ["--check"] });
+    await expect(runTestDbMigrate(enabled.deps)).resolves.toBe(0);
+    expect(enabled.verify).not.toHaveBeenCalled();
+    expect(enabled.logs.join("\n")).toContain("read-only verification (--verify): enabled");
+
+    const disabled = fake({ argv: ["--check"], readOnlyDisabled: true });
+    await expect(runTestDbMigrate(disabled.deps)).resolves.toBe(0);
+    expect(disabled.logs.join("\n")).toContain("read-only verification (--verify): disabled in this build");
+  });
+
+  it("Prisma CLI がなくても --verify は動く（Prisma CLI のコマンドを組み立てない）。期待値のファイルがなければ止まる", async () => {
+    await expect(runTestDbMigrate(fake({ argv: ["--verify"], missingPaths: ["node_modules/prisma/build/index.js", "prisma.config.ts"] }).deps)).resolves.toBe(0);
+    await expectStopped(fake({ argv: ["--verify"], missingPaths: ["prisma/migrations"] }), "REQUIRED_FILE_MISSING");
+  });
+
+  it.each<[string, Parameters<typeof fake>[0], TestDbMigrateErrorCode]>([
+    ["開発用DBの接続先", { files: { ".env.test": { ...GOOD_TEST_ENV, DATABASE_URL: DEV_URL } } }, "TARGET_REJECTED"],
+    ["別のホスト", { files: { ".env.test": { ...GOOD_TEST_ENV, DATABASE_URL: TEST_URL.replace("127.0.0.1", "db.example.com") } } }, "TARGET_REJECTED"],
+    ["別のポート", { files: { ".env.test": { ...GOOD_TEST_ENV, DATABASE_URL: TEST_URL.replace(":5434/", ":5433/") } } }, "TARGET_REJECTED"],
+    ["URL のパスワードの不一致", { files: { ".env.test": { ...GOOD_TEST_ENV, KATANA_TEST_DB_PASSWORD: "other-dummy-pass" } } }, "CREDENTIALS_REJECTED"],
+    ["見本のパスワード", { files: { ".env.test": { ...GOOD_TEST_ENV, KATANA_TEST_DB_ADMIN_PASSWORD: "CHANGE_ME_admin" } } }, "CREDENTIALS_REJECTED"],
+    [".env.test がない", { files: { ".env.test": undefined } }, "TEST_ENV_MISSING"],
+    ["親のプロセスの PG*", { parentEnv: { PATH: "/usr/bin", PGPASSWORD: "x" } }, "UNSAFE_PARENT_ENV"],
+    ["親のプロセスの DOTENV_*", { parentEnv: { PATH: "/usr/bin", DOTENV_CONFIG_PATH: "/tmp/x" } }, "UNSAFE_PARENT_ENV"],
+    ["NODE_OPTIONS", { parentEnv: { PATH: "/usr/bin", NODE_OPTIONS: "--require x" } }, "NODE_OPTIONS_PRESENT"],
+    ["Node の起動オプション", { execArgv: ["--import", "x"] }, "NODE_EXEC_ARGV_PRESENT"],
+  ])("%s なら、接続する前に止まる", async (_label, overrides, code) => {
+    await expectStopped(fake({ ...overrides, argv: ["--verify"] }), code);
+  });
+});
+
+/** 本物の判定（createTestDatabaseClassifier → classifyTestDatabase）に渡す、偽のDBクライアント。実DBには接続しない */
+function fakeDatabase(options: {
+  state?: "A" | "B" | "C";
+  identity?: Record<string, unknown>;
+  searchPath?: string;
+  /** この文字列を含む SQL で失敗する */
+  failOn?: string;
+  rollbackFails?: boolean;
+  connectFails?: boolean;
+} = {}) {
+  const schemaSource = readFileSync(path.join(REPO_ROOT, "prisma", "schema.prisma"), "utf8");
+  const tables = applicationTablesFromSchema(schemaSource);
+  const enums = enumNamesFromSchema(schemaSource);
+  const migrations = listMigrationNames(path.join(REPO_ROOT, "prisma", "migrations"));
+  const state = options.state ?? "A";
+  const queries: string[] = [];
+  const end = vi.fn(async () => undefined);
+  const client: IntegrationDbClient = {
+    query: async (sql) => {
+      queries.push(sql);
+      if (options.failOn !== undefined && sql.includes(options.failOn)) throw Object.assign(new Error(`failed at ${TEST_URL}`), { code: "42501" });
+      if (sql === "ROLLBACK" && options.rollbackFails) throw Object.assign(new Error(`rollback failed ${PASSWORD}`), { code: "57P01" });
+      if (sql.includes("set_config")) return { rows: [{ searchPath: options.searchPath ?? "pg_catalog" }] };
+      if (sql.includes("transaction_read_only")) return { rows: [{ transaction_read_only: "on" }] };
+      if (sql.includes("current_database() AS database")) {
+        return {
+          rows: [{ database: "katana_test", currentUser: "katana_test_user", sessionUser: "katana_test_user", marker: TEST_DATABASE_MARKER, serverPort: 5432, ...options.identity }],
+        };
+      }
+      if (sql.includes("pg_catalog.pg_operator")) return { rows: [] };
+      if (sql.includes("pg_catalog.pg_extension")) return { rows: [{ name: "plpgsql" }] };
+      if (sql.includes("pg_catalog.pg_class c")) {
+        if (state === "A") return { rows: [] };
+        if (state === "B") return { rows: [{ schema: "public", name: "Shop", kind: "r", ownerSchema: null, ownerTable: null }] };
+        return { rows: [...tables, "_prisma_migrations"].map((name) => ({ schema: "public", name, kind: "r", ownerSchema: null, ownerTable: null })) };
+      }
+      if (sql.includes("pg_catalog.pg_type t")) return { rows: state === "C" ? enums.map((name) => ({ schema: "public", name, kind: "e" })) : [] };
+      if (sql.includes("pg_catalog.pg_proc p")) return { rows: [] };
+      if (sql.includes("pg_catalog.pg_namespace n")) return { rows: [{ name: "public" }] };
+      if (sql.includes("_prisma_migrations")) return { rows: migrations.map((name) => ({ name, finished: true, rolledBack: false })) };
+      if (sql.includes("SELECT EXISTS")) return { rows: [{ hasRows: false }] };
+      return { rows: [] };
+    },
+    end,
+  };
+  const connect = vi.fn(async (): Promise<IntegrationDbClient> => {
+    if (options.connectFails) throw Object.assign(new Error(`connect ECONNREFUSED ${TEST_URL}`), { code: "ECONNREFUSED" });
+    return client;
+  });
+  return { connect, queries, end, classifier: createTestDatabaseClassifier({ root: REPO_ROOT, connect }) };
+}
+
+/** DBを変更する SQL がないこと（読み取り専用のトランザクション・SHOW・SELECT・ROLLBACK だけ） */
+function expectReadOnlyQueries(queries: readonly string[]) {
+  for (const sql of queries) {
+    expect(sql.trim()).toMatch(/^(BEGIN READ ONLY|ROLLBACK|SHOW |SELECT )/);
+    expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|CREATE|ALTER|DROP|GRANT|REVOKE|COMMIT|COPY|VACUUM|CALL)\b/i);
+  }
+  expect(queries).not.toContain("COMMIT");
+}
+
+describe("runTestDbMigrate：--verify と本物の判定（偽のDBクライアント。実DBには接続しない）", () => {
+  const run = async (db: ReturnType<typeof fakeDatabase>) => {
+    const f = fake({ argv: ["--verify"], readOnlyClassifier: db.classifier });
+    return { f, result: runTestDbMigrate(f.deps) };
+  };
+
+  it("正しい本人確認と A：BEGIN READ ONLY → search_path の固定 → 本人確認 → 判定 → ROLLBACK → 接続の解放、の順で、読み取りの SQL だけを使う", async () => {
+    const db = fakeDatabase({ state: "A" });
+    const { f, result } = await run(db);
+    await expect(result).resolves.toBe(0);
+    expect(db.connect).toHaveBeenCalledTimes(1);
+    expect(db.connect).toHaveBeenCalledWith(TEST_URL);
+    expect(db.queries[0]).toBe("BEGIN READ ONLY");
+    expect(db.queries[1]).toContain("pg_catalog.set_config('search_path', 'pg_catalog', true)");
+    expect(db.queries[2]).toBe("SHOW transaction_read_only");
+    expect(db.queries[3]).toContain("current_database() AS database");
+    expect(db.queries.at(-1)).toBe("ROLLBACK");
+    expect(db.end).toHaveBeenCalledTimes(1);
+    expectReadOnlyQueries(db.queries);
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.logs.join("\n")).toContain("state A");
+  });
+
+  it("C：期待する migration がすべて適用済みで、テーブルが空なら成功する（読み取りの SQL だけ）", async () => {
+    const db = fakeDatabase({ state: "C" });
+    const { f, result } = await run(db);
+    await expect(result).resolves.toBe(0);
+    expect(f.logs.join("\n")).toContain("state C");
+    expect(db.queries.some((sql) => sql.includes("_prisma_migrations"))).toBe(true);
+    expect(db.queries.some((sql) => sql.startsWith("SELECT EXISTS"))).toBe(true);
+    expect(db.queries.at(-1)).toBe("ROLLBACK");
+    expect(db.end).toHaveBeenCalledTimes(1);
+    expectReadOnlyQueries(db.queries);
+    expect(f.spawn).not.toHaveBeenCalled();
+  });
+
+  it("B：_prisma_migrations のないテーブルがあれば失敗する（ROLLBACK して接続を閉じる）", async () => {
+    const db = fakeDatabase({ state: "B" });
+    const { f, result } = await run(db);
+    await expect(result).rejects.toMatchObject({ code: "DATABASE_STATE_INCONSISTENT" });
+    expect(f.logs.join("\n")).toContain("_prisma_migrations is missing");
+    expect(db.queries.at(-1)).toBe("ROLLBACK");
+    expect(db.end).toHaveBeenCalledTimes(1);
+    expect(f.spawn).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, Record<string, unknown>, IntegrationDatabaseCheckErrorCode]>([
+    ["DB名の不一致", { database: "katana" }, "DATABASE_MISMATCH"],
+    ["current_user の不一致", { currentUser: "postgres" }, "CURRENT_USER_MISMATCH"],
+    ["session_user の不一致", { sessionUser: "postgres" }, "SESSION_USER_MISMATCH"],
+    ["DBのコメントの不一致", { marker: null }, "MARKER_MISMATCH"],
+  ])("%s なら、状態の判定に進まずに止まり、ROLLBACK して接続を閉じる", async (_label, identity, code) => {
+    const db = fakeDatabase({ state: "A", identity });
+    const { f, result } = await run(db);
+    await expect(result).rejects.toMatchObject({ code: "VERIFY_CHECK_FAILED" });
+    await result.catch((error: Error) => expect(error.message).toContain(`(${code})`));
+    expect(db.queries.some((sql) => sql.includes("pg_catalog.pg_class c"))).toBe(false);
+    expect(db.queries.at(-1)).toBe("ROLLBACK");
+    expect(db.end).toHaveBeenCalledTimes(1);
+    expect(f.logs).toEqual([]);
+  });
+
+  it("search_path を固定できなければ、本人確認に進まずに止まる", async () => {
+    const db = fakeDatabase({ searchPath: "public, pg_catalog" });
+    const { result } = await run(db);
+    await expect(result).rejects.toThrow("(SEARCH_PATH_NOT_PINNED)");
+    expect(db.queries.some((sql) => sql.includes("current_database()"))).toBe(false);
+    expect(db.queries.at(-1)).toBe("ROLLBACK");
+    expect(db.end).toHaveBeenCalledTimes(1);
+  });
+
+  it("SQL が失敗したら止まり、ドライバのメッセージ（接続URL）を表示しない", async () => {
+    const db = fakeDatabase({ failOn: "pg_catalog.pg_class c" });
+    const { f, result } = await run(db);
+    const error = await result.catch((e: Error) => e);
+    expect(error).toMatchObject({ code: "VERIFY_CHECK_FAILED" });
+    expect((error as Error).message).toContain("(QUERY_FAILED)");
+    for (const secret of SECRETS) expect((error as Error).message).not.toContain(secret);
+    expect(db.queries.at(-1)).toBe("ROLLBACK");
+    expect(db.end).toHaveBeenCalledTimes(1);
+    expect(f.logs).toEqual([]);
+  });
+
+  it("接続に失敗したら止まる（クエリは送らず、別の接続先も試さない）", async () => {
+    const db = fakeDatabase({ connectFails: true });
+    const { result } = await run(db);
+    const error = await result.catch((e: Error) => e);
+    expect((error as Error).message).toContain("(CONNECT_FAILED)");
+    for (const secret of SECRETS) expect((error as Error).message).not.toContain(secret);
+    expect(db.connect).toHaveBeenCalledTimes(1);
+    expect(db.queries).toEqual([]);
+  });
+
+  it("ROLLBACK に失敗したら、判定が A でも成功とせずに止まる。接続は閉じる", async () => {
+    const db = fakeDatabase({ state: "A", rollbackFails: true });
+    const { f, result } = await run(db);
+    const error = await result.catch((e: Error) => e);
+    expect((error as Error).message).toContain("(QUERY_FAILED)");
+    for (const secret of SECRETS) expect((error as Error).message).not.toContain(secret);
+    expect(db.end).toHaveBeenCalledTimes(1);
+    expect(f.logs).toEqual([]);
+  });
+
+  it("接続先の検証に失敗したら、本物の判定でも接続しない", async () => {
+    const db = fakeDatabase();
+    const f = fake({ argv: ["--verify"], readOnlyClassifier: db.classifier, files: { ".env.test": { ...GOOD_TEST_ENV, DATABASE_URL: DEV_URL } } });
+    await expectStopped(f, "TARGET_REJECTED");
+    expect(db.connect).not.toHaveBeenCalled();
+  });
+});
+
+describe("--verify の静的な確認（ソース）", () => {
+  it("スクリプトは、--verify の許可を固定の READ_ONLY_DATABASE_DISABLED にし、migration 用の許可と分けて渡す", () => {
+    const source = codeOf("scripts/testdb-migrate.mts");
+    expect(source).toMatch(/^\s*readOnlyDatabase: READ_ONLY_DATABASE_DISABLED,$/m);
+    expect(source.match(/readOnlyDatabase/g)).toHaveLength(1);
+    expect(source).not.toMatch(/enabled-read-only/);
+  });
+
+  it("READ_ONLY_DATABASE_DISABLED は変更できず、LIVE_DATABASE_DISABLED とは別の値", () => {
+    expect(READ_ONLY_DATABASE_DISABLED).toEqual({ mode: "disabled" });
+    expect(Object.isFrozen(READ_ONLY_DATABASE_DISABLED)).toBe(true);
+    expect(READ_ONLY_DATABASE_DISABLED).not.toBe(LIVE_DATABASE_DISABLED);
+  });
+
+  it("--verify の経路は、Prisma CLI（spawn）・migration 用の許可・Prisma CLI のコマンドを参照しない", () => {
+    const source = codeOf("lib/testing/testDbMigrate.ts");
+    const start = source.indexOf("async function runReadOnlyVerify(");
+    const body = source.slice(start, source.indexOf("\n}\n", start));
+    expect(start).toBeGreaterThan(-1);
+    for (const forbidden of ["spawn", "liveDatabase", "PRISMA_MIGRATE_COMMAND", "PRISMA_CLI_ENTRY", "migrate deploy", "args"]) {
+      expect(body).not.toContain(forbidden);
+    }
+    // 分岐は、Prisma CLI のコマンドを組み立てる前にある
+    expect(source.indexOf('if (mode === "verify") return runReadOnlyVerify(')).toBeLessThan(source.indexOf("const args = [path.join(root, PRISMA_CLI_ENTRY)"));
+  });
+
+  it("npm の testdb:verify は、--verify だけを付けてスクリプトを実行する", () => {
+    const pkg = JSON.parse(readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
+    expect(pkg.scripts["testdb:verify"]).toBe("node scripts/testdb-migrate.mts --verify");
+    expect(pkg.scripts["testdb:migrate"]).toBe("node scripts/testdb-migrate.mts");
   });
 });
 

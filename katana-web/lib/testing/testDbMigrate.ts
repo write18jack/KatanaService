@@ -10,9 +10,12 @@ import {
 } from "../db/testDatabaseGuard.ts";
 import {
   applicationTablesFromSchema,
+  EXPECTED_DATABASE,
+  EXPECTED_USER,
   IntegrationDatabaseCheckError,
   type IntegrationDbClient,
   listMigrationNames,
+  TEST_DATABASE_MARKER,
 } from "./integrationDatabaseCheck.ts";
 import { DEVELOPMENT_ENV_FILE, inheritAllowedEnv, TEST_ENV_FILE } from "./integrationEnv.ts";
 import { classifyTestDatabase, enumNamesFromSchema, type TestDatabaseState } from "./testDbState.ts";
@@ -34,6 +37,11 @@ import { classifyTestDatabase, enumNamesFromSchema, type TestDatabaseState } fro
  * 9〜11. 読み取り専用の接続・本人確認・状態 A・B・C の判定（classifyDatabase。接続は判定ごとに1回で、終わったら閉じる）
  * 12. A のときだけ、固定のコマンドで Prisma CLI（`migrate deploy`）を起動する。B は理由を表示して止まり、C は起動せずに成功とする
  * 13. migration の後に、別の接続でもう一度、本人確認と状態の判定を行う  14. C であることを確かめて終了する
+ *
+ * 読み取り専用の検証モード（`--verify`。Step 3-11B）は、1〜7を共有した後、通常実行モードとは別の経路に分かれる:
+ * 読み取り専用の接続の許可（readOnlyDatabase。migration 用の liveDatabase とは別）を確かめ、本人確認と状態の判定を1回だけ行って、
+ * 結果を表示して終わる。A・C は成功、B は失敗。**どの状態でも Prisma CLI を起動せず（spawn を呼ばない）、liveDatabase も使わない。**
+ * 判定の SQL は `BEGIN READ ONLY`・search_path の固定（トランザクションの中だけ）・SHOW・SELECT・ROLLBACK だけ（lib/testing/testDbState.ts）。
  *
  * どの状態でも、reset・DROP・TRUNCATE・DELETE・自動復旧・migration の自動継続は行わない。
  * 判定（9〜11・13）そのものの失敗は、A・B・C のどれとも扱わず、Prisma CLI を起動せずに止まる。
@@ -65,6 +73,8 @@ export type TestDbMigrateErrorCode =
   | "UNSAFE_PARENT_ENV"
   | "REQUIRED_FILE_MISSING"
   | "TESTDB_MIGRATION_LIVE_DISABLED"
+  | "TESTDB_VERIFY_LIVE_DISABLED"
+  | "VERIFY_CHECK_FAILED"
   | "STATE_CHECK_FAILED"
   | "DATABASE_STATE_INCONSISTENT"
   | "MIGRATION_FAILED"
@@ -82,7 +92,7 @@ export class TestDbMigrateError extends Error {
 }
 
 type EnvSource = Readonly<Record<string, string | undefined>>;
-export type TestDbMigrateMode = "run" | "check";
+export type TestDbMigrateMode = "run" | "check" | "verify";
 
 export type SpawnOptions = {
   cwd: string;
@@ -101,6 +111,16 @@ export type ClassifyDatabase = (input: { databaseUrl: string; developmentDatabas
 export type LiveDatabaseAccess = { readonly mode: "disabled" } | { readonly mode: "enabled"; readonly classifyDatabase: ClassifyDatabase };
 export const LIVE_DATABASE_DISABLED: LiveDatabaseAccess = Object.freeze({ mode: "disabled" });
 
+/**
+ * 読み取り専用の検証モード（`--verify`）の、実DBへの接続の許可。migration 用の LiveDatabaseAccess とは別の型・別の値で、共有しない。
+ * scripts/testdb-migrate.mts は READ_ONLY_DATABASE_DISABLED を固定で渡す（環境変数・引数では変えられない）。
+ * 有効にするのは、個別の承認を得た後続の工程で、スクリプトのコードを変えたときだけ。単体テストは、偽の判定関数で有効にする。
+ */
+export type ReadOnlyDatabaseAccess =
+  | { readonly mode: "disabled" }
+  | { readonly mode: "enabled-read-only"; readonly classifyDatabase: ClassifyDatabase };
+export const READ_ONLY_DATABASE_DISABLED: ReadOnlyDatabaseAccess = Object.freeze({ mode: "disabled" });
+
 export type TestDbMigrateDeps = {
   /** katana-web/ の絶対パス（子プロセスの作業ディレクトリ） */
   root: string;
@@ -116,6 +136,8 @@ export type TestDbMigrateDeps = {
   pathExists: (absolutePath: string) => boolean;
   /** 実DBへの接続の許可と、状態の判定。通常実行モードで、確認モードの終了点より後にだけ使う */
   liveDatabase: LiveDatabaseAccess;
+  /** 読み取り専用の検証モード（--verify）だけで使う、実DBへの接続の許可と状態の判定。liveDatabase とは共有しない */
+  readOnlyDatabase: ReadOnlyDatabaseAccess;
   /** 子プロセスを起動し、終了コードを返す */
   spawn: (command: string, args: readonly string[], options: SpawnOptions) => Promise<number>;
   log: (text: string) => void;
@@ -124,7 +146,8 @@ export type TestDbMigrateDeps = {
 export function parseTestDbMigrateArgs(args: readonly string[]): TestDbMigrateMode {
   if (args.length === 0) return "run";
   if (args.length === 1 && args[0] === "--check") return "check";
-  throw new TestDbMigrateError("ARGUMENTS_INVALID", "the only accepted argument is --check.");
+  if (args.length === 1 && args[0] === "--verify") return "verify";
+  throw new TestDbMigrateError("ARGUMENTS_INVALID", "the only accepted arguments are --check or --verify (one at a time).");
 }
 
 /** 検証関数を実行し、失敗したらエラーコードだけを含むエラーに置き換える（拒否された値を表示しない） */
@@ -166,23 +189,78 @@ export function createTestDatabaseClassifier(input: {
   return ({ databaseUrl, developmentDatabaseUrl }) => classifyTestDatabase({ databaseUrl, developmentDatabaseUrl, expected, connect: input.connect });
 }
 
+const CHECK_LABELS = {
+  STATE_CHECK_FAILED: "pre-migration",
+  POST_MIGRATION_CHECK_FAILED: "post-migration",
+  VERIFY_CHECK_FAILED: "read-only verification",
+} as const;
+
 /** 判定を実行し、失敗したらコードだけを含むエラーに置き換える（A・B・C のどれとも扱わない） */
 async function classifyOrStop(
   classify: ClassifyDatabase,
   input: Parameters<ClassifyDatabase>[0],
-  code: "STATE_CHECK_FAILED" | "POST_MIGRATION_CHECK_FAILED",
+  code: keyof typeof CHECK_LABELS,
 ): Promise<TestDatabaseState> {
   try {
     return await classify(input);
   } catch (error) {
     const detail = error instanceof IntegrationDatabaseCheckError ? error.code : "unknown";
-    const when = code === "STATE_CHECK_FAILED" ? "pre-migration" : "post-migration";
-    throw new TestDbMigrateError(code, `the ${when} database check failed (${detail}); the Prisma CLI was not started for this check.`);
+    throw new TestDbMigrateError(code, `the ${CHECK_LABELS[code]} database check failed (${detail}); the Prisma CLI was not started for this check.`);
   }
+}
+
+/** schema.prisma・prisma/migrations（状態の判定の期待値）。--verify では、Prisma CLI の存在は確かめない */
+const VERIFY_REQUIRED_PATHS = [path.join("prisma", "schema.prisma"), path.join("prisma", "migrations")];
+
+/**
+ * 読み取り専用の検証モード（--verify）。通常実行モードとは別の経路で、Prisma CLI（spawn）と liveDatabase を一切使わない。
+ * 本人確認（DB名・current_user・session_user・DBのコメント）と search_path の固定は、判定の中で行う（失敗したら判定が throw する）。
+ */
+async function runReadOnlyVerify(input: {
+  deps: TestDbMigrateDeps;
+  target: TestDatabaseTarget;
+  checkInput: Parameters<ClassifyDatabase>[0];
+}): Promise<number> {
+  const { deps, target, checkInput } = input;
+  for (const relative of VERIFY_REQUIRED_PATHS) {
+    if (!deps.pathExists(path.join(deps.root, relative))) {
+      throw new TestDbMigrateError("REQUIRED_FILE_MISSING", `${relative} was not found.`);
+    }
+  }
+
+  // 読み取り専用の接続の許可（スクリプトでは常に無効。接続の前に止まる）
+  if (deps.readOnlyDatabase.mode !== "enabled-read-only") {
+    throw new TestDbMigrateError(
+      "TESTDB_VERIFY_LIVE_DISABLED",
+      "read-only database verification is disabled in this build; refusing to connect to the test database.",
+    );
+  }
+
+  const state = await classifyOrStop(deps.readOnlyDatabase.classifyDatabase, checkInput, "VERIFY_CHECK_FAILED");
+  const header = [
+    `[testdb-migrate] verify mode: read-only check of ${target.host}:${target.port}/${target.database} as ${target.user} (password hidden).`,
+    `identity: current_database() = ${EXPECTED_DATABASE}, current_user = session_user = ${EXPECTED_USER}, database comment = "${TEST_DATABASE_MARKER}"; search_path pinned to pg_catalog.`,
+    "the Prisma CLI was not started; nothing was migrated, reset or changed (the transaction was rolled back).",
+  ];
+  if (state.state === "B") {
+    deps.log([...header, "state B (partially applied, failed or unexpected objects):", ...state.reasons.map((r) => `  - ${r}`)].join("\n"));
+    throw new TestDbMigrateError("DATABASE_STATE_INCONSISTENT", "the test database is neither empty nor fully migrated. Nothing was reset or repaired.");
+  }
+  deps.log(
+    [
+      ...header,
+      state.state === "A"
+        ? "state A: the database is empty (no migrations applied)."
+        : `state C: all ${state.migrations.length} expected migrations are applied and the tables are empty. ` +
+          "Column, index and constraint definitions were not compared (schema diff not verified; Step 3-12).",
+    ].join("\n"),
+  );
+  return 0;
 }
 
 function formatCheckReport(input: {
   liveDatabase: LiveDatabaseAccess;
+  readOnlyDatabase: ReadOnlyDatabaseAccess;
   root: string;
   target: TestDatabaseTarget;
   execPath: string;
@@ -190,7 +268,7 @@ function formatCheckReport(input: {
   childEnv: Record<string, string>;
   droppedKeys: string[];
 }): string {
-  const { liveDatabase, root, target, execPath, args, childEnv, droppedKeys } = input;
+  const { liveDatabase, readOnlyDatabase, root, target, execPath, args, childEnv, droppedKeys } = input;
   return [
     "[testdb-migrate] check mode: the Prisma CLI was not started and no database connection was made.",
     "",
@@ -199,6 +277,7 @@ function formatCheckReport(input: {
     `command: ${path.basename(execPath)} ${args.map((arg) => (path.isAbsolute(arg) ? path.relative(root, arg) : arg)).join(" ")} (no shell)`,
     "database checks: identity and state (A: empty / B: inconsistent / C: fully migrated) before the Prisma CLI, and again after it (not run in check mode)",
     `live database access: ${liveDatabase.mode === "enabled" ? "enabled" : "disabled in this build (normal mode stops with TESTDB_MIGRATION_LIVE_DISABLED before connecting)"}`,
+    `read-only verification (--verify): ${readOnlyDatabase.mode === "enabled-read-only" ? "enabled" : "disabled in this build (stops with TESTDB_VERIFY_LIVE_DISABLED before connecting)"}`,
     "",
     "child environment:",
     ...Object.keys(childEnv)
@@ -260,6 +339,10 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
   // 7. 子プロセスの環境変数。作った後の最終的な値で、もう一度検証する
   const { childEnv, droppedKeys } = buildTestDbMigrateEnv(deps.parentEnv, verifiedUrl);
   const target = verifyTarget(childEnv.DATABASE_URL, childEnv, developmentEnv);
+  const checkInput = { databaseUrl: verifiedUrl, developmentDatabaseUrl: developmentEnv?.DATABASE_URL };
+
+  // 読み取り専用の検証モードは、ここで通常実行モード・確認モードと分かれる（Prisma CLI のコマンドを組み立てない）
+  if (mode === "verify") return runReadOnlyVerify({ deps, target, checkInput });
 
   // 8. コマンド（固定）
   for (const relative of REQUIRED_PATHS) {
@@ -270,7 +353,7 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
   const args = [path.join(root, PRISMA_CLI_ENTRY), ...PRISMA_MIGRATE_COMMAND, "--config", path.join(root, PRISMA_CONFIG_FILE)];
 
   if (mode === "check") {
-    deps.log(formatCheckReport({ liveDatabase: deps.liveDatabase, root, target, execPath: deps.execPath, args, childEnv, droppedKeys }));
+    deps.log(formatCheckReport({ liveDatabase: deps.liveDatabase, readOnlyDatabase: deps.readOnlyDatabase, root, target, execPath: deps.execPath, args, childEnv, droppedKeys }));
     return 0;
   }
 
@@ -282,7 +365,6 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
     );
   }
   const { classifyDatabase } = deps.liveDatabase;
-  const checkInput = { databaseUrl: verifiedUrl, developmentDatabaseUrl: developmentEnv?.DATABASE_URL };
 
   // 9〜11. 読み取り専用の接続・本人確認・状態の判定
   const before = await classifyOrStop(classifyDatabase, checkInput, "STATE_CHECK_FAILED");
