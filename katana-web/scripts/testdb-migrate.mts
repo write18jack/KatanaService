@@ -14,16 +14,18 @@
  * 環境変数・引数では解除できない。接続を有効にするのは、承認を得た後続の工程で、このファイルを変更したときだけ
  * （connectTestDatabase を渡した createTestDatabaseClassifier を使う。lib/testing/testDbMigrate.ts）。
  *
- * 読み取り専用の検証モード（--verify）も、現時点では必ず停止する。接続の許可を、migration 用とは別の固定の
- * READ_ONLY_DATABASE_DISABLED にしているため（TESTDB_VERIFY_LIVE_DISABLED。すべての検証の後、DBへの接続の前に止まる）。
- * 環境変数・引数では解除できない。有効にするのは、個別の承認を得た後続の工程で、readOnlyDatabase だけを変更したとき。
+ * 読み取り専用の検証モード（--verify）だけは、実DBへの接続を許可する（Step 3-11B で個別の承認を得て有効化）。
+ * 許可は migration 用とは別の readOnlyDatabase で、コードに固定している（環境変数・引数では変えられない）。
+ * 接続の部品（connectTestDatabase・createTestDatabaseClassifier）は、--verify の判定が呼ばれたときにだけ使う。
+ * 判定は BEGIN READ ONLY の中の SELECT・SHOW と ROLLBACK だけで、Prisma CLI は起動しない（lib/testing/testDbMigrate.ts）。
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { IntegrationRunnerError, readEnvFile } from "../lib/testing/integrationEnv.ts";
-import { LIVE_DATABASE_DISABLED, READ_ONLY_DATABASE_DISABLED, runTestDbMigrate, TestDbMigrateError } from "../lib/testing/testDbMigrate.ts";
+import { connectTestDatabase } from "../lib/testing/testDbConnection.ts";
+import { createTestDatabaseClassifier, LIVE_DATABASE_DISABLED, runTestDbMigrate, TestDbMigrateError } from "../lib/testing/testDbMigrate.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -37,8 +39,12 @@ runTestDbMigrate({
   pathExists: existsSync,
   // 実DBへの接続は無効（固定）。通常実行モードは、DBに接続する前に TESTDB_MIGRATION_LIVE_DISABLED で止まる
   liveDatabase: LIVE_DATABASE_DISABLED,
-  // 読み取り専用の検証（--verify）の接続も無効（固定）。migration 用の許可とは共有しない
-  readOnlyDatabase: READ_ONLY_DATABASE_DISABLED,
+  // 読み取り専用の検証（--verify）だけ、実DBへの接続を許可する（固定）。migration 用の許可とは共有しない。
+  // 期待値のファイルの読み込みと接続は、--verify の判定が呼ばれたときにだけ行う
+  readOnlyDatabase: {
+    mode: "enabled-read-only",
+    classifyDatabase: (input) => createTestDatabaseClassifier({ root: ROOT, connect: connectTestDatabase })(input),
+  },
   spawn: (command, args, options) =>
     new Promise((resolve, reject) => {
       // NODE_ENV は設定しない（型の上で必須になっているだけなので、値は変えずに型だけ合わせる）

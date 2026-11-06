@@ -343,15 +343,21 @@ describe("runTestDbMigrate：実DBへの接続の許可（強制停止）", () =
     expect(Object.isFrozen(LIVE_DATABASE_DISABLED)).toBe(true);
   });
 
-  it("スクリプト（scripts/testdb-migrate.mts）は、許可を固定の LIVE_DATABASE_DISABLED にし、DBへの接続の部品を読み込まない", () => {
+  it("スクリプト（scripts/testdb-migrate.mts）は、migration 用の許可を固定の LIVE_DATABASE_DISABLED にし、接続の部品は --verify の許可の中だけで使う", () => {
     const source = codeOf("scripts/testdb-migrate.mts");
     expect(source).toMatch(/^\s*liveDatabase: LIVE_DATABASE_DISABLED,$/m);
     expect(source).not.toMatch(/mode:\s*["']enabled["']/);
-    for (const forbidden of ["testDbConnection", "connectTestDatabase", "createTestDatabaseClassifier", "classifyTestDatabase", '"pg"', "process.env.KATANA_TESTDB"]) {
-      expect(source).not.toContain(forbidden);
-    }
     // 許可は引数・環境変数から決めない（liveDatabase に渡す値は定数だけ）
     expect(source.match(/liveDatabase/g)).toHaveLength(1);
+    for (const forbidden of ["classifyTestDatabase", '"pg"', "process.env.KATANA_TESTDB", "process.argv.includes"]) {
+      expect(source).not.toContain(forbidden);
+    }
+    // 接続の部品は、import と readOnlyDatabase の中の1か所だけ
+    const readOnlyBlock = source.slice(source.indexOf("readOnlyDatabase: {"), source.indexOf("},", source.indexOf("readOnlyDatabase: {")));
+    for (const part of ["connectTestDatabase", "createTestDatabaseClassifier"]) {
+      expect(source.match(new RegExp(part, "g"))).toHaveLength(2);
+      expect(readOnlyBlock).toContain(part);
+    }
   });
 
   it("globalSetup の強制停止は変わっていない（DBへの接続の部品も読み込まない）", () => {
@@ -805,11 +811,21 @@ describe("runTestDbMigrate：--verify と本物の判定（偽のDBクライア�
 });
 
 describe("--verify の静的な確認（ソース）", () => {
-  it("スクリプトは、--verify の許可を固定の READ_ONLY_DATABASE_DISABLED にし、migration 用の許可と分けて渡す", () => {
+  it("スクリプトは、--verify の許可だけを固定で有効にする（条件分岐・環境変数・引数で切り替えない）", () => {
     const source = codeOf("scripts/testdb-migrate.mts");
-    expect(source).toMatch(/^\s*readOnlyDatabase: READ_ONLY_DATABASE_DISABLED,$/m);
+    const expected = [
+      "  readOnlyDatabase: {",
+      '    mode: "enabled-read-only",',
+      "    classifyDatabase: (input) => createTestDatabaseClassifier({ root: ROOT, connect: connectTestDatabase })(input),",
+      "  },",
+    ].join("\n");
+    expect(source).toContain(expected);
     expect(source.match(/readOnlyDatabase/g)).toHaveLength(1);
-    expect(source).not.toMatch(/enabled-read-only/);
+    expect(source.match(/enabled-read-only/g)).toHaveLength(1);
+    // 環境変数は、検証の対象として parentEnv に渡すだけ（許可の切り替えには使わない）
+    expect(source.match(/process\.env/g)).toHaveLength(1);
+    expect(source).toMatch(/^\s*parentEnv: process\.env,$/m);
+    expect(source).not.toContain("READ_ONLY_DATABASE_DISABLED");
   });
 
   it("READ_ONLY_DATABASE_DISABLED は変更できず、LIVE_DATABASE_DISABLED とは別の値", () => {
