@@ -342,7 +342,7 @@ const KNOWN_DB_INTEGRATION_TEST_FILES = [
   "lib/market-analytics/priceTrend.integration.test.ts",
   "lib/market-analytics/soldMetrics.integration.test.ts",
 ];
-const EXPECTED_UNIT_TEST_COUNT = 32;
+const EXPECTED_UNIT_TEST_COUNT = 33;
 const INTEGRATION_TEST_GLOB = "**/*.integration.test.{ts,tsx}";
 const TEST_FILE = /\.test\.tsx?$/;
 const INTEGRATION_TEST_FILE = /\.integration\.test\.tsx?$/;

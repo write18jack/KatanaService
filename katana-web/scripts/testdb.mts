@@ -3,6 +3,7 @@
  *
  *   npm run testdb:check            … .env.test・Compose の環境変数・`docker compose config` の結果を検証する（コンテナは操作しない）
  *   npm run testdb:status           … katana-test プロジェクトのコンテナと、開発用ボリュームの状態を読み取るだけ
+ *   npm run testdb:identity         … テストDBのコンテナの識別情報（readTestDbDockerIdentity）を読み取るだけ（Step 3-11F。DBには接続しない）
  *   npm run testdb:up               … 起動前の確認だけを行い、実行する予定のコマンドを表示する（コンテナは操作しない）
  *   npm run testdb:up -- --apply    … 確認がすべて通った場合だけ、テストDBのコンテナを作成・起動し、起動後の確認を行う
  *   npm run testdb:down             … 停止前の確認だけを行い、実行する予定のコマンドを表示する（コンテナは操作しない）
@@ -19,6 +20,9 @@
  * - パスワード・接続URL・`docker compose config` の出力の全文は表示しない。失敗したときはエラーコードだけを表示する。
  *
  * 検証の関数はこのファイルから export し、単体テストから読み込む。直接実行したときだけ main() が動く。
+ *
+ * readTestDbDockerIdentity（Step 3-11E）：migration の前後の照合に使う、テストDBのコンテナの識別情報を読み取りだけで集める
+ * （上の許可リストのコマンドだけ。Config.Env は読まない）。runTestDb の動作は変えない。
  */
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -34,6 +38,7 @@ import {
   type TestDatabaseTarget,
 } from "../lib/db/testDatabaseGuard.ts";
 import { DEVELOPMENT_ENV_FILE, inheritAllowedEnv, IntegrationRunnerError, readEnvFile, TEST_ENV_FILE } from "../lib/testing/integrationEnv.ts";
+import { isUtcTimestamp, type TestDbDockerIdentity } from "../lib/testing/testDbIdentity.ts";
 
 export const COMPOSE_PROJECT = "katana-test";
 export const COMPOSE_FILE = "docker-compose.test.yml";
@@ -92,7 +97,8 @@ export type TestDbErrorCode =
   | "DEVELOPMENT_VOLUME_IN_USE"
   | "CONTAINER_INSPECT_INVALID"
   | "CONTAINER_INSPECT_MISMATCH"
-  | "POST_CHECK_FAILED";
+  | "POST_CHECK_FAILED"
+  | "DOCKER_IDENTITY_MISMATCH";
 
 export class TestDbError extends Error {
   readonly code: TestDbErrorCode;
@@ -105,7 +111,7 @@ export class TestDbError extends Error {
 }
 
 type EnvSource = Readonly<Record<string, string | undefined>>;
-export type TestDbMode = "check" | "status" | "up" | "down";
+export type TestDbMode = "check" | "status" | "identity" | "up" | "down";
 /** apply が true のときだけ、up・down の変更操作を実行する */
 export type TestDbCommand = { mode: TestDbMode; apply: boolean };
 export type CommandResult = { code: number; stdout: string; stderr: string };
@@ -129,6 +135,7 @@ export type TestDbDeps = {
 const ACCEPTED_ARGS: ReadonlyArray<readonly [readonly string[], TestDbCommand]> = [
   [["--check"], { mode: "check", apply: false }],
   [["--status"], { mode: "status", apply: false }],
+  [["--identity-check"], { mode: "identity", apply: false }],
   [["--up"], { mode: "up", apply: false }],
   [["--up", "--apply"], { mode: "up", apply: true }],
   [["--down"], { mode: "down", apply: false }],
@@ -139,7 +146,7 @@ export function parseTestDbArgs(args: readonly string[]): TestDbCommand {
   for (const [expected, command] of ACCEPTED_ARGS) {
     if (expected.length === args.length && expected.every((value, i) => value === args[i])) return { ...command };
   }
-  throw new TestDbError("ARGUMENTS_INVALID", "the only accepted arguments are --check, --status, --up [--apply] or --down [--apply].");
+  throw new TestDbError("ARGUMENTS_INVALID", "the only accepted arguments are --check, --status, --identity-check, --up [--apply] or --down [--apply].");
 }
 
 export type VerifiedTestDbEnv = {
@@ -295,6 +302,15 @@ export const CONTAINER_INSPECT_FORMAT =
   '"imageVolumes":{{json .Config.Volumes}},' +
   '"ports":{{json .HostConfig.PortBindings}}}';
 const INSPECT_ARGS = ["inspect", "--type", "container", TEST_CONTAINER, "--format", CONTAINER_INSPECT_FORMAT];
+/**
+ * 識別情報（Step 3-11E）として読む項目だけを JSON の形で取り出す：コンテナID・イメージID・起動時刻・再起動の回数・
+ * Compose の既定のネットワーク（katana-test_default）の ID と IP、ネットワークの数。Config.Env などは読まない。
+ */
+export const IDENTITY_INSPECT_FORMAT =
+  '{"id":{{json .Id}},"image":{{json .Image}},"startedAt":{{json .State.StartedAt}},"restartCount":{{json .RestartCount}},' +
+  '"networkCount":{{len .NetworkSettings.Networks}},' +
+  `"network":{{with index .NetworkSettings.Networks "${COMPOSE_PROJECT}_default"}}{"id":{{json .NetworkID}},"ip":{{json .IPAddress}}}{{else}}null{{end}}}`;
+const IDENTITY_INSPECT_ARGS = ["inspect", "--type", "container", TEST_CONTAINER, "--format", IDENTITY_INSPECT_FORMAT];
 const IMAGE_ARGS = ["image", "inspect", TEST_IMAGE, "--format", "{{.Id}}"];
 
 const sameArgs = (expected: readonly string[], args: readonly string[]) =>
@@ -317,6 +333,7 @@ function isReadOnlyDockerCommand(root: string, args: readonly string[]): boolean
     ["volume", "inspect", DEVELOPMENT_VOLUME, "--format", DEVELOPMENT_VOLUME_FORMAT],
     IMAGE_ARGS,
     INSPECT_ARGS,
+    IDENTITY_INSPECT_ARGS,
   ].some((expected) => sameArgs(expected, args));
 }
 
@@ -342,7 +359,7 @@ type Docker = {
   mutate: (args: readonly string[]) => Promise<void>;
 };
 
-function makeDocker(deps: TestDbDeps, childEnv: Record<string, string>, verified: VerifiedTestDbEnv, apply: boolean): Docker {
+function makeDocker(deps: Pick<TestDbDeps, "root" | "run">, childEnv: Record<string, string>, verified: VerifiedTestDbEnv, apply: boolean): Docker {
   const options: RunOptions = { cwd: deps.root, env: childEnv, shell: false };
   const failed = (args: readonly string[], result: CommandResult) => {
     const stderr = redact(result.stderr.trim(), verified).slice(0, 500);
@@ -727,6 +744,75 @@ function describeSnapshot(snapshot: DockerSnapshot): string[] {
   ];
 }
 
+/* eslint-disable @typescript-eslint/no-explicit-any -- docker inspect の JSON を、形を確かめながら読む */
+/** IDENTITY_INSPECT_FORMAT の出力を検証して読む。形が違えば CONTAINER_INSPECT_INVALID（値は表示しない） */
+export function parseDockerIdentityInspect(json: string): Pick<TestDbDockerIdentity, "containerId" | "imageId" | "startedAt" | "restartCount" | "networkId" | "networkIp"> {
+  let c: any;
+  try {
+    c = JSON.parse(json);
+  } catch {
+    throw new TestDbError("CONTAINER_INSPECT_INVALID", "docker inspect did not return JSON.");
+  }
+  const hex64 = /^[0-9a-f]{64}$/;
+  const valid =
+    typeof c?.id === "string" &&
+    hex64.test(c.id) &&
+    typeof c?.image === "string" &&
+    /^sha256:[0-9a-f]{64}$/.test(c.image) &&
+    isUtcTimestamp(c?.startedAt) &&
+    Number.isInteger(c?.restartCount) &&
+    c.restartCount >= 0 &&
+    c?.networkCount === 1 &&
+    typeof c?.network?.id === "string" &&
+    hex64.test(c.network.id) &&
+    typeof c?.network?.ip === "string" &&
+    /^[0-9A-Fa-f.:]+$/.test(c.network.ip);
+  if (!valid) throw new TestDbError("CONTAINER_INSPECT_INVALID", "the container identity could not be read.");
+  return { containerId: c.id, imageId: c.image, startedAt: c.startedAt, restartCount: c.restartCount, networkId: c.network.id, networkIp: c.network.ip };
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+/**
+ * テストDBのコンテナの識別情報を、読み取り専用のコマンドだけで集める（Step 3-11E。migration の前後の照合に使う）。
+ * コンテナ名だけでなく、Compose のラベル・ポート・マウント・状態・イメージ・ネットワークを組み合わせて確かめ、
+ * 1つでも合わなければ DOCKER_IDENTITY_MISMATCH で止まる（項目名だけを表示する）。何も変更しない。
+ */
+export async function readTestDbDockerIdentity(deps: Pick<TestDbDeps, "root" | "parentEnv" | "readEnvFile" | "run">): Promise<TestDbDockerIdentity> {
+  const { root } = deps;
+  const dockerTarget = DOCKER_TARGET_ENV.filter((key) => deps.parentEnv[key] !== undefined);
+  if (dockerTarget.length > 0) {
+    throw new TestDbError("DOCKER_TARGET_ENV_PRESENT", `unset ${dockerTarget.join(", ")} before running this script.`);
+  }
+  const verified = verifyTestDbEnv(deps.readEnvFile(path.join(root, TEST_ENV_FILE)), deps.readEnvFile(path.join(root, DEVELOPMENT_ENV_FILE)));
+  const { childEnv } = buildComposeEnv(deps.parentEnv, verified);
+  const docker = makeDocker(deps, childEnv, verified, false);
+  if ((await docker.read(["context", "show"])).trim() !== EXPECTED_DOCKER_CONTEXT) {
+    throw new TestDbError("DOCKER_CONTEXT_MISMATCH", `the docker context is not ${EXPECTED_DOCKER_CONTEXT}.`);
+  }
+
+  const snapshot = await readSnapshot(root, docker);
+  const mismatches: string[] = [];
+  const check = (name: string, ok: boolean) => {
+    if (!ok) mismatches.push(name);
+  };
+  const c = snapshot.projectContainers;
+  check("project containers", c.length === 1 && c[0].name === TEST_CONTAINER && c[0].service === TEST_SERVICE);
+  check("container state", c.length === 1 && c[0].state === "running" && c[0].health === "healthy");
+  check("labeled containers", sameList(snapshot.labeledContainers, [TEST_CONTAINER]));
+  check("container name", sameList(snapshot.sameNameContainers, [`${TEST_CONTAINER}\t${COMPOSE_PROJECT}`]));
+  check("project volumes", snapshot.projectVolumes.length === 0);
+  check("port publishers", sameList(snapshot.portPublishers, [TEST_CONTAINER]));
+  check("development container katana-db", snapshot.developmentContainer.length === 0);
+  check("development volume", snapshot.developmentVolume.length > 0 && snapshot.developmentVolumeUsers.length === 0);
+  mismatches.push(...containerInspectMismatches(await docker.read(INSPECT_ARGS), root, { running: true }).map((name) => `inspect: ${name}`));
+  const identity = parseDockerIdentityInspect(await docker.read(IDENTITY_INSPECT_ARGS));
+  check("image", (await docker.read(IMAGE_ARGS)).trim() === identity.imageId);
+  if (mismatches.length > 0) {
+    throw new TestDbError("DOCKER_IDENTITY_MISMATCH", `the test database container did not pass the identity checks: ${mismatches.join(", ")}.`);
+  }
+  return { ...identity, volumes: snapshot.volumes, developmentVolume: snapshot.developmentVolume, portPublishers: snapshot.portPublishers };
+}
+
 /** 手順どおりに検証し、成功したら0を返す。失敗したら TestDbError を投げる */
 export async function runTestDb(deps: TestDbDeps): Promise<number> {
   const { root } = deps;
@@ -775,6 +861,30 @@ export async function runTestDb(deps: TestDbDeps): Promise<number> {
   const untouched = "no container was created, started, stopped or removed, and no database connection was made.";
   if (mode === "check") {
     deps.log([`[testdb] check mode: ${untouched}`, ...details].join("\n"));
+    return 0;
+  }
+
+  // 識別情報の確認（読み取りだけ。apply は常に false なので、変更操作の経路には進めない）
+  if (mode === "identity") {
+    const identity = await readTestDbDockerIdentity(deps);
+    deps.log(
+      [
+        `[testdb] identity-check mode: ${untouched}`,
+        ...details,
+        "",
+        "container identity checks: passed (compose labels, port 127.0.0.1:5434, mounts and tmpfs, running and healthy, image, project volumes, development record)",
+        `container id: ${identity.containerId}`,
+        `image id: ${identity.imageId}`,
+        `started at: ${identity.startedAt}`,
+        `restart count: ${identity.restartCount}`,
+        `network ${COMPOSE_PROJECT}_default: id ${identity.networkId}, address ${identity.networkIp}`,
+        `containers publishing port ${TEST_HOST_PORT}: ${identity.portPublishers.join(", ")}`,
+        `all volumes: ${identity.volumes.length}`,
+        `development volume (name, created, compose project, compose volume): ${identity.developmentVolume.join(", ")}`,
+        // 照合の関数にそのまま渡せる形（秘密情報は含まない）
+        `identity json: ${JSON.stringify(identity)}`,
+      ].join("\n"),
+    );
     return 0;
   }
 

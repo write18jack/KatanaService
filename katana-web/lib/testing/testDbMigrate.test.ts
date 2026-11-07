@@ -23,6 +23,7 @@ import {
   TestDbMigrateError,
   type TestDbMigrateErrorCode,
 } from "./testDbMigrate";
+import type { TestDatabaseServerIdentity, TestDbDockerIdentity } from "./testDbIdentity";
 import { enumNamesFromSchema, type TestDatabasePrivileges, type TestDatabaseState } from "./testDbState";
 
 // Prisma CLI を起動せず、DBにも接続しない。ファイル・子プロセス・DBの状態の判定は、すべて偽の関数で置き換える
@@ -50,6 +51,20 @@ const STATE_C: TestDatabaseState = { state: "C", tables: ["Shop"], migrations: [
 const STATE_B: TestDatabaseState = { state: "B", reasons: ["migration history does not match (missing: 5, extra: 0, failed or rolled back: 0, duplicated: no)"] };
 /** migration に必要な権限がすべてある（初期化スクリプトの設計どおり） */
 const ALL_PRIVILEGES: TestDatabasePrivileges = { publicUsage: true, publicCreate: true, databaseOwner: true, databaseCreate: true };
+/** テストDBのコンテナの識別情報（偽の値。実際のコンテナIDではない） */
+const DOCKER: TestDbDockerIdentity = {
+  containerId: "a".repeat(64),
+  imageId: `sha256:${"b".repeat(64)}`,
+  startedAt: "2026-11-06T22:46:49.619782389Z",
+  restartCount: 0,
+  networkId: "c".repeat(64),
+  networkIp: "172.18.0.2",
+  volumes: ["0df3f60a", "katana-web_postgres_data"],
+  developmentVolume: ["katana-web_postgres_data\t2026-07-18T05:42:41Z\tkatana-web\tpostgres_data"],
+  portPublishers: ["katana-test-db"],
+};
+/** DB 側の識別情報（コンテナの起動の2秒後に postmaster が起動した） */
+const SERVER: TestDatabaseServerIdentity = { serverAddress: "172.18.0.2", serverPort: 5432, postmasterStartTime: "2026-11-06T22:46:51.123456Z" };
 
 type Fake = {
   deps: TestDbMigrateDeps;
@@ -58,6 +73,8 @@ type Fake = {
   classify: Mock<ClassifyDatabase>;
   /** 読み取り専用の検証モード（--verify）の判定（liveDatabase とは別の偽の関数） */
   verify: Mock<InspectDatabase>;
+  /** migration 用の Docker の識別情報の読み取り */
+  readDockerIdentity: Mock<() => Promise<TestDbDockerIdentity>>;
   logs: string[];
   /** 呼ばれた順の記録 */
   calls: string[];
@@ -80,6 +97,10 @@ function fake(
     readOnlyInspector?: InspectDatabase;
     /** 偽の判定が返す権限（既定はすべてあり）。migration 用・--verify 用の両方に使う */
     privileges?: Partial<TestDatabasePrivileges>;
+    /** 偽の判定が返す DB の識別情報（呼ばれた順。足りなければ最後の値を使う。既定は SERVER） */
+    servers?: TestDatabaseServerIdentity[];
+    /** migration 用の Docker の識別情報（呼ばれた順。Error なら throw する。足りなければ最後の値を使う。既定は DOCKER） */
+    dockers?: (TestDbDockerIdentity | Error)[];
   } = {},
 ): Fake {
   const calls: string[] = [];
@@ -104,13 +125,22 @@ function fake(
   });
   const verifyStates = [...(overrides.verifyStates ?? [STATE_A])];
   const privileges = { ...ALL_PRIVILEGES, ...overrides.privileges };
+  const servers = [...(overrides.servers ?? [SERVER])];
+  const nextServer = () => (servers.length > 1 ? (servers.shift() as TestDatabaseServerIdentity) : servers[0]);
+  const dockers = [...(overrides.dockers ?? [DOCKER])];
+  const readDockerIdentity = vi.fn(async () => {
+    calls.push("docker");
+    const next = dockers.length > 1 ? dockers.shift() : dockers[0];
+    if (next instanceof Error) throw next;
+    return next as TestDbDockerIdentity;
+  });
   const verify = vi.fn<InspectDatabase>(async (input) => {
     calls.push("verify");
     if (overrides.readOnlyInspector) return overrides.readOnlyInspector(input);
     const next = verifyStates.shift();
     if (next === undefined) throw new Error("unexpected verify call in test");
     if (next instanceof Error) throw next;
-    return { state: next, privileges };
+    return { state: next, privileges, server: nextServer() };
   });
   const spawn = vi.fn<TestDbMigrateDeps["spawn"]>(async () => {
     calls.push("spawn");
@@ -129,12 +159,12 @@ function fake(
     },
     liveDatabase: overrides.liveDisabled
       ? LIVE_DATABASE_DISABLED
-      : { mode: "enabled", inspectDatabase: async (input) => ({ state: await classify(input), privileges }) },
+      : { mode: "enabled", inspectDatabase: async (input) => ({ state: await classify(input), privileges, server: nextServer() }), readDockerIdentity },
     readOnlyDatabase: overrides.readOnlyDisabled ? READ_ONLY_DATABASE_DISABLED : { mode: "enabled-read-only", inspectDatabase: verify },
     spawn,
     log: (text) => logs.push(text),
   };
-  return { deps, spawn, classify, verify, logs, calls };
+  return { deps, spawn, classify, verify, readDockerIdentity, logs, calls };
 }
 
 /** 指定したコードで止まり、メッセージ・表示に秘密情報が含まれないこと */
@@ -158,6 +188,7 @@ async function expectStopped(f: Fake, code: TestDbMigrateErrorCode) {
   expect(f.spawn).not.toHaveBeenCalled();
   expect(f.classify).not.toHaveBeenCalled();
   expect(f.verify).not.toHaveBeenCalled();
+  expect(f.readDockerIdentity).not.toHaveBeenCalled();
   return error;
 }
 
@@ -207,9 +238,13 @@ describe("runTestDbMigrate：通常実行モード（A・B・C）", () => {
       "exists:prisma.config.ts",
       "exists:prisma/schema.prisma",
       "exists:prisma/migrations",
+      // Docker の識別情報 D1 → DB の判定 F1 → 直前の D2 → Prisma CLI → DB の再確認 F2 → D3
+      "docker",
       "classify",
+      "docker",
       "spawn",
       "classify",
+      "docker",
     ]);
     expect(f.spawn).toHaveBeenCalledTimes(1);
     // 判定は、検証済みの .env.test の URL だけで行う（2回とも同じ値。別のURLには接続し直さない）
@@ -659,6 +694,8 @@ function fakeDatabase(options: {
   connectFails?: boolean;
   /** 権限の SQL の応答（既定はすべて true） */
   privilegeRows?: Record<string, unknown>[];
+  /** 識別情報の SQL の応答（既定は SERVER） */
+  serverRows?: Record<string, unknown>[];
 } = {}) {
   const schemaSource = readFileSync(path.join(REPO_ROOT, "prisma", "schema.prisma"), "utf8");
   const tables = applicationTablesFromSchema(schemaSource);
@@ -674,6 +711,7 @@ function fakeDatabase(options: {
       if (sql === "ROLLBACK" && options.rollbackFails) throw Object.assign(new Error(`rollback failed ${PASSWORD}`), { code: "57P01" });
       if (sql.includes("set_config")) return { rows: [{ searchPath: options.searchPath ?? "pg_catalog" }] };
       if (sql.includes("has_schema_privilege")) return { rows: options.privilegeRows ?? [{ ...ALL_PRIVILEGES }] };
+      if (sql.includes("inet_server_addr")) return { rows: options.serverRows ?? [{ ...SERVER }] };
       if (sql.includes("transaction_read_only")) return { rows: [{ transaction_read_only: "on" }] };
       if (sql.includes("current_database() AS database")) {
         return {
@@ -922,6 +960,153 @@ describe("migration に必要な権限（Step 3-11D）", () => {
     if (code !== "QUERY_FAILED" && code !== "PRIVILEGES_UNAVAILABLE") {
       expect(db.queries.some((sql) => sql.includes("has_schema_privilege"))).toBe(false);
     }
+  });
+});
+
+describe("接続先の識別情報と TOCTOU の照合（Step 3-11E）", () => {
+  it("--verify：DB の識別情報を、状態・権限とは別の行で表示する（URL・パスワードなし。Docker は読まない）", async () => {
+    const f = fake({ argv: ["--verify"] });
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    const output = f.logs.join("\n");
+    expect(output).toContain("server identity (a snapshot at this check; it does not pin later connections):");
+    expect(output).toContain("  inet_server_addr: 172.18.0.2");
+    expect(output).toContain("  inet_server_port: 5432 (inside the container; the host port 5434 cannot be seen from the database)");
+    expect(output).toContain("  pg_postmaster_start_time: 2026-11-06T22:46:51.123456Z");
+    expect(f.readDockerIdentity).not.toHaveBeenCalled();
+    expect(f.spawn).not.toHaveBeenCalled();
+    for (const secret of SECRETS) expect(output).not.toContain(secret);
+  });
+
+  it("--verify：inet_server_port が 5432 でなければ SERVER_IDENTITY_MISMATCH で失敗する（Prisma CLI は起動しない）", async () => {
+    const f = fake({ argv: ["--verify"], servers: [{ ...SERVER, serverPort: 5434 }] });
+    const error = await expectError(f, "SERVER_IDENTITY_MISMATCH");
+    expect(error.message).toContain("server port is not 5432");
+    expect(f.spawn).not.toHaveBeenCalled();
+  });
+
+  it("--verify：inet_server_addr の値は判定に使わない（どのアドレスでも成功）", async () => {
+    await expect(runTestDbMigrate(fake({ argv: ["--verify"], servers: [{ ...SERVER, serverAddress: "10.1.2.3" }] }).deps)).resolves.toBe(0);
+  });
+
+  it("migration：すべて一致すれば、照合の結果を表示してから migrate deploy に進む（単体テストの偽の許可でだけ）", async () => {
+    const f = fake();
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.readDockerIdentity).toHaveBeenCalledTimes(3);
+    expect(f.spawn).toHaveBeenCalledTimes(1);
+    expect(f.logs.join("\n")).toContain("identity checks passed (container aaaaaaaaaaaa, inet_server_port 5432, inet_server_addr matches the container network address; recorded only)");
+  });
+
+  it("migration：inet_server_addr がコンテナの IP と違っても、記録だけで止めない", async () => {
+    const f = fake({ servers: [{ ...SERVER, serverAddress: "192.168.65.3" }] });
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.logs.join("\n")).toContain("inet_server_addr does not match the container network address; recorded only");
+  });
+
+  it("migration：Docker の検査が失敗したら、DB に接続せずに止まる（コードだけを表示し、生のメッセージは表示しない）", async () => {
+    const f = fake({ dockers: [Object.assign(new Error(`docker said ${TEST_URL}`), { code: "DOCKER_IDENTITY_MISMATCH" })] });
+    const error = await expectError(f, "DOCKER_IDENTITY_FAILED");
+    expect(error.message).toContain("(DOCKER_IDENTITY_MISMATCH)");
+    expect(f.classify).not.toHaveBeenCalled();
+    expect(f.spawn).not.toHaveBeenCalled();
+  });
+
+  it("migration：コードのない Docker の失敗は unknown（元のメッセージは表示しない）", async () => {
+    const f = fake({ dockers: [new Error(`raw ${PASSWORD}`)] });
+    const error = await expectError(f, "DOCKER_IDENTITY_FAILED");
+    expect(error.message).toContain("(unknown)");
+  });
+
+  it.each<[string, Partial<TestDatabaseServerIdentity>, string]>([
+    ["inet_server_port の不一致", { serverPort: 5434 }, "server port is not 5432"],
+    ["DB の起動時刻がコンテナの起動より前（別のサーバー）", { postmasterStartTime: "2026-11-06T22:40:00.000000Z" }, "postmaster start time is outside the container start window"],
+    ["DB の起動時刻がコンテナの起動から離れすぎ（サーバーの起動し直し）", { postmasterStartTime: "2026-11-07T01:00:00.000000Z" }, "postmaster start time is outside the container start window"],
+  ])("migration：%s なら、Prisma CLI を起動せずに止まる", async (_label, server, reason) => {
+    const f = fake({ servers: [{ ...SERVER, ...server }] });
+    const error = await expectError(f, "SERVER_IDENTITY_MISMATCH");
+    expect(error.message).toContain(reason);
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.readDockerIdentity).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<[string, Partial<TestDbDockerIdentity>]>([
+    ["containerId", { containerId: "d".repeat(64) }],
+    ["startedAt", { startedAt: "2026-11-07T00:00:00.000000000Z" }],
+    ["restartCount", { restartCount: 1 }],
+    ["portPublishers", { portPublishers: ["katana-test-db", "other"] }],
+    ["volumes", { volumes: [...DOCKER.volumes, "new-anonymous"] }],
+    ["developmentVolume", { developmentVolume: ["katana-web_postgres_data\t2026-11-07T00:00:00Z\tkatana-web\tpostgres_data"] }],
+    ["networkIp", { networkIp: "172.18.0.3" }],
+  ])("migration：Prisma CLI の直前の Docker の識別情報で %s が変わっていたら、起動せずに止まる", async (key, change) => {
+    const f = fake({ dockers: [DOCKER, { ...DOCKER, ...change }] });
+    const error = await expectError(f, "DOCKER_IDENTITY_MISMATCH");
+    expect(error.message).toContain(`(${key})`);
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.classify).toHaveBeenCalledTimes(1);
+  });
+
+  it("migration：migration の後に DB のサーバーが変わっていたら（起動時刻）、状態 C でも失敗する", async () => {
+    const f = fake({ servers: [SERVER, { ...SERVER, postmasterStartTime: "2026-11-06T22:50:00.000000Z" }] });
+    const error = await expectError(f, "POST_MIGRATION_IDENTITY_MISMATCH");
+    expect(error.message).toContain("(postmasterStartTime)");
+    expect(error.message).toContain("Nothing was reset or repaired.");
+    expect(f.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("migration：migration の後に Docker のコンテナが変わっていたら、状態 C でも失敗する", async () => {
+    const f = fake({ dockers: [DOCKER, DOCKER, { ...DOCKER, containerId: "e".repeat(64) }] });
+    const error = await expectError(f, "POST_MIGRATION_IDENTITY_MISMATCH");
+    expect(error.message).toContain("(containerId)");
+  });
+
+  it("migration：migration の後の Docker の検査が失敗したら、成功としない", async () => {
+    const f = fake({ dockers: [DOCKER, DOCKER, Object.assign(new Error("x"), { code: "DOCKER_COMMAND_FAILED" })] });
+    await expectError(f, "DOCKER_IDENTITY_FAILED");
+    expect(f.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("migration：状態 B・権限の不足は、識別情報が一致していても今までどおり止まる（Docker は1回だけ読む）", async () => {
+    const b = fake({ states: [STATE_B] });
+    await expectError(b, "DATABASE_STATE_INCONSISTENT");
+    expect(b.readDockerIdentity).toHaveBeenCalledTimes(1);
+    const lacking = fake({ privileges: { publicCreate: false } });
+    await expectError(lacking, "MIGRATION_PRIVILEGES_INSUFFICIENT");
+    expect(lacking.readDockerIdentity).toHaveBeenCalledTimes(1);
+    expect(lacking.spawn).not.toHaveBeenCalled();
+  });
+
+  it("migration：DB の本人確認・識別 SQL の失敗では、Prisma CLI を起動しない", async () => {
+    for (const code of ["CURRENT_USER_MISMATCH", "SERVER_IDENTITY_UNAVAILABLE", "QUERY_FAILED"] as const) {
+      const f = fake({ states: [new IntegrationDatabaseCheckError(code, `x ${TEST_URL}`)] });
+      const error = await expectError(f, "STATE_CHECK_FAILED");
+      expect(error.message).toContain(`(${code})`);
+      expect(f.spawn).not.toHaveBeenCalled();
+    }
+  });
+
+  it("スクリプトの migration 用の許可は無効のまま（Docker の読み取りも、接続も、Prisma CLI もない）", async () => {
+    const f = fake({ liveDisabled: true });
+    await expectStopped(f, "TESTDB_MIGRATION_LIVE_DISABLED");
+    const source = codeOf("scripts/testdb-migrate.mts");
+    expect(source).toMatch(/^\s*liveDatabase: LIVE_DATABASE_DISABLED,$/m);
+    expect(source).not.toContain("readTestDbDockerIdentity");
+    expect(source).not.toContain("readDockerIdentity");
+  });
+
+  it("本物の判定と偽のDB：識別情報の SQL の応答が読めなければ、--verify は VERIFY_CHECK_FAILED（状態を表示しない）", async () => {
+    const db = fakeDatabase({ state: "A", serverRows: [{ ...SERVER, serverAddress: null }] });
+    const f = fake({ argv: ["--verify"], readOnlyInspector: db.inspector });
+    const error = await expectError(f, "VERIFY_CHECK_FAILED");
+    expect(error.message).toContain("(SERVER_IDENTITY_UNAVAILABLE)");
+    expect(f.logs).toEqual([]);
+    expect(db.end).toHaveBeenCalledTimes(1);
+  });
+
+  it("本物の判定と偽のDB：識別情報の SQL が失敗しても、生のエラーを表示しない", async () => {
+    const db = fakeDatabase({ state: "A", failOn: "inet_server_addr" });
+    const f = fake({ argv: ["--verify"], readOnlyInspector: db.inspector });
+    const error = await expectError(f, "VERIFY_CHECK_FAILED");
+    expect(error.message).toContain("(QUERY_FAILED)");
+    expect(db.queries.at(-1)).toBe("ROLLBACK");
   });
 });
 

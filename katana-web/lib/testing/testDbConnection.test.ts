@@ -193,6 +193,8 @@ describe("--verify の判定と connectTestDatabase（偽の pg。実DBには接
   /** 状態 A の空のDBの応答 */
   const emptyDatabaseRows = (sql: string): Record<string, unknown>[] => {
     if (sql.includes("set_config")) return [{ searchPath: "pg_catalog" }];
+    if (sql.includes("has_schema_privilege")) return [{ publicUsage: true, publicCreate: true, databaseOwner: true, databaseCreate: true }];
+    if (sql.includes("inet_server_addr")) return [{ serverAddress: "172.18.0.2", serverPort: 5432, postmasterStartTime: "2026-11-06T22:46:51.123456Z" }];
     if (sql.includes("transaction_read_only")) return [{ transaction_read_only: "on" }];
     if (sql.includes("current_database() AS database")) {
       return [{ database: "katana_test", currentUser: "katana_test_user", sessionUser: "katana_test_user", marker: "katana-test-db", serverPort: 5432 }];
@@ -304,6 +306,31 @@ describe("--verify の判定と connectTestDatabase（偽の pg。実DBには接
     const error = await expectFailure("QUERY_FAILED", "ECONNLOST");
     expect(error.message).toContain("relation listing failed");
     expect(fake.state.calls.at(-1)).toBe("end");
+  });
+
+  it("--verify の検査（権限・識別情報を含む）で、識別情報の SQL の実行中に切断されたら QUERY_FAILED（状態 A として成功しない）", async () => {
+    const { connectTestDatabase } = await import("./testDbConnection");
+    const { createTestDatabaseInspector } = await import("./testDbMigrate");
+    fake.state.rowsFor = emptyDatabaseRows;
+    fake.state.disconnect = { at: "during", sql: "inet_server_addr" };
+    const inspector = createTestDatabaseInspector({ root: REPO_ROOT, connect: connectTestDatabase });
+    const error = await inspector({ databaseUrl: URL, developmentDatabaseUrl: DEV_URL }).catch((e: Error) => e);
+    expect(error).toMatchObject({ code: "QUERY_FAILED" });
+    expect((error as Error).message).toContain("server identity query failed (ECONNLOST)");
+    expect((error as Error).message).not.toContain("dummy-pass");
+    expect(fake.state.constructed).toHaveLength(1);
+    expect(fake.state.calls.at(-1)).toBe("end");
+  });
+
+  it("--verify の検査（権限・識別情報を含む）は、正常な接続で A と識別情報を返す", async () => {
+    const { connectTestDatabase } = await import("./testDbConnection");
+    const { createTestDatabaseInspector } = await import("./testDbMigrate");
+    fake.state.rowsFor = emptyDatabaseRows;
+    const inspector = createTestDatabaseInspector({ root: REPO_ROOT, connect: connectTestDatabase });
+    await expect(inspector({ databaseUrl: URL, developmentDatabaseUrl: DEV_URL })).resolves.toMatchObject({
+      state: { state: "A" },
+      server: { serverPort: 5432 },
+    });
   });
 
   it("サーバーからの切断のコード（57P01）は、そのまま表示し、メッセージは表示しない", async () => {

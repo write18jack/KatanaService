@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { assertTestDatabaseCredentials, TestDatabaseCredentialsError } from "../lib/db/testDatabaseGuard.ts";
@@ -7,8 +8,11 @@ import {
   composeArgs,
   DOWN_SUBCOMMAND,
   isAllowedMutation,
+  IDENTITY_INSPECT_FORMAT,
   mountMismatches,
+  parseDockerIdentityInspect,
   parseTestDbArgs,
+  readTestDbDockerIdentity,
   runTestDb,
   type TestDbDeps,
   TestDbError,
@@ -77,6 +81,8 @@ type DockerState = {
   devUsers: string;
   /** undefined なら、コンテナがない（inspect が失敗する） */
   inspect: string | undefined;
+  /** 識別情報の inspect（IDENTITY_INSPECT_FORMAT）の出力。undefined なら失敗する */
+  identity?: string | undefined;
 };
 
 const DEV_VOLUME_ROW = "katana-web_postgres_data\t2026-07-18T05:42:41Z\tkatana-web\tpostgres_data\n";
@@ -148,6 +154,8 @@ type FakeOptions = {
   image?: boolean;
   /** up の結果（失敗させる場合）。状態は afterUp に切り替わる（失敗してもコンテナが残る場合の再現） */
   upResult?: CommandResult;
+  /** docker image inspect postgres:15 の結果のイメージID（既定は sha256:abc） */
+  imageId?: string;
 };
 
 const isMutation = (args: readonly string[]) => args[0] === "compose" && ["up", "down"].includes(args[9]);
@@ -175,7 +183,10 @@ function fake(options: FakeOptions = {}) {
     if (joined.includes("name=^katana-db$")) return ok(state.devContainer);
     if (joined.includes("volume=katana-web_postgres_data")) return ok(state.devUsers);
     if (joined.includes("publish=5434")) return ok(state.port);
-    if (joined.startsWith("image inspect")) return options.image === false ? { code: 1, stdout: "", stderr: "No such image" } : ok("sha256:abc\n");
+    if (joined.startsWith("image inspect")) return options.image === false ? { code: 1, stdout: "", stderr: "No such image" } : ok(`${options.imageId ?? "sha256:abc"}\n`);
+    if (joined.startsWith("inspect --type container") && joined.includes('"restartCount"')) {
+      return state.identity === undefined ? { code: 1, stdout: "", stderr: "No such container" } : ok(state.identity);
+    }
     if (joined.startsWith("inspect --type container")) {
       return state.inspect === undefined ? { code: 1, stdout: "", stderr: "No such container" } : ok(state.inspect);
     }
@@ -227,6 +238,7 @@ describe("parseTestDbArgs", () => {
   it("--check・--status・--up・--down と、--up --apply・--down --apply だけを受け付ける", () => {
     expect(parseTestDbArgs(["--check"])).toEqual({ mode: "check", apply: false });
     expect(parseTestDbArgs(["--status"])).toEqual({ mode: "status", apply: false });
+    expect(parseTestDbArgs(["--identity-check"])).toEqual({ mode: "identity", apply: false });
     expect(parseTestDbArgs(["--up"])).toEqual({ mode: "up", apply: false });
     expect(parseTestDbArgs(["--up", "--apply"])).toEqual({ mode: "up", apply: true });
     expect(parseTestDbArgs(["--down"])).toEqual({ mode: "down", apply: false });
@@ -251,6 +263,10 @@ describe("parseTestDbArgs", () => {
     [["--apply", "--up"]],
     [["--check", "--apply"]],
     [["--status", "--apply"]],
+    [["--identity-check", "--apply"]],
+    [["--apply", "--identity-check"]],
+    [["--identity-check", "--up"]],
+    [["--identity"]],
     [["--up", "--down"]],
     [["--up", "--apply", "--apply"]],
     [["--up", "--APPLY"]],
@@ -968,5 +984,168 @@ describe("runTestDb：tmpfs の表し方の違いを、up の後と down の前�
       await expectStopped(f, "CONTAINER_INSPECT_MISMATCH");
       expect(f.mutations()).toEqual([]);
     }
+  });
+});
+
+describe("readTestDbDockerIdentity：テストDBのコンテナの識別情報（Step 3-11E。読み取りだけ）", () => {
+  const CONTAINER_ID = "a".repeat(64);
+  const IMAGE_ID = `sha256:${"b".repeat(64)}`;
+  const NETWORK_ID = "c".repeat(64);
+  const identityJson = (overrides: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      id: CONTAINER_ID,
+      image: IMAGE_ID,
+      startedAt: "2026-11-06T22:46:49.619782389Z",
+      restartCount: 0,
+      networkCount: 1,
+      network: { id: NETWORK_ID, ip: "172.18.0.2" },
+      ...overrides,
+    });
+  const IDENTIFIED: Partial<DockerState> = { ...RUNNING, identity: identityJson() };
+  const identityFake = (state: Partial<DockerState> = {}, options: Partial<FakeOptions> = {}) =>
+    fake({ ...options, state: { ...IDENTIFIED, ...state }, imageId: options.imageId ?? IMAGE_ID });
+
+  async function expectIdentityError(f: ReturnType<typeof fake>, code: TestDbErrorCode, item?: string) {
+    const error = await readTestDbDockerIdentity(f.deps).then(
+      () => {
+        throw new Error("expected the identity check to fail");
+      },
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(TestDbError);
+    expect((error as TestDbError).code).toBe(code);
+    if (item) expect((error as Error).message).toContain(item);
+    for (const secret of SECRETS) expect((error as Error).message).not.toContain(secret);
+    expect(f.mutations()).toEqual([]);
+    expectOnlyReadOnlyCalls(f.run);
+    return error as TestDbError;
+  }
+
+  it("すべての条件を満たせば、正規化した識別情報を返す（読み取り専用のコマンドだけ。変更操作なし）", async () => {
+    const f = identityFake();
+    await expect(readTestDbDockerIdentity(f.deps)).resolves.toEqual({
+      containerId: CONTAINER_ID,
+      imageId: IMAGE_ID,
+      startedAt: "2026-11-06T22:46:49.619782389Z",
+      restartCount: 0,
+      networkId: NETWORK_ID,
+      networkIp: "172.18.0.2",
+      volumes: ["0df3f60a", "katana-web_postgres_data"],
+      developmentVolume: [DEV_VOLUME_ROW.trim()],
+      portPublishers: ["katana-test-db"],
+    });
+    expect(f.mutations()).toEqual([]);
+    expectOnlyReadOnlyCalls(f.run);
+    // コンテナの inspect は、--type container で対象を限定し、決まった形式だけを使う
+    const inspects = f.run.mock.calls.map(([, args]) => args).filter((args) => args[0] === "inspect");
+    expect(inspects.map((args) => args.slice(0, 4))).toEqual([
+      ["inspect", "--type", "container", "katana-test-db"],
+      ["inspect", "--type", "container", "katana-test-db"],
+    ]);
+  });
+
+  it("識別情報の inspect の形式は、Config.Env・ラベルの値以外の秘密情報になり得る項目を読まない", () => {
+    expect(IDENTITY_INSPECT_FORMAT).not.toMatch(/Env|Config\b|Labels|Cmd|Args|Entrypoint/);
+    expect(IDENTITY_INSPECT_FORMAT).toContain('index .NetworkSettings.Networks "katana-test_default"');
+  });
+
+  it.each<[string, Partial<DockerState>, string]>([
+    ["ポートの公開（別のコンテナも5434番を公開）", { port: "katana-test-db\nother\n" }, "port publishers"],
+    ["ポートの割り当て", { inspect: inspectJson({ ports: { "5432/tcp": [{ HostIp: "0.0.0.0", HostPort: "5434" }] } }) }, "inspect: ports"],
+    ["Compose のラベル", { inspect: inspectJson({ project: "other" }) }, "inspect: project label"],
+    ["想定外のマウント", { inspect: inspectJson({ mounts: [INIT_BIND, { Type: "volume", Name: "x", Source: "/v", Destination: DATA, RW: true }] }) }, "inspect: "],
+    ["テスト用ボリュームがある", { projectVolumes: "katana-test_data\n" }, "project volumes"],
+    ["開発用コンテナ katana-db がある", { devContainer: "katana-db\tabc\trunning\n" }, "development container katana-db"],
+    ["開発用ボリュームがない", { devVolume: "", volumes: "0df3f60a\n" }, "development volume"],
+    ["開発用ボリュームを使うコンテナがある", { devUsers: "katana-test-db\n" }, "development volume"],
+    ["コンテナが unhealthy", { ps: '{"Name":"katana-test-db","Service":"test-db","State":"running","Health":"unhealthy"}\n' }, "container state"],
+    ["同じ名前の別プロジェクトのコンテナ", { sameName: "katana-test-db\tother\n" }, "container name"],
+  ])("%s なら、DOCKER_IDENTITY_MISMATCH で止まる（項目名だけを表示する）", async (_label, state, item) => {
+    await expectIdentityError(identityFake(state), "DOCKER_IDENTITY_MISMATCH", item);
+  });
+
+  it("コンテナのイメージが、ローカルの postgres:15 と違えば止まる", async () => {
+    await expectIdentityError(identityFake({}, { imageId: `sha256:${"d".repeat(64)}` }), "DOCKER_IDENTITY_MISMATCH", "image");
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["ネットワークが2つ", { networkCount: 2 }],
+    ["既定のネットワークがない", { network: null }],
+    ["コンテナIDの形が違う", { id: "abc" }],
+    ["起動時刻が読めない", { startedAt: "0001-01-01T00:00:00Z broken" }],
+    ["再起動の回数が負", { restartCount: -1 }],
+  ])("識別情報の %s なら、CONTAINER_INSPECT_INVALID で止まる", async (_label, overrides) => {
+    await expectIdentityError(identityFake({ identity: identityJson(overrides) }), "CONTAINER_INSPECT_INVALID");
+  });
+
+  it("コンテナがなければ（inspect が失敗）、DOCKER_COMMAND_FAILED で止まる", async () => {
+    await expectIdentityError(identityFake({ ...EMPTY, identity: undefined }), "DOCKER_COMMAND_FAILED");
+  });
+
+  it("Docker のコンテキストが違えば、デーモンに問い合わせる前に止まる", async () => {
+    const f = identityFake({}, { context: "default" });
+    await expectIdentityError(f, "DOCKER_CONTEXT_MISMATCH");
+    expect(f.run.mock.calls).toHaveLength(1);
+  });
+
+  it("DOCKER_HOST・DOCKER_CONTEXT が設定されていれば、docker を呼ばずに止まる", async () => {
+    const f = identityFake({}, { parentEnv: { PATH: "/usr/bin", DOCKER_HOST: "tcp://example:2375" } });
+    await expectIdentityError(f, "DOCKER_TARGET_ENV_PRESENT");
+    expect(f.run).not.toHaveBeenCalled();
+  });
+
+  it("docker のコマンドが失敗したら止まり、stderr の接続URL・パスワードは伏せる", async () => {
+    const f = identityFake({}, { fail: { match: "volume ls --format", result: { code: 1, stdout: "", stderr: `daemon error ${TEST_URL} ${ADMIN}` } } });
+    await expectIdentityError(f, "DOCKER_COMMAND_FAILED");
+  });
+
+  describe("runTestDb：--identity-check（Step 3-11F。読み取りだけ）", () => {
+    it("識別情報を表示し、照合の関数にそのまま渡せる JSON を出す（変更操作なし。秘密情報なし）", async () => {
+      const f = identityFake({}, { argv: ["--identity-check"] });
+      await expect(runTestDb(f.deps)).resolves.toBe(0);
+      const output = f.logs.join("\n");
+      expect(output).toContain("[testdb] identity-check mode: no container was created, started, stopped or removed, and no database connection was made.");
+      expect(output).toContain("container identity checks: passed");
+      expect(output).toContain(`container id: ${CONTAINER_ID}`);
+      expect(output).toContain(`image id: ${IMAGE_ID}`);
+      expect(output).toContain("started at: 2026-11-06T22:46:49.619782389Z");
+      expect(output).toContain("restart count: 0");
+      expect(output).toContain(`network katana-test_default: id ${NETWORK_ID}, address 172.18.0.2`);
+      const json = /^identity json: (.+)$/m.exec(output)?.[1];
+      expect(JSON.parse(json ?? "null")).toEqual(await readTestDbDockerIdentity(identityFake().deps));
+      for (const secret of SECRETS) expect(output).not.toContain(secret);
+      // パスワードの変数は、値を伏せた形（=(hidden; ...)）でだけ現れる
+      expect(output).not.toMatch(/(POSTGRES_PASSWORD|KATANA_TEST_DB_PASSWORD|KATANA_TEST_DB_ADMIN_PASSWORD)=(?!\(hidden)/);
+      expect(f.mutations()).toEqual([]);
+      expectOnlyReadOnlyCalls(f.run);
+    });
+
+    it("識別情報の照合に失敗したら止まり、何も変更しない", async () => {
+      const f = identityFake({ port: "katana-test-db\nother\n" }, { argv: ["--identity-check"] });
+      await expectStopped(f, "DOCKER_IDENTITY_MISMATCH");
+      expect(f.mutations()).toEqual([]);
+      expect(f.logs).toEqual([]);
+    });
+
+    it("コンテナがなければ止まる（起動はしない）", async () => {
+      const f = identityFake({ ...EMPTY, identity: undefined }, { argv: ["--identity-check"] });
+      await expectStopped(f, "DOCKER_COMMAND_FAILED");
+      expect(f.mutations()).toEqual([]);
+    });
+
+    it("Compose の構成の照合など、確認モードと同じ事前の検証を先に行う", async () => {
+      const f = identityFake({}, { argv: ["--identity-check"], testEnv: { ...GOOD_ENV, KATANA_TEST_DB_PASSWORD: "CHANGE_ME_x" } });
+      await expectStopped(f, "PASSWORD_PLACEHOLDER");
+      expect(f.run).not.toHaveBeenCalled();
+    });
+
+    it("npm の testdb:identity は、--identity-check だけを付けてラッパーを実行する", () => {
+      const pkg = JSON.parse(readFileSync(path.join(path.resolve(__dirname, ".."), "package.json"), "utf8")) as { scripts: Record<string, string> };
+      expect(pkg.scripts["testdb:identity"]).toBe("node scripts/testdb.mts --identity-check");
+    });
+  });
+
+  it("parseDockerIdentityInspect は JSON でなければ CONTAINER_INSPECT_INVALID", () => {
+    expectCode(() => parseDockerIdentityInspect("not json"), "CONTAINER_INSPECT_INVALID");
   });
 });

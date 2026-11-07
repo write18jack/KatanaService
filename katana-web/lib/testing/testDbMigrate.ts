@@ -19,6 +19,15 @@ import {
 } from "./integrationDatabaseCheck.ts";
 import { DEVELOPMENT_ENV_FILE, inheritAllowedEnv, TEST_ENV_FILE } from "./integrationEnv.ts";
 import {
+  addressMatchesContainer,
+  dockerIdentityChanges,
+  serverDockerMismatches,
+  serverIdentityChanges,
+  serverIdentityMismatches,
+  type TestDatabaseServerIdentity,
+  type TestDbDockerIdentity,
+} from "./testDbIdentity.ts";
+import {
   classifyTestDatabase,
   enumNamesFromSchema,
   inspectTestDatabase,
@@ -46,6 +55,12 @@ import {
  * 12. A のときだけ、権限がすべてそろっていることを確かめてから、固定のコマンドで Prisma CLI（`migrate deploy`）を起動する
  *     （不足なら MIGRATION_PRIVILEGES_INSUFFICIENT で止まる）。B は理由を表示して止まり、C は起動せずに成功とする
  * 13. migration の後に、別の接続でもう一度、本人確認と状態の判定を行う  14. C であることを確かめて終了する
+ *
+ * 接続先の照合（Step 3-11E。TOCTOU の対策。migration 用の許可が有効なときだけ動く。スクリプトでは無効のまま）:
+ * Docker の識別情報 D1 → DB の本人確認・権限・状態・識別情報 F1（D1 と照合）→ Prisma CLI の直前に D2（D1 と一致）→ migrate deploy
+ * → DB の再確認 F2（F1 と一致、状態 C）→ D3（D1 と一致）。どれかが合わなければ止まる（自動の修復・再接続はしない）。
+ * D1・F1・D2 の不一致は Prisma CLI の起動の前に止める（防止）。F2・D3 の不一致は、Prisma CLI の実行の後に異常として検出するだけ（防止ではない）。
+ * これは読んだ時点の照合で、Prisma CLI の新しい接続が同じDBに届くことを完全には保証しない（入れ替わりは事後に検出する）。
  *
  * 読み取り専用の検証モード（`--verify`。Step 3-11B）は、1〜7を共有した後、通常実行モードとは別の経路に分かれる:
  * 読み取り専用の接続の許可（readOnlyDatabase。migration 用の liveDatabase とは別）を確かめ、本人確認と状態の判定を1回だけ行って、
@@ -85,6 +100,10 @@ export type TestDbMigrateErrorCode =
   | "TESTDB_VERIFY_LIVE_DISABLED"
   | "VERIFY_CHECK_FAILED"
   | "MIGRATION_PRIVILEGES_INSUFFICIENT"
+  | "SERVER_IDENTITY_MISMATCH"
+  | "DOCKER_IDENTITY_FAILED"
+  | "DOCKER_IDENTITY_MISMATCH"
+  | "POST_MIGRATION_IDENTITY_MISMATCH"
   | "STATE_CHECK_FAILED"
   | "DATABASE_STATE_INCONSISTENT"
   | "MIGRATION_FAILED"
@@ -120,7 +139,11 @@ export type InspectDatabase = (input: Parameters<ClassifyDatabase>[0]) => Promis
  * 実DBへの接続の許可。scripts/testdb-migrate.mts は LIVE_DATABASE_DISABLED を固定で渡す（環境変数・引数では変えられない）。
  * 有効にするのは、承認を得た後続の工程で、スクリプトのコードを変えたときだけ。単体テストは、偽の判定関数で有効にする。
  */
-export type LiveDatabaseAccess = { readonly mode: "disabled" } | { readonly mode: "enabled"; readonly inspectDatabase: InspectDatabase };
+/** テストDBのコンテナの識別情報を、読み取り専用の docker コマンドで読む（scripts/testdb.mts の readTestDbDockerIdentity） */
+export type ReadDockerIdentity = () => Promise<TestDbDockerIdentity>;
+export type LiveDatabaseAccess =
+  | { readonly mode: "disabled" }
+  | { readonly mode: "enabled"; readonly inspectDatabase: InspectDatabase; readonly readDockerIdentity: ReadDockerIdentity };
 export const LIVE_DATABASE_DISABLED: LiveDatabaseAccess = Object.freeze({ mode: "disabled" });
 
 /**
@@ -214,6 +237,34 @@ function readExpectation(root: string) {
   };
 }
 
+/** 接続先の識別情報の表示（URL・パスワードは含まない） */
+function formatServerIdentity(server: TestDatabaseServerIdentity): string[] {
+  return [
+    `inet_server_addr: ${server.serverAddress}`,
+    `inet_server_port: ${server.serverPort} (inside the container; the host port 5434 cannot be seen from the database)`,
+    `pg_postmaster_start_time: ${server.postmasterStartTime}`,
+  ];
+}
+
+/** Docker の識別情報を読む。失敗したら、コードだけを含むエラーに置き換える（自動の再試行はしない） */
+async function readDockerOrStop(read: ReadDockerIdentity, when: string): Promise<TestDbDockerIdentity> {
+  try {
+    return await read();
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    const detail = typeof code === "string" && /^[A-Z][A-Z_]*$/.test(code) ? code : "unknown";
+    throw new TestDbMigrateError("DOCKER_IDENTITY_FAILED", `the docker identity check ${when} failed (${detail}); the Prisma CLI was not started for this check.`);
+  }
+}
+
+/** Docker の識別情報が、最初に読んだ値から変わっていないこと */
+function assertSameDocker(first: TestDbDockerIdentity, now: TestDbDockerIdentity, code: "DOCKER_IDENTITY_MISMATCH" | "POST_MIGRATION_IDENTITY_MISMATCH"): void {
+  const changes = dockerIdentityChanges(first, now);
+  if (changes.length > 0) {
+    throw new TestDbMigrateError(code, `the test database container changed (${changes.join(", ")}). Nothing was reset or repaired.`);
+  }
+}
+
 /** 権限の表示（値は真偽値だけ） */
 function formatPrivileges(privileges: TestDatabasePrivileges): string[] {
   return [
@@ -271,8 +322,9 @@ async function runReadOnlyVerify(input: {
     );
   }
 
-  const { state, privileges } = await inspectOrStop(deps.readOnlyDatabase.inspectDatabase, checkInput, "VERIFY_CHECK_FAILED");
+  const { state, privileges, server } = await inspectOrStop(deps.readOnlyDatabase.inspectDatabase, checkInput, "VERIFY_CHECK_FAILED");
   const missing = missingMigrationPrivileges(privileges);
+  const serverMismatches = serverIdentityMismatches(server);
   // 状態と権限は別々に表示する（権限が足りなくても、状態の判定は変えない）
   deps.log(
     [
@@ -289,8 +341,13 @@ async function runReadOnlyVerify(input: {
           : ["database state: B (partially applied, failed or unexpected objects)", ...state.reasons.map((r) => `  - ${r}`)]),
       "migration privileges:",
       ...formatPrivileges(privileges).map((line) => `  ${line}`),
+      "server identity (a snapshot at this check; it does not pin later connections):",
+      ...formatServerIdentity(server).map((line) => `  ${line}`),
     ].join("\n"),
   );
+  if (serverMismatches.length > 0) {
+    throw new TestDbMigrateError("SERVER_IDENTITY_MISMATCH", `the server identity is unexpected (${serverMismatches.join(", ")}).`);
+  }
   if (state.state === "B") {
     throw new TestDbMigrateError("DATABASE_STATE_INCONSISTENT", "the test database is neither empty nor fully migrated. Nothing was reset or repaired.");
   }
@@ -406,10 +463,18 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
       "live database access is disabled in this build; refusing to connect to the test database or start the Prisma CLI.",
     );
   }
-  const { inspectDatabase } = deps.liveDatabase;
+  const { inspectDatabase, readDockerIdentity } = deps.liveDatabase;
 
-  // 9〜11. 読み取り専用の接続・本人確認・状態の判定・権限の読み取り
-  const { state: before, privileges } = await inspectOrStop(inspectDatabase, checkInput, "STATE_CHECK_FAILED");
+  // 照合1・2. Docker の安全条件と識別情報 D1（読み取りだけ。安全条件は readDockerIdentity の中で確かめる）
+  const docker1 = await readDockerOrStop(readDockerIdentity, "before the database check");
+
+  // 9〜11. 読み取り専用の接続・本人確認・状態の判定・権限・DB の識別情報 F1
+  const { state: before, privileges, server: server1 } = await inspectOrStop(inspectDatabase, checkInput, "STATE_CHECK_FAILED");
+  // 照合3・4. F1 だけで分かる不一致と、D1 との照合（アドレスの一致は記録だけ）
+  const identityMismatches = [...serverIdentityMismatches(server1), ...serverDockerMismatches(server1, docker1)];
+  if (identityMismatches.length > 0) {
+    throw new TestDbMigrateError("SERVER_IDENTITY_MISMATCH", `the database server does not match the test container (${identityMismatches.join(", ")}); the Prisma CLI was not started.`);
+  }
   if (before.state === "B") {
     deps.log(["[testdb-migrate] state B (partially applied, failed or unexpected objects):", ...before.reasons.map((r) => `  - ${r}`)].join("\n"));
     throw new TestDbMigrateError(
@@ -434,6 +499,12 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
       `${EXPECTED_USER} lacks privileges required for migrations (${missing.join(", ")}); the Prisma CLI was not started. Nothing was granted or changed.`,
     );
   }
+  // 照合5・6. Prisma CLI の直前に D2 を読み、D1 と一致したときだけ起動する
+  assertSameDocker(docker1, await readDockerOrStop(readDockerIdentity, "before the Prisma CLI"), "DOCKER_IDENTITY_MISMATCH");
+  deps.log(
+    `[testdb-migrate] identity checks passed (container ${docker1.containerId.slice(0, 12)}, inet_server_port ${server1.serverPort}, ` +
+      `inet_server_addr ${addressMatchesContainer(server1, docker1) ? "matches" : "does not match"} the container network address; recorded only).`,
+  );
   let exitCode: number;
   try {
     exitCode = await deps.spawn(deps.execPath, args, { cwd: root, env: childEnv, shell: false, stdio: "inherit" });
@@ -444,8 +515,16 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
     throw new TestDbMigrateError("MIGRATION_FAILED", `prisma migrate deploy exited with code ${exitCode}. Nothing was reset; check the database state before retrying.`);
   }
 
-  // 13. migration の後に、別の接続でもう一度、本人確認と状態の判定
-  const { state: after } = await inspectOrStop(inspectDatabase, checkInput, "POST_MIGRATION_CHECK_FAILED");
+  // 13. migration の後に、別の接続でもう一度、本人確認と状態の判定。照合7〜9. F2 = F1、D3 = D1
+  const { state: after, server: server2 } = await inspectOrStop(inspectDatabase, checkInput, "POST_MIGRATION_CHECK_FAILED");
+  const serverChanges = serverIdentityChanges(server1, server2);
+  if (serverChanges.length > 0) {
+    throw new TestDbMigrateError(
+      "POST_MIGRATION_IDENTITY_MISMATCH",
+      `the database server changed during the migration (${serverChanges.join(", ")}). Nothing was reset or repaired.`,
+    );
+  }
+  assertSameDocker(docker1, await readDockerOrStop(readDockerIdentity, "after the migration"), "POST_MIGRATION_IDENTITY_MISMATCH");
   if (after.state !== "C") {
     if (after.state === "B") deps.log(["[testdb-migrate] post-migration state B:", ...after.reasons.map((r) => `  - ${r}`)].join("\n"));
     throw new TestDbMigrateError(

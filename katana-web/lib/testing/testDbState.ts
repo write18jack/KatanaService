@@ -12,6 +12,7 @@ import {
   runReadOnlyCheck,
   select,
 } from "./integrationDatabaseCheck.ts";
+import { isUtcTimestamp, type TestDatabaseServerIdentity } from "./testDbIdentity.ts";
 
 /**
  * テストDBの migration の前後の状態を、読み取り専用で次の3つに分ける（Step 3-10B）。
@@ -45,6 +46,9 @@ import {
  * 権限（Step 3-11D）：inspectTestDatabase は、同じ読み取り専用のトランザクションの中で、本人確認の後に
  * migration に必要な権限（public の USAGE・CREATE、DBの所有者、DBの CREATE）も読む。権限は状態 A・B・C とは別の結果で、
  * 権限が足りなくても状態の判定は変わらない（B にはしない）。不足をどう扱うかは、呼び出し側が決める。
+ *
+ * 接続先の識別情報（Step 3-11E）：inspectTestDatabase は、権限の後に inet_server_addr()・inet_server_port()・
+ * pg_postmaster_start_time() も読む（同じトランザクション。接続の回数は増やさない）。照合は lib/testing/testDbIdentity.ts。
  *
  * 例外・判定の理由には、接続URL・パスワード・ドライバの元のエラーメッセージを含めない（SQLSTATE などのコードと、オブジェクトの名前だけ）。
  */
@@ -214,7 +218,33 @@ export type TestDatabasePrivileges = {
   databaseCreate: boolean;
 };
 
-export type TestDatabaseInspection = { state: TestDatabaseState; privileges: TestDatabasePrivileges };
+export type TestDatabaseInspection = { state: TestDatabaseState; privileges: TestDatabasePrivileges; server: TestDatabaseServerIdentity };
+
+/**
+ * 接続先のサーバーの識別情報を読む（SELECT だけ。search_path を固定し、本人確認に通った後にだけ呼ぶ）。
+ * 時刻は UTC の固定の形式の文字列にする（ドライバの Date 変換でマイクロ秒を落とさない）。
+ */
+export const SERVER_IDENTITY_SQL = `SELECT pg_catalog.host(pg_catalog.inet_server_addr()) AS "serverAddress",
+            pg_catalog.inet_server_port() AS "serverPort",
+            pg_catalog.to_char(pg_catalog.pg_postmaster_start_time() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "postmasterStartTime"`;
+
+const IP_ADDRESS = /^[0-9A-Fa-f.:]+$/;
+
+export async function readServerIdentity(client: IntegrationDbClient): Promise<TestDatabaseServerIdentity> {
+  const rows = await select(client, "server identity query", SERVER_IDENTITY_SQL);
+  const [row] = rows;
+  // 1行で、アドレス（UNIX ソケットの接続なら NULL）・ポート（整数）・時刻（固定の形式）が読めること
+  const valid =
+    rows.length === 1 &&
+    typeof row.serverAddress === "string" &&
+    IP_ADDRESS.test(row.serverAddress) &&
+    Number.isInteger(row.serverPort) &&
+    (row.serverPort as number) > 0 &&
+    (row.serverPort as number) <= 65_535 &&
+    isUtcTimestamp(row.postmasterStartTime);
+  if (!valid) throw new IntegrationDatabaseCheckError("SERVER_IDENTITY_UNAVAILABLE", "the server identity could not be read.");
+  return { serverAddress: row.serverAddress as string, serverPort: row.serverPort as number, postmasterStartTime: row.postmasterStartTime as string };
+}
 
 const PRIVILEGE_KEYS = ["publicUsage", "publicCreate", "databaseOwner", "databaseCreate"] as const satisfies readonly (keyof TestDatabasePrivileges)[];
 
@@ -437,8 +467,9 @@ export async function inspectTestDatabase(input: ClassifyTestDatabaseInput): Pro
     await pinSearchPath(client);
     await assertDatabaseIdentity(client); // 失敗したら throw され、権限の検査・状態の判定に進まない
     const privileges = await readTestDatabasePrivileges(client);
+    const server = await readServerIdentity(client);
     const state = await classifyAfterIdentity(client, expected);
-    return { state, privileges };
+    return { state, privileges, server };
   });
 }
 

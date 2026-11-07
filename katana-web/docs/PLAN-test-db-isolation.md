@@ -370,7 +370,9 @@ npm run test:integration ─► 専用runner
 | 3-11B | 読み取り専用のDB検証モード（`testdb-migrate --verify`、`npm run testdb:verify`）の実装と単体テスト。接続の許可は migration 用とは別の固定の無効値（`READ_ONLY_DATABASE_DISABLED`）で、`TESTDB_VERIFY_LIVE_DISABLED` で接続の前に止まる。通常テスト32ファイル・1125件成功、静的検査152件・違反0件。この commit の時点では実DBへの接続は未実施 | `3912e71`（`test: add guarded read-only database verification`。親は `25197cf`） |
 | 3-11B 実DB検証 | `--verify` の接続の許可だけを有効化（`scripts/testdb-migrate.mts` の `readOnlyDatabase`。migration 用の `liveDatabase` は無効のまま）し、`npm run testdb:verify` を1回実行。**本人確認4項目一致・search_path の固定成功・カタログの SQL 成功・状態 A**。Docker の状態は前後で変化なし。migration 用の許可は無効のまま | `83f0012`（`test: enable guarded read-only database verification`。親は `3912e71`） |
 | 3-11C | 予期しない切断の対策（`lib/testing/testDbConnection.ts` で pg の `error` イベントを、接続の前に登録したリスナーで処理）とモックテスト18件（通常テスト1143件成功）。migration の前の権限の確認と TOCTOU の対策の設計を記録。実DBへの接続・migration は未実施 | `a224332`（`test: handle unexpected test database disconnections`。親は `83f0012`） |
-| 3-11D | migration の SQL（8件）の権限の調査、読み取り専用の権限の検査（`inspectTestDatabase`・`readTestDatabasePrivileges`）の実装、`--verify` と migration の事前検査への組み込み（不足なら `MIGRATION_PRIVILEGES_INSUFFICIENT`。状態 A・B・C は変えない）、TOCTOU の設計の更新。通常テスト1178件成功、静的検査152件・違反0件。実DBへの接続・migration は未実施 | `test: verify test database migration privileges`（親は `a224332`。hash は次の記録） |
+| 3-11D | migration の SQL（8件）の権限の調査、読み取り専用の権限の検査（`inspectTestDatabase`・`readTestDatabasePrivileges`）の実装、`--verify` と migration の事前検査への組み込み（不足なら `MIGRATION_PRIVILEGES_INSUFFICIENT`。状態 A・B・C は変えない）、TOCTOU の設計の更新。通常テスト1178件成功、静的検査152件・違反0件。実DBへの接続・migration は未実施 | `519e02b`（`test: verify test database migration privileges`。親は `a224332`） |
+| 3-11D 実DB検証 | 権限の検査を含めた `npm run testdb:verify` を1回実行。本人確認4項目一致・search_path の固定・読み取り専用・**状態 A**・**権限4項目すべて true**。Docker の状態は前後で変化なし。migration は未実施 | なし（PLAN の追記だけ。未commit） |
+| 3-11E | TOCTOU の対策の実装：DB 側の識別情報（`inet_server_addr()`・`inet_server_port()`・`pg_postmaster_start_time()`）の読み取り、Docker 側の識別情報（`readTestDbDockerIdentity`）、照合の関数（`lib/testing/testDbIdentity.ts`）、migration の前後の照合（D1 → F1 → D2 → Prisma CLI → F2 → D3）、`--verify` での表示。Step 3-11F で読み取り専用の識別確認モード（`npm run testdb:identity`）を追加。通常テスト33ファイル・1282件成功。migration 用の許可は無効のまま | `test: guard migrations with database and Docker identity`（親は `519e02b`。hash は Step 3-11F の記録） |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -1892,7 +1894,7 @@ npm run test:integration ─► 専用runner
 - **残る未検証の事項:** 実DBで切断が起きたときの実際の動作（モックでだけ確認）、権限の確認の SQL の実行（未実装・実DBでは未実行）、`inet_server_addr()`・`inet_server_port()`・`pg_postmaster_start_time()` の実際の値、Prisma の `migrate deploy` が DB の CREATE 権限を必要とするか、TOCTOU の対策（未実装）、migration、`migrate diff`、`reset`、`down`、globalSetup、統合テスト。
 - **実DBへの接続・migration・Docker の変更は、行っていない。** `katana-test-db` は起動したまま。
 
-#### Step 3-11D：migration の前のDB権限の検証（実施済み。commit `test: verify test database migration privileges`）
+#### Step 3-11D：migration の前のDB権限の検証（実施済み。commit `519e02b`）
 
 - **Step 3-11C の確定:** 最終レビューで問題はなかった（`error` リスナーは接続の前に登録、異常な切断は成功にしない、生のエラーは表示しない、コードは `safeErrorCode()` の形式だけ、URL・パスワードは保持しない、ROLLBACK・`end()` の後始末、複数のエラーでも最初のコードだけ、再接続しない、import の時の副作用なし）。`npm test`（1143件）・静的検査152件・`tsc`・`eslint`・`git diff --check` の成功を確かめ、`a224332`（`test: handle unexpected test database disconnections`）で commit。
 - **migration の SQL（`prisma/migrations` の8件）の調査（読むだけ。実行していない）:**
@@ -1943,15 +1945,99 @@ npm run test:integration ─► 専用runner
   - **migration の前後のDBの本人確認は、検出策であって防止策ではない。** Prisma CLI は別のプロセス・別の接続で接続するので、前後の確認の間に応答先が入れ替わった場合、migration はその先に届いてから検出される。
   - **Docker のコンテナID・`State.StartedAt` を、migration の前に読んだ値に固定して照合する**（前・直前・後の3回。1回でも違えば失敗）。IP・公開ポート・マウント・ラベルも同時に照合する。
   - **DB 側の識別情報も照合する**：本人確認の4項目、`pg_postmaster_start_time()`（`StartedAt` 以後で、上限の範囲内）、`inet_server_addr()`（D の IP と一致）、`inet_server_port()`（5432。公開ポート 5434 とは別）。migration の前後で完全に一致すること。`pg_control_system()` は必須にしない。
-  - migration を実行する前に必要な、追加の防止策:
+  - migration を実行する前に必要な、追加の防止策（1〜3 は Prisma CLI の起動の前に止める）:
     1. migration の直前に、`docker ps --filter publish=5434` が `katana-test-db` だけであること（ラッパーの読み取り専用の関数を共有する）。
     2. 事前の判定（状態 A・権限・F1）と Docker の D1 の照合が合わなければ、Prisma CLI を起動しない。
     3. Prisma CLI を起動する直前に D をもう一度読み、D1 と一致すること。
-    4. migration の後に F2 = F1、D2 = D1。合わなければ状態 C でも失敗とし、何も復旧しない。
+  - Prisma CLI の実行の後の検出（防止ではない）：4. migration の後に F2 = F1、D3 = D1。合わなければ状態 C でも失敗とし、何も復旧しない。
+  - （注）上の「`inet_server_addr()`（D の IP と一致）」は、Step 3-11E で「一致は必須にせず記録だけ」に変更した（Docker Desktop のポート転送のため）。
   - **運用上の残るリスク:** 手順3と、Prisma CLI が自分で接続する瞬間の間に、5434 番の応答先が入れ替わる可能性は残る（完全には防げない）。現実的な前提：`katana-test-db` は `restart: "no"`、5434 番は `127.0.0.1` だけで公開、テストDBの起動・停止はラッパーからだけ行う、migration の間に Docker を操作しない。誤って届いた先は URL のガード（専用のユーザー・DB名・パスワード）を通る必要があるので、開発用DB（5433・`katana`）である可能性は現実的にはない。
   - 今回、migration の実行ゲートは解除していない。TOCTOU の実装は、migration の許可を有効にする前の工程で行う。
 - **実DBで未検証の事項:** 権限の SQL（`has_schema_privilege`・`pg_get_userbyid`・`has_database_privilege`）を `katana_test_user` で実行した結果（4つとも true の見込み）、`--verify` の新しい表示、Prisma の `migrate deploy` が DB の CREATE 権限を必要とするか、`inet_server_addr()`・`inet_server_port()`・`pg_postmaster_start_time()` の値、実際の切断の動作、TOCTOU の対策（未実装）、migration、`migrate diff`、`reset`、`down`、globalSetup、統合テスト。
 - **実DBへの接続・migration・Docker の変更・GRANT・ALTER ROLE は、行っていない。** `katana-test-db` は起動したまま。
+
+#### Step 3-11D：実DBでの権限の検証（実施済み。PLAN の追記は未commit）
+
+- **commit の前の最終レビュー:** `inspectTestDatabase()` は `runReadOnlyCheck()` の中で、`BEGIN READ ONLY` → search_path の固定 → 本人確認 → 権限（固定の SELECT 1つ）→ 状態の判定 の順に動き、成功・失敗にかかわらず ROLLBACK と接続の解放を行う。状態の判定の本体は `classifyAfterIdentity()` に移しただけで、空白を無視した差分で条件の変更がないことを確かめた。権限の不足（`MIGRATION_PRIVILEGES_INSUFFICIENT`）と状態 B（`DATABASE_STATE_INCONSISTENT`）は別のコード。権限の不足では Prisma CLI を起動しない。`integrationDatabaseCheck.ts` の変更は、エラーコード `PRIVILEGES_UNAVAILABLE` の追加1行だけ。`scripts/testdb-migrate.mts` の変更は、`readOnlyDatabase` の検査関数を `createTestDatabaseInspector` に替えただけで、`liveDatabase` は `LIVE_DATABASE_DISABLED` のまま。globalSetup は変更なし。問題は見つからなかった。
+- **commit:** `519e02b`（`test: verify test database migration privileges`。7ファイル）。commit の前に `npx tsc --noEmit`・変更した6つの TypeScript ファイルの `eslint`・`npm test`（32ファイル・1178件成功）・`npx vitest list --filesOnly`（32ファイル、`*.integration.test.*` は0件）・静的検査152件（違反0件）・`git diff --check`・`git diff --cached --check` が成功。ステージした差分に秘密情報はなかった。
+- **実接続の前の確認（DBに接続しない）:** `NODE_TLS_REJECT_UNAUTHORIZED` を各コマンドのシェルで `unset`。`npm run testdb:check`・`npm run testdb:status`・`npm run testdb:migrate:check` が成功。コンテキスト `desktop-linux`、`katana-test-db` は running・healthy、公開ポートは `127.0.0.1:5434` だけ、`katana-test` のボリュームは0件、全ボリューム3件、開発用ボリュームの記録は一致、`katana-db` はない。`live database access: disabled in this build`、`read-only verification (--verify): enabled`。Docker の読み取り（コンテナID・`StartedAt`・状態・再起動の回数・ポート・Mounts・Tmpfs・ボリューム・開発用ボリューム・コンテナの一覧）は、Step 3-11B の記録と完全に一致した（コンテナID `74f75c47d5d9…`、`StartedAt` 2026-11-06T22:46:49.619782389Z）。
+- **権限の検査を含めた `npm run testdb:verify`（1回だけ。終了コード0）:**
+  ```
+  [testdb-migrate] verify mode: read-only check of 127.0.0.1:5434/katana_test as katana_test_user (password hidden).
+  identity: current_database() = katana_test, current_user = session_user = katana_test_user, database comment = "katana-test-db"; search_path pinned to pg_catalog.
+  the Prisma CLI was not started; nothing was migrated, reset or changed (the transaction was rolled back).
+  database state: A (the database is empty; no migrations applied)
+  migration privileges:
+    public USAGE: true
+    public CREATE: true
+    database owner is katana_test_user: true
+    database CREATE: true
+  ```
+  - 本人確認4項目：一致。search_path：`pg_catalog` に固定できた。`transaction_read_only`：`on`（`assertDatabaseIdentity()` が `on` でなければ `NOT_READ_ONLY` で止まるので、成功したことが `on` の確認になる）。
+  - 状態：**A**（Step 3-11B の初回と同じ。権限を読んでも状態の判定は変わらない）。
+  - **権限4項目の実測値：public USAGE = true、public CREATE = true、DBの所有者 = `katana_test_user`（true）、DB の CREATE = true。** 初期化スクリプト（`katana_test_user` を `katana_test` の所有者にする）の設計どおり。PostgreSQL 15 の `has_schema_privilege`・`pg_get_userbyid`・`has_database_privilege` は、`katana_test_user` の権限でエラーなく動いた。
+  - Prisma CLI は起動していない。migration・seed・reset・GRANT・ALTER ROLE・DDL・DML は実行していない。再試行・別のユーザーでの接続もしていない。表示に接続URL・パスワードは含まれなかった。
+- **Docker の前後比較:** 検証の前後で、コンテナID・`StartedAt`・running・healthy・再起動の回数0・ポート・Mounts・Tmpfs・ボリュームの一覧（3件）・開発用ボリュームの名前・作成日時・ラベル・`katana-db` なし・コンテナの一覧が完全に一致した。検証の後の `npm run testdb:status` も同じ表示。
+- **残る TOCTOU のリスク:** 上の「Step 3-11D」の TOCTOU のとおり（未実装）。URL のガードは接続先のプロセスを固定しない。前後の本人確認は検出策。Prisma CLI が自分で接続する瞬間の入れ替わりは、防げない。migration を有効にする前に、Docker のコンテナID・`StartedAt` の固定と DB 側の識別情報の照合を実装する。
+- **migration は未実施。** migration 用の許可は無効のまま。
+- **残る未検証の事項:** Prisma の `migrate deploy` が DB の CREATE 権限を実際に必要とするか、`inet_server_addr()`・`inet_server_port()`・`pg_postmaster_start_time()` の値、実際の切断の動作、TOCTOU の対策（未実装）、migration、`migrate diff`、`reset`、`down`、globalSetup、統合テスト。
+
+#### Step 3-11E：TOCTOU の対策と接続先の識別（実施済み。commit `test: guard migrations with database and Docker identity`。実DBへの接続・migration は未実施）
+
+- **前提（Step 3-11D）:** commit `519e02b`。実DBの `--verify` で、本人確認4項目一致・状態 A・権限4項目すべて true・Docker の前後差分なし（上の「Step 3-11D：実DBでの権限の検証」。その PLAN の追記は未commit のまま保持）。
+- **DB 側の識別情報（`lib/testing/testDbState.ts`）:**
+  - `SERVER_IDENTITY_SQL`（固定の SELECT。関数はスキーマで修飾。`FROM` なし）:
+    ```sql
+    SELECT pg_catalog.host(pg_catalog.inet_server_addr()) AS "serverAddress",
+           pg_catalog.inet_server_port() AS "serverPort",
+           pg_catalog.to_char(pg_catalog.pg_postmaster_start_time() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "postmasterStartTime"
+    ```
+    時刻は UTC の固定の形式の文字列にする（ドライバの Date 変換でマイクロ秒を落とさない）。`pg_control_system()` は使わない。
+  - `readServerIdentity()`：1行で、アドレス（IP の文字だけ。UNIX ソケットの接続なら NULL なので拒否）・ポート（1〜65535 の整数）・時刻（固定の形式）が読めなければ `SERVER_IDENTITY_UNAVAILABLE`（`integrationDatabaseCheck.ts` に追加）。SQL の失敗は `QUERY_FAILED`（SQLSTATE だけ）。
+  - `inspectTestDatabase()` の中で、`BEGIN READ ONLY` → search_path の固定 → 本人確認 → 権限 → **識別情報** → 状態の判定 の順に読む（同じトランザクション。接続・解放の回数は変わらない）。状態 A・B・C の判定は変えていない。
+- **Docker 側の識別情報（`scripts/testdb.mts` の `readTestDbDockerIdentity()`。読み取りだけ）:**
+  - 既存の部品を再利用：`DOCKER_HOST`・`DOCKER_CONTEXT` の拒否、`.env.test` の検証、子プロセスの環境変数、`makeDocker`（読み取り専用の許可リスト。変更操作は `apply=false` で不可）、コンテキスト `desktop-linux`、`readSnapshot`、`containerInspectMismatches`（Compose のラベル4つ・ポート・マウント・tmpfs・running・healthy）。`runTestDb` の動作は変えていない。
+  - 追加の読み取り：`docker inspect --type container katana-test-db --format IDENTITY_INSPECT_FORMAT`（許可リストに追加。コンテナID・イメージID・`State.StartedAt`・`RestartCount`・ネットワークの数・`katana-test_default` のネットワークID と IP だけ。`Config.Env`・ラベル・コマンドは読まない）と、既存の `docker image inspect postgres:15 --format {{.Id}}`。
+  - 確かめる条件（1つでも違えば `DOCKER_IDENTITY_MISMATCH`。項目名だけを表示）：Compose のプロジェクトのコンテナが `katana-test-db`（`test-db`）の1つだけで running・healthy、ラベル付きのコンテナ・同名のコンテナが想定どおり、テスト用ボリュームが0件、5434番を公開するのが `katana-test-db` だけ、`katana-db` がない、開発用ボリュームがあって使っているコンテナがない、inspect の照合（ラベル・ポート `127.0.0.1:5434`・マウント・tmpfs）、コンテナのイメージがローカルの `postgres:15` と同じ。識別情報の形が違えば `CONTAINER_INSPECT_INVALID`（ネットワークが1つでない・既定のネットワークがない・ID の形が違う・時刻が読めない・再起動の回数が負）。
+  - 返す値（正規化した `TestDbDockerIdentity`）：コンテナID・イメージID・`StartedAt`・`RestartCount`・ネットワークID・IP・全ボリュームの名前（名前順）・開発用ボリュームの記録・5434番の公開者。一時的なコンテナIDはソースに書かない（テストは偽の値）。
+- **照合の関数（`lib/testing/testDbIdentity.ts`。新規。DB・Docker に接続しない純粋な関数）:**
+  - `serverIdentityMismatches`：`inet_server_port()` が 5432 であること（コンテナの中のポート。公開ポート 5434 とは別）。
+  - `serverDockerMismatches`：`pg_postmaster_start_time()` が `StartedAt` の5秒前から120秒後までの範囲（完全一致は求めない。初期化の時間の分だけ後になる。120秒はラッパーの up の待ち時間と同じ）。時刻が読めなければ不一致。
+  - `addressMatchesContainer`：`inet_server_addr()` とコンテナの IP の一致（**記録だけで、判定には使わない**）。
+  - `serverIdentityChanges`：migration の前後で、アドレス・ポート・起動時刻が完全に一致すること（同じサーバーのプロセス）。
+  - `dockerIdentityChanges`：コンテナID・イメージID・`StartedAt`・`RestartCount`・ネットワークID・IP・全ボリューム・開発用ボリューム・5434番の公開者が変わっていないこと。
+- **migration の前後の照合（`lib/testing/testDbMigrate.ts`。migration 用の許可が有効なときだけ動く。スクリプトでは無効のまま）:**
+  1. Docker の安全条件の検査と識別情報 D1（`readDockerIdentity`。失敗したら `DOCKER_IDENTITY_FAILED`。コードだけを表示し、DB には接続しない）
+  2. DB の本人確認・権限・識別情報 F1・状態（`inspectDatabase`）
+  3. F1 の照合（ポート 5432）と D1 との照合（起動時刻の範囲）。合わなければ `SERVER_IDENTITY_MISMATCH`
+  4. 状態 B は拒否、C は Prisma CLI を起動せずに成功、A で権限が足りなければ拒否（今までどおり）
+  5. Prisma CLI の直前に D2 を読み、D1 と一致すること（違えば `DOCKER_IDENTITY_MISMATCH`）。照合の結果（コンテナIDの先頭12文字、ポート、アドレスの一致は記録だけ）を表示
+  6. `prisma migrate deploy`
+  7. F2 を読み、F1 と完全に一致すること（違えば `POST_MIGRATION_IDENTITY_MISMATCH`）
+  8. D3 を読み、D1 と一致すること（違えば `POST_MIGRATION_IDENTITY_MISMATCH`）
+  9. 状態 C であること
+  - どこで合わなくても、自動の修復・再接続・再試行はしない（fail-closed）。`LiveDatabaseAccess` の有効な値は、`inspectDatabase` と `readDockerIdentity` の両方を必要とする形にした。スクリプト（`scripts/testdb-migrate.mts`）は変更しておらず、`liveDatabase: LIVE_DATABASE_DISABLED` のままで、Docker の読み取りの部品も渡していない。
+- **`--verify` への影響:** 状態・権限に加えて、識別情報を別の行で表示する（`inet_server_addr`・`inet_server_port`（コンテナの中のポートであることを明記）・`pg_postmaster_start_time`。「この確認の時点の記録で、後の接続を固定しない」と明記）。`inet_server_port` が 5432 でなければ `SERVER_IDENTITY_MISMATCH` で失敗する。アドレスは判定に使わない。`--verify` は Docker を読まない（Docker の照合は migration の経路だけ）。Prisma CLI は起動しない。`readOnlyDatabase` のゲートは変更していない。
+- **Docker Desktop のポート転送の注意:**
+  - macOS の Docker Desktop では、ホストの `127.0.0.1:5434` で待ち受けているのは Docker Desktop のプロセス（`lsof` では `com.docke…`）で、そこから Linux の VM の中のコンテナ（`katana-test_default` の IP の 5432）に転送される。`lsof` ではどのコンテナに転送されるかは分からない。
+  - そのため、`inet_server_addr()` に見えるのは、転送の経路によって、コンテナの IP の場合とそうでない場合があり得る（未検証）。一致を必須にせず、記録だけにした。
+  - `inet_server_port()` は常にコンテナの中のポート（5432）で、DB の中から公開ポート 5434 を確かめる方法はない。公開ポートの照合は Docker 側（`HostConfig.PortBindings` と `docker ps --filter publish=5434`）で行う。
+- **TOCTOU の対策で、Prisma CLI の起動の前に防げること（D1・F1・D2 の不一致。Prisma CLI を起動せずに止まる）:**
+  - migration の前に、5434番を公開しているのが想定のコンテナだけであること、そのコンテナが想定のラベル・マウント・イメージ・状態であることを確かめ、そうでなければ Prisma CLI を起動しない（D1）。
+  - 事前の判定で接続した DB サーバーが、そのコンテナの起動の直後に起動したものであること（別の時期に起動したサーバーではないこと）を確かめる（F1 と D1 の照合）。
+  - 事前の判定と Prisma CLI の起動の間に、コンテナが作り直された・再起動した・ボリュームが増えた・公開者が増えた場合は、起動しない（D2 と D1 の照合）。
+- **Prisma CLI の実行の後に、異常として検出するだけのこと（F2・D3 の不一致。防止ではない）:**
+  - migration の後に、サーバーの再起動・コンテナの入れ替わりがあれば、状態 C でも失敗にする。ただし、この時点で migration は実行済みで、届いた先は変更されている可能性がある。検出の後も自動の復旧はしない。
+- **防げないこと（残るリスク）:**
+  - 照合の結果は、読んだ時点のスナップショットで、その後の接続先を固定しない。**手順5（D2）と、Prisma CLI が自分で新しい接続を作る瞬間の間に、5434番の応答先が入れ替わった場合、migration はその先に届く。** 手順7・8 で事後に検出できるが、届いた先は変更されている可能性がある（URL のガードを通る必要があるので、開発用DB（5433・`katana`）である可能性は現実的にはない）。
+  - Docker Desktop のポート転送そのものの入れ替え（同じコンテナIDのまま転送先が変わるなど）は、Docker の読み取りでは検出できない。
+  - 運用上の前提：`restart: "no"`、5434番は `127.0.0.1` だけ、テストDBの起動・停止はラッパーからだけ、migration の間に Docker を操作しない。
+- **migration は未実施。** migration 用の許可は無効のまま（`npm run testdb:migrate` が `TESTDB_MIGRATION_LIVE_DISABLED` で止まることを確認。確認モードの表示も `live database access: disabled in this build`）。globalSetup・Prisma CLI の固定のコマンド・`testdb:up`/`down` の安全条件・Prisma の接続先のガード・`docker-compose.test.yml`・`prisma.config.ts` は変更していない。
+- **追加したテスト（95件）:** `lib/testing/testDbIdentity.test.ts`（新規、33件：時刻の変換、ポート、前後の比較の各項目、起動時刻の範囲の境界、アドレスは判定に使わない）、`lib/testing/testDbState.test.ts`（108件 → 120件：識別情報を本人確認・権限の後に同じトランザクションで読む、状態の判定は変わらない、応答が読めない7種類、SQL の失敗、本人確認の失敗では読まない、SQL の形）、`lib/testing/testDbMigrate.test.ts`（130件 → 155件：`--verify` の表示・ポートの不一致・アドレスは判定に使わない、migration の前後の照合（すべて一致、Docker の検査の失敗、ポート・起動時刻の不一致、D2 の7項目の変化、F2・D3 の変化、事後の Docker の失敗、状態 B・権限の不足、DB の検査の失敗）、スクリプトの許可は無効のまま、本物の判定と偽のDB）、`lib/testing/testDbConnection.test.ts`（22件 → 24件：識別情報の SQL の実行中の切断、正常な接続）、`scripts/testdb.test.ts`（250件 → 273件：すべて一致、ポート・ラベル・マウント・テスト用ボリューム・`katana-db`・開発用ボリューム・unhealthy・同名のコンテナ・イメージの不一致、識別情報の形の不正5種類、コンテナがない、コンテキスト、`DOCKER_HOST`、docker の失敗（stderr の秘密情報を伏せる）、読み取り専用のコマンドだけ）。照合を一時的に外すと12件が失敗することを確かめた（元に戻したことを `cmp` で確認）。
+- **静的検証:** `npx tsc --noEmit` 成功、変更・追加した11ファイルの `eslint` 成功、`npm test` 33ファイル・1273件成功（1178件＋95件）、`npx vitest list --filesOnly` は33ファイルで `*.integration.test.*` は0件、`dbConnectionPaths.test.ts` の通常テストのファイル数の定数を32から33に更新し、静的検査152件・違反0件、`git diff --check` 成功。
+- **実DBで未検証の事項:** `SERVER_IDENTITY_SQL`（`host(inet_server_addr())`・`to_char(... AT TIME ZONE 'UTC')`）を `katana_test_user` で実行した結果と、`inet_server_addr()` の実際の値（コンテナの IP か）、`pg_postmaster_start_time()` と `StartedAt` の実際の差、`IDENTITY_INSPECT_FORMAT` の実際の出力（Docker Desktop の `NetworkSettings.Networks` の形）、`readTestDbDockerIdentity()` の実際の実行、Prisma の `migrate deploy` が DB の CREATE 権限を必要とするか、migration、`migrate diff`、`reset`、`down`、globalSetup、統合テスト。
+- **実DBへの接続・migration・Docker の変更・git add/commit は、行っていない。** `katana-test-db` は起動したまま。
+- **Step 3-11F で追加（同じ commit）:** `readTestDbDockerIdentity()` は migration の経路（無効）からしか呼ばれず、実行する経路がなかったので、`scripts/testdb.mts` に読み取り専用の識別確認モード `--identity-check`（`npm run testdb:identity`）を追加した。確認モードと同じ事前の検証（引数・Node の起動オプション・`DOCKER_*`・`.env.test`・子プロセスの環境変数・ファイル・コンテキスト・`docker compose config` の照合）の後に `readTestDbDockerIdentity()` を1回呼び、識別情報と、照合の関数にそのまま渡せる JSON（`identity json: …`。秘密情報なし）を表示する。`apply` は常に false で、変更操作の経路には進めない（`--identity-check --apply` は `ARGUMENTS_INVALID`）。DBには接続しない。up・down の動作は変更なし（`makeDocker` の引数の型を、必要な2項目だけに狭めただけ）。テスト9件（`scripts/testdb.test.ts`、273件 → 282件）。あわせて、F2・D3 の不一致を「防げること」に入れていた記述を、「Prisma CLI の実行の後に異常として検出するだけ（防止ではない）」に分けて直した（本節と「Step 3-11D」の TOCTOU、`lib/testing/testDbMigrate.ts` の先頭のコメント）。
 
 全Stepに共通する事項:
 
@@ -2191,15 +2277,14 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：`a224332`（`test: handle unexpected test database disconnections`。Step 3-11C。親は `83f0012`）
-   - 変更済み（未commit。Step 3-11D）：`lib/testing/testDbState.ts`・`lib/testing/testDbState.test.ts`・`lib/testing/testDbMigrate.ts`・`lib/testing/testDbMigrate.test.ts`・`lib/testing/integrationDatabaseCheck.ts`・`scripts/testdb-migrate.mts`・`docs/PLAN-test-db-isolation.md`。ユーザーの指示があればcommitする
+   - HEAD：`519e02b`（`test: verify test database migration privileges`。Step 3-11D。親は `a224332`）
+   - 変更済み（未commit）：`docs/PLAN-test-db-isolation.md`（`519e02b` と権限を含めた実DBの `--verify` の結果の記録、Step 3-11E の記録）、Step 3-11E の `lib/testing/testDbState.ts`・`lib/testing/testDbState.test.ts`・`lib/testing/testDbMigrate.ts`・`lib/testing/testDbMigrate.test.ts`・`lib/testing/integrationDatabaseCheck.ts`・`lib/testing/testDbConnection.test.ts`・`lib/testing/dbConnectionPaths.test.ts`・`scripts/testdb.mts`・`scripts/testdb.test.ts`。未追跡（commit 予定）：`lib/testing/testDbIdentity.ts`・`lib/testing/testDbIdentity.test.ts`。次のレビューで commit を判断する
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
    - `.env.test` はユーザーが作成済み（`-rw-------`。中身は表示しない）
    - テストDBのコンテナ `katana-test-db` が起動している場合がある（Step 3-11。データは tmpfs）。`docker ps -a` で確かめる
 3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。Step 3-11 で、ユーザーがテストDBを初めて起動した（R7 は今回の起動で合格。3-Aの「Step 3-11」）。`down` はまだ実行していない。Step 3-11の実施前レビューの結果（3-Aの「Step 3-11の実施前レビュー」。前提条件の表 C、R7 の D、失敗時の E、DB検証の F、TOCTOU の G、`.env.test` の I）を先に読む。レビューの時点では Docker のデーモンが停止中だったが、Step 3-11A でユーザーが Docker Desktop を起動し、前提条件 C の2〜9 を満たすことを確かめた（3-Aの「Step 3-11A」）。初期化スクリプトのログ漏洩の対策も 3-11A で済んだ。初回の up の後に問題が起きたときは、自動で削除せず、読み取りで調べて報告し、個別の承認を待つ（3-11A で確定）。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
-   - Step 3-11D の変更のcommit（指示があれば）。初回の `testdb:verify` は状態 A で成功済み（権限の検査を追加する前。3-Aの「Step 3-11B：読み取り専用ゲートの有効化と、初回の実DBの読み取り専用検証」）
-   - 権限の検査を含めた `testdb:verify` の2回目の実DB接続（個別の承認が必要）
-   - TOCTOU の対策の実装（3-Aの「Step 3-11D」。モックテストまで）
+   - Step 3-11E の変更と PLAN の追記の commit（指示があれば）
+   - 識別情報を含めた `testdb:verify` の実DB接続（個別の承認が必要。新しい SQL の実測）と、`readTestDbDockerIdentity()` の実際の実行（読み取りだけ。個別の承認が必要）
    - migration（Step 3-12。上の2つの後。migration 用の許可の有効化と実行には、それぞれ個別の承認が必要）
    - `reset` の実装（本人確認の後）
 

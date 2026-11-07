@@ -13,6 +13,7 @@ import {
   inspectTestDatabase,
   missingMigrationPrivileges,
   PRIVILEGES_SQL,
+  SERVER_IDENTITY_SQL,
   type TestDatabaseExpectation,
 } from "./testDbState";
 
@@ -73,6 +74,8 @@ type FakeDb = {
   nonEmpty: Set<string>;
   /** 権限の SQL の応答（inspectTestDatabase だけが読む） */
   privileges: Record<string, unknown>[];
+  /** 識別情報の SQL の応答（inspectTestDatabase だけが読む） */
+  server: Record<string, unknown>[];
   /** この正規表現に一致するSQLで、ドライバのエラーを投げる */
   failOn?: RegExp;
   failEnd?: boolean;
@@ -91,6 +94,7 @@ function db(inventory: CatalogInventory = migratedInventory()): FakeDb {
     migrations: MIGRATIONS.map(finished),
     nonEmpty: new Set(),
     privileges: [{ publicUsage: true, publicCreate: true, databaseOwner: true, databaseCreate: true }],
+    server: [{ serverAddress: "172.18.0.2", serverPort: 5432, postmasterStartTime: "2026-11-06T22:46:51.123456Z" }],
   };
 }
 
@@ -108,6 +112,7 @@ function fakeConnection(state: FakeDb) {
     if (statement.includes("set_config('search_path'")) return ["PIN", [{ searchPath: state.searchPath }]];
     if (statement === "SHOW transaction_read_only") return ["SHOW", [{ transaction_read_only: state.readOnly }]];
     if (statement.includes("has_schema_privilege")) return ["PRIVILEGES", state.privileges];
+    if (statement.includes("inet_server_addr")) return ["SERVER", state.server];
     if (statement.includes("current_database()")) return ["IDENTITY", state.identity];
     if (statement.includes("pg_catalog.pg_operator")) return ["OTHER", inventory.otherObjects];
     if (statement.includes("pg_catalog.pg_type t")) return ["TYPES", inventory.types];
@@ -571,7 +576,11 @@ describe("inspectTestDatabase：migration に必要な権限（Step 3-11D）", (
 
   it("本人確認の後、カタログの一覧の前に、同じ読み取り専用のトランザクションで権限を読む", async () => {
     const { value, log, endedCount } = input(db(emptyInventory()));
-    await expect(inspectTestDatabase(value)).resolves.toEqual({ state: { state: "A" }, privileges: ALL });
+    await expect(inspectTestDatabase(value)).resolves.toEqual({
+      state: { state: "A" },
+      privileges: ALL,
+      server: { serverAddress: "172.18.0.2", serverPort: 5432, postmasterStartTime: "2026-11-06T22:46:51.123456Z" },
+    });
     expect(log.slice(0, 6)).toEqual(["CONNECT test-url", "BEGIN", "PIN", "SHOW", "IDENTITY", "PRIVILEGES"]);
     expect(log.at(-1)).toBe("ROLLBACK");
     expect(endedCount()).toBe(1);
@@ -665,5 +674,72 @@ describe("inspectTestDatabase：migration に必要な権限（Step 3-11D）", (
         expect(sql.replace(/'[^']*'/g, "''")).not.toMatch(/\b(TRUNCATE|DELETE|DROP|CREATE|ALTER|INSERT|UPDATE|GRANT|REVOKE|COMMENT|COPY|LOCK|VACUUM|CALL|DO)\b/i);
       }
     }
+  });
+});
+
+describe("inspectTestDatabase：接続先の識別情報（Step 3-11E）", () => {
+  const SERVER = { serverAddress: "172.18.0.2", serverPort: 5432, postmasterStartTime: "2026-11-06T22:46:51.123456Z" };
+
+  it("本人確認・権限の後、カタログの一覧の前に、同じトランザクションで読む（接続は1回、解放も1回）", async () => {
+    const { value, log, endedCount, connect } = input(db(emptyInventory()));
+    const result = await inspectTestDatabase(value);
+    expect(result.server).toEqual(SERVER);
+    expect(result.state).toEqual({ state: "A" });
+    expect(log.slice(0, 7)).toEqual(["CONNECT test-url", "BEGIN", "PIN", "SHOW", "IDENTITY", "PRIVILEGES", "SERVER"]);
+    expect(log.at(-1)).toBe("ROLLBACK");
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(endedCount()).toBe(1);
+  });
+
+  it("識別情報の値によって、状態の判定は変わらない", async () => {
+    for (const inventory of [emptyInventory(), migratedInventory()]) {
+      const state = { ...db(inventory), server: [{ ...SERVER, serverPort: 5434, serverAddress: "10.0.0.1" }] };
+      expect((await inspectTestDatabase(input(state).value)).state).toEqual(await classifyTestDatabase(input(state).value));
+    }
+  });
+
+  it.each([
+    ["0行", []],
+    ["アドレスが NULL（UNIX ソケットの接続）", [{ ...SERVER, serverAddress: null }]],
+    ["アドレスの形が違う", [{ ...SERVER, serverAddress: "host; DROP" }]],
+    ["ポートが文字列", [{ ...SERVER, serverPort: "5432" }]],
+    ["ポートが範囲外", [{ ...SERVER, serverPort: 70000 }]],
+    ["時刻の形が違う", [{ ...SERVER, postmasterStartTime: "2026-11-06 22:46:51+00" }]],
+    ["時刻が Date（形式の固定が効いていない）", [{ ...SERVER, postmasterStartTime: new Date(0) }]],
+  ])("応答が %s なら、SERVER_IDENTITY_UNAVAILABLE で止まり、状態を返さない", async (_label, rows) => {
+    const { value, log, endedCount } = input({ ...db(emptyInventory()), server: rows as Record<string, unknown>[] });
+    await expect(inspectTestDatabase(value)).rejects.toMatchObject({ code: "SERVER_IDENTITY_UNAVAILABLE" });
+    expect(log).not.toContain("RELATIONS");
+    expect(log.at(-1)).toBe("ROLLBACK");
+    expect(endedCount()).toBe(1);
+  });
+
+  it("識別情報の SQL が失敗したら QUERY_FAILED で止まり、ドライバのメッセージを含めない", async () => {
+    const { value, endedCount } = input({ ...db(emptyInventory()), failOn: /inet_server_addr/ });
+    const error = await inspectTestDatabase(value).catch((e: Error) => e);
+    expect(error).toMatchObject({ code: "QUERY_FAILED" });
+    expect((error as Error).message).toContain("server identity query failed (42501)");
+    expectNoSecrets((error as Error).message);
+    expect(endedCount()).toBe(1);
+  });
+
+  it("本人確認に失敗したら、識別情報を読まない", async () => {
+    const state = db(emptyInventory());
+    state.identity = [{ ...state.identity[0], database: "katana" }];
+    const { value, log } = input(state);
+    await expect(inspectTestDatabase(value)).rejects.toMatchObject({ code: "DATABASE_MISMATCH" });
+    expect(log).not.toContain("SERVER");
+  });
+
+  it("識別情報の SQL は SELECT だけで、関数をスキーマで修飾し、pg_control_system() と外部の入力を使わない", () => {
+    const sql = SERVER_IDENTITY_SQL.replace(/\s+/g, " ").trim();
+    expect(sql).toMatch(/^SELECT /);
+    expect(sql).not.toContain(";");
+    expect(sql).not.toMatch(/\bFROM\b/);
+    expect(sql).toContain("pg_catalog.host(pg_catalog.inet_server_addr())");
+    expect(sql).toContain("pg_catalog.inet_server_port()");
+    expect(sql).toContain("pg_catalog.to_char(pg_catalog.pg_postmaster_start_time() AT TIME ZONE 'UTC'");
+    expect(sql).not.toMatch(/pg_control_system|\$\d|katana|postgresql:/);
+    expect(sql.replace(/'[^']*'/g, "''")).not.toMatch(/\b(TRUNCATE|DELETE|DROP|CREATE|ALTER|INSERT|UPDATE|GRANT|REVOKE|COMMENT|COPY|LOCK|VACUUM|CALL|DO)\b/i);
   });
 });

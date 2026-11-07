@@ -16,6 +16,7 @@
     "testdb:verify": "node scripts/testdb-migrate.mts --verify",
     "testdb:check": "node scripts/testdb.mts --check",
     "testdb:status": "node scripts/testdb.mts --status",
+    "testdb:identity": "node scripts/testdb.mts --identity-check",
     "testdb:up": "node scripts/testdb.mts --up",
     "testdb:down": "node scripts/testdb.mts --down"
   },
