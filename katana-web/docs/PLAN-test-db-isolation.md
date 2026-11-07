@@ -375,7 +375,8 @@ npm run test:integration ─► 専用runner
 | 3-11E | TOCTOU の対策の実装：DB 側の識別情報（`inet_server_addr()`・`inet_server_port()`・`pg_postmaster_start_time()`）の読み取り、Docker 側の識別情報（`readTestDbDockerIdentity`）、照合の関数（`lib/testing/testDbIdentity.ts`）、migration の前後の照合（D1 → F1 → D2 → Prisma CLI → F2 → D3）、`--verify` での表示。Step 3-11F で読み取り専用の識別確認モード（`npm run testdb:identity`）を追加。通常テスト33ファイル・1282件成功。migration 用の許可は無効のまま | `441a5da`（`test: guard migrations with database and Docker identity`。親は `519e02b`） |
 | 3-11F | 実環境での識別情報の読み取り専用の検証（Step 3-12A の開始時に、実測値を確定として記録）：`npm run testdb:identity`（Docker の識別情報 D1。すべての照合に合格）と `npm run testdb:verify`（DB の識別情報 F1。状態 A・権限4項目 true）を各1回。D1・F1 を実装済みの照合関数で判定し、すべて一致（起動時刻の差 +0.645秒、ポート 5432、アドレスはコンテナの IP と同じ）。Docker の前後差分なし。migration は未実施 | なし（PLAN の追記だけ。未commit） |
 | 3-12A | migration runner への照合の接続：Docker の操作と検証を `lib/testing/testDbDocker.ts`（読み込みに副作用なし）へ移し、`scripts/testdb.mts` は `main()` と再exportだけに。`scripts/testdb-migrate.mts` は本物の `readTestDbDockerIdentity`・`createTestDatabaseInspector` を `migrationChecks` として渡す（D1・F1・D2・F2・D3）。`--apply` を追加（なしは予行）。migration 用の許可は固定の `LIVE_DATABASE_DISABLED` のままで、`--apply` でも Docker・DB に触れる前に止まる。通常テスト33ファイル・1328件成功、静的検査152件・違反0件。migration は未実施 | `45c0da9`（`test: connect guarded migration checks and require apply`。親は `441a5da`） |
-| 3-12A 実環境確認 | commit の後、`testdb:check`・`status`・`identity`・`verify`・`migrate:check`・`migrate`（予行。`--apply` なし）を各1回、最後に `status`。すべて終了コード0。Docker の識別情報は Step 3-11F と完全一致、**状態 A**・権限4項目 true、DB の識別情報も一致。固定ゲートは無効、Prisma CLI は起動せず、migration は未実施。Docker の前後差分なし | なし（PLAN の追記だけ。未commit） |
+| 3-12A 実環境確認 | commit の後、`testdb:check`・`status`・`identity`・`verify`・`migrate:check`・`migrate`（予行。`--apply` なし）を各1回、最後に `status`。すべて終了コード0。Docker の識別情報は Step 3-11F と完全一致、**状態 A**・権限4項目 true、DB の識別情報も一致。固定ゲートは無効、Prisma CLI は起動せず、migration は未実施。Docker の前後差分なし | `c2cbb6a`（`docs: record Step 3-12A verification and 3-12B prerequisites`。PLAN だけ。親は `45c0da9`） |
+| 3-12B-1 | migration 用の固定ゲートの有効化：`scripts/testdb-migrate.mts` の `liveDatabase` を固定の `{ mode: "enabled" }` に（環境変数・引数では切り替えない）。`--apply` 必須、事前の検証、D1 → F1 → D2 → CLI → F2 → D3 は変更なし。予行の表示とコメントを修正。tsc・eslint 成功、通常テスト33ファイル・1351件成功（失敗・スキップ0件）、静的検査152件・違反0件。migration・Docker・DB の操作なし | `608c92a`（`test: enable guarded test database migration apply gate`。親は `c2cbb6a`） |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -2118,7 +2119,7 @@ npm run test:integration ─► 専用runner
   5. migration の実行（`npm run testdb:migrate -- --apply`。個別の承認が必要）。失敗・異常時は自動の再実行・reset をせず、`testdb:verify` で状態を読み取って報告する。
   6. その後：`prisma migrate diff` による定義の照合、`reset`、`down`、globalSetup への組み込み、統合テスト。
 
-#### Step 3-12A：最終レビュー・commit・実環境の事前確認（実施済み。この節の追記は未commit。migration は未実施）
+#### Step 3-12A：最終レビュー・commit・実環境の事前確認（実施済み。この節の追記は commit `c2cbb6a`。migration は未実施）
 
 - **最終レビュー（ステージした差分で確認）:**
   - Docker 共有モジュール：HEAD の `scripts/testdb.mts` のコード部分と、新しい `lib/testing/testDbDocker.ts`＋`scripts/testdb.mts` の `main()` を連結して `diff` した。差分は import のパス（`../lib/...` → `../db/...`・`./...`）、`main()` 専用の import（`existsSync`・`fileURLToPath`・`pathToFileURL`・`IntegrationRunnerError`・`readEnvFile`）の移動、`runCommand` → `runDockerCommand`（export とコメントの追加）だけ。読み取り専用の許可リスト・変更操作の完全一致・`shell: false`（2か所）・コンテキスト `desktop-linux` の固定・コンテナ・ボリューム・マウントの検査・開発用ボリュームの保護・up・down の条件・`Config.Env` を読まないこと、は変わっていない。共有モジュールに `process.env`・`import.meta`・`main()` はない。`scripts/testdb.mts` の `main()` の判定（`process.argv[1]` と `import.meta.url` の一致）は残っており、直接実行した `testdb:check`・`status`・`identity` が従来どおり動いた（下）。
@@ -2143,6 +2144,34 @@ npm run test:integration ─► 専用runner
   3. 実行の直前に、`testdb:status`・`testdb:identity`・`testdb:verify` で状態 A・権限・識別の一致を、その時点の値で確かめる。
   4. `npm run testdb:migrate -- --apply` の実行（個別の承認）。失敗・異常時は自動の再実行・reset をせず、`testdb:verify` で読み取って報告する。
   5. その後：`prisma migrate diff`、`reset`、`down`、globalSetup、統合テスト。
+  - **Step 3-12B-1 での更新:** 1（`c2cbb6a`）と2（`608c92a`）は完了。3以降は下の「Step 3-12B-1」の「Step 3-12B-2 の開始前条件」に引き継ぐ。
+
+#### Step 3-12B-1：migration 用の固定ゲートの有効化と静的検証（実施済み。commit `608c92a`。migration は未実施）
+
+- **前提:** HEAD `c2cbb6a`。Step 3-12B の実行前の静的レビュー（コードの変更なし）の承認。
+- **コードの変更（`608c92a`。`test: enable guarded test database migration apply gate`。親は `c2cbb6a`。4ファイル・173行の追加・44行の削除）:**
+  - `scripts/testdb-migrate.mts`：`liveDatabase: LIVE_DATABASE_DISABLED` を、固定の `liveDatabase: { mode: "enabled" }` に変えた（環境変数・引数では切り替えない。条件分岐なし）。使わなくなった `LIVE_DATABASE_DISABLED` の import を外した（定数は `lib/testing/testDbMigrate.ts` に残し、無効に戻すときとテストで使う）。冒頭とインラインのコメントを、有効化の後の動作に合わせて直した。
+  - `lib/testing/testDbMigrate.ts`：予行の表示の修正（確認モードは「(not run in check mode)」、予行は「(not run in this dry run; they run only with --apply)」）。ゲートの説明（`LiveDatabaseAccess`・`ReadOnlyDatabaseAccess` の doc、照合の説明、インラインのコメント）と、`createTestDatabaseClassifier` の古いコメントを修正。
+  - `lib/testing/testDbState.ts`：「現時点では、どこからも呼ばない」の古いコメントを、実際の呼び出し経路（`createTestDatabaseInspector` から `inspectTestDatabase`。F1・F2・`--verify`）に直した。
+  - `lib/testing/testDbMigrate.test.ts`：無効値を前提にした静的検査4件を、共通の確認（固定のリテラルの1行・`liveDatabase` と `mode: "enabled"` が各1回・`LIVE_DATABASE_DISABLED` なし）に置き換えた。新しい describe「Step 3-12B-1」に23件を追加（ゲートの行の完全一致、予行・`--check`・`--verify` は CLI・Docker・判定を使わない、`--apply` でも事前の検証7種類で Docker・DB の前に止まる、D1・F1・D2 の失敗8種類で CLI の前に止まる、成功時の全順序、CLI の失敗で F2・D3 未実施・DB の状態は未確認と報告、予行と確認モードの表示の区別）。
+- **変えていないもの：** `--apply` 必須、引数・Node の起動オプション・`.env.test`・接続先・パスワード・親と子の環境変数・必要なファイルの検証、D1 → F1 → D2 → CLI → F2 → D3 の順序と停止条件、Prisma CLI の固定コマンド・`shell: false`、`--verify` 用の `readOnlyDatabase`、`prisma/`・`.env*`・Compose・globalSetup。
+- **検証（すべて静的・モックだけ）:** `npx tsc --noEmit` 成功、変更した4ファイルの `eslint` 成功、`git diff --check`・`git diff --cached --check` 成功、静的検査（`dbConnectionPaths.test.ts`）152件・違反0件、`npx vitest list --filesOnly` 33ファイル（`*.integration.test.*` 0件。統合テスト6ファイルは通常テストから除外）。
+  - 通常テスト：最初の `npm test` は、Claude Code の権限の判定で拒否された（理由のラベルは「Irreversible Local Destruction」。根拠は表示されず、原因は特定していない）。関連4ファイル（529件）を明示して実行して成功した後、残り29ファイルの静的な安全性調査（DB・Docker・ファイルの書き込み・外部通信の経路なし、`@/lib/prisma` のモックはすべて factory 付き、`scripts/testdb-migrate.mts` を import するテストなし）を経て、ユーザーの1回限りの承認で `npm test` を1回実行：**33ファイル・1351件成功、失敗0件・スキップ0件、終了コード0**。ログに DB・Docker・migration の形跡なし。絞り込みなしのテストの禁止方針は、恒久的には解除していない（実行のたびに個別の承認が必要）。
+- **現在の状態:**
+  - 固定ゲートは**有効**（`608c92a`）。`npm run testdb:migrate -- --apply` を実行すると、テストDBに migration が走る。
+  - migration は未実施。状態 C への移行も未実施。
+  - DB の状態 A は、Step 3-12A で最後に確かめた結果で、この Step では Docker・DB を読んでいない（現時点の状態は未確認）。
+  - 開発用DBの保護（D1・D2・D3 での `katana-db` なし・開発用ボリュームの未使用と記録の一致、開発用 URL の拒否）は変わっていない。
+  - TOCTOU の残るリスクは「Step 3-12A」のとおり。
+- **Step 3-12B-2 の開始前条件:**
+  1. 現在の Docker・DB の状態を、その時点で新たに確かめる（過去の記録で代えない）。
+  2. `testdb:status`・`testdb:identity`・`testdb:verify` の結果を確かめる（それぞれ個別の承認）。
+  3. 状態 A・本人確認4項目・権限4項目・識別情報（コンテナID・`StartedAt`・`RestartCount`・ネットワーク・`inet_server_port` 5432・`pg_postmaster_start_time`）を確かめる。
+  4. `testdb:migrate:check`（ゲートが「enabled」と表示されること）と予行（`testdb:migrate`。`--apply` なし）を確かめる。
+  5. コンテナが停止・再作成・再起動されていた場合は、過去の識別情報との不一致を無視せず、原因を確かめて報告する（新しい値をそのまま受け入れない）。
+  6. `npm run testdb:migrate -- --apply` は、個別の承認の後に1回だけ実行する。失敗・異常時は、自動の再実行・reset・`migrate resolve` をしない。
+  7. 適用の後は、状態 C、スキーマの定義（`migrate diff` などの方法は別工程で決める）、migration の checksum を確かめる。
+  8. 完了の後は、固定ゲートを `LIVE_DATABASE_DISABLED` に戻す（コードの変更と commit。個別の承認）。
 
 全Stepに共通する事項:
 
@@ -2382,18 +2411,18 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：`45c0da9`（`test: connect guarded migration checks and require apply`。Step 3-12A。親は `441a5da`）
-   - 変更済み（未commit）：`docs/PLAN-test-db-isolation.md`（`45c0da9` の記録と、Step 3-12A の実環境の事前確認・予行の結果）。次のレビューで commit を判断する
+   - HEAD：Step 3-12B-1 の PLAN の記録の commit（`docs: record Step 3-12B-1 gate enablement and verification`。親は `608c92a`（`test: enable guarded test database migration apply gate`。Step 3-12B-1））
+   - 変更済み（未commit）：なし
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
    - `.env.test` はユーザーが作成済み（`-rw-------`。中身は表示しない）
    - テストDBのコンテナ `katana-test-db` が起動している場合がある（Step 3-11。データは tmpfs）。`docker ps -a` で確かめる
 3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。Step 3-11 で、ユーザーがテストDBを初めて起動した（R7 は今回の起動で合格。3-Aの「Step 3-11」）。`down` はまだ実行していない。Step 3-11の実施前レビューの結果（3-Aの「Step 3-11の実施前レビュー」。前提条件の表 C、R7 の D、失敗時の E、DB検証の F、TOCTOU の G、`.env.test` の I）を先に読む。レビューの時点では Docker のデーモンが停止中だったが、Step 3-11A でユーザーが Docker Desktop を起動し、前提条件 C の2〜9 を満たすことを確かめた（3-Aの「Step 3-11A」）。初期化スクリプトのログ漏洩の対策も 3-11A で済んだ。初回の up の後に問題が起きたときは、自動で削除せず、読み取りで調べて報告し、個別の承認を待つ（3-11A で確定）。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
-   - PLAN の追記の commit（指示があれば）。Step 3-12A は `45c0da9` で commit 済み、実環境の事前確認と予行はすべて成功（3-Aの「Step 3-12A：最終レビュー・commit・実環境の事前確認」）
-   - Step 3-12B：migration 用の許可を有効にするコード変更と、migration の実行（同じ節の実行前条件。それぞれ個別の承認が必要）
-   - migration（Step 3-12。上の2つの後。migration 用の許可の有効化と実行には、それぞれ個別の承認が必要）
+   - Step 3-12B-2：migration の実行。**固定ゲートは `608c92a` で有効**なので、`--apply` は個別の承認の後に1回だけ。開始前条件は3-Aの「Step 3-12B-1」の「Step 3-12B-2 の開始前条件」（現在の状態を新たに確かめることから始める）
+   - 状態 C の後の、定義の一致（`migrate diff`）と checksum の検証の方法の決定と実装（別工程）
+   - 完了後に、固定ゲートを無効に戻すコード変更（個別の承認）
    - `reset` の実装（本人確認の後）
 
-   接続後の本人確認と状態の判定は Step 3-10B で実装して commit し、Step 3-10C で migration 用スクリプトの流れに組み込んだ。ただし、スクリプトの実DBへの接続の許可は固定で無効で、通常実行モードは接続の前に必ず止まる。globalSetup には組み込んでおらず、強制停止のまま（初回の実DB接続で確かめることは、3-Aの3-10B・3-10Cの記録）。指示されたStep以外には着手しない。
+   接続後の本人確認と状態の判定は Step 3-10B で実装して commit し、Step 3-10C で migration 用スクリプトの流れに組み込んだ。Step 3-12B-1（`608c92a`）で、スクリプトの migration 用の許可を固定で有効にした。`--apply` を付けたときだけ migration に進み、予行・`--check`・`--verify` は Prisma CLI を起動しない。globalSetup には組み込んでおらず、強制停止のまま（初回の実DB接続で確かめることは、3-Aの3-10B・3-10Cの記録）。指示されたStep以外には着手しない。
 4. Stepが終わったら報告し、ユーザーの確認を得たうえで、次の2つを更新してからセッションを終える。
    - 3章の「3-A. 実施結果」（結果、設計との違い、未検証の事項、次のStepへの申し送り）
    - 本節の手順2の想定と、手順3の次のStep
