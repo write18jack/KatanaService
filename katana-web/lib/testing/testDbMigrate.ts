@@ -47,6 +47,8 @@ import {
  * `--apply` は migration の実行の意思表示、`--check` は確認モード、`--verify` は読み取り専用の検証モード。どれも1つだけ受け付け、
  * 併用（`--apply --check` など）や未知の引数は、ファイル・Docker・DB に触れる前に ARGUMENTS_INVALID で止める。
  * `--apply` は意思の確認だけで、それ単体では migration を許可しない（固定の liveDatabase が無効なら、Docker・DB に触れる前に止まる）。
+ * scripts/testdb-migrate.mts は、Step 3-12B-1 から固定の `{ mode: "enabled" }` を渡す。それでも migration は `--apply` のときだけで、
+ * 1〜8の検証は省略しない。
  *
  * 実行順序（途中で失敗したら、その時点で止める。別の接続先は試さない）:
  * 1. 引数の検証、Node の起動オプション（execArgv・NODE_OPTIONS）の確認  2. `.env.test` の読み込み
@@ -62,8 +64,9 @@ import {
  *     （不足なら MIGRATION_PRIVILEGES_INSUFFICIENT で止まる）。B は理由を表示して止まり、C は起動せずに成功とする
  * 13. migration の後に、別の接続でもう一度、本人確認と状態の判定を行う  14. C であることを確かめて終了する
  *
- * 接続先の照合（Step 3-11E。TOCTOU の対策。migration 用の許可が有効なときだけ動く。スクリプトでは無効のまま。
- * Step 3-12A で、スクリプトから本物の readTestDbDockerIdentity・createTestDatabaseInspector を migrationChecks として渡すようにした）:
+ * 接続先の照合（Step 3-11E。TOCTOU の対策。`--apply` で、migration 用の許可が有効なときだけ動く。
+ * Step 3-12A で、スクリプトから本物の readTestDbDockerIdentity・createTestDatabaseInspector を migrationChecks として渡すようにし、
+ * Step 3-12B-1 で、スクリプトの許可を固定で有効にした）:
  * Docker の識別情報 D1 → DB の本人確認・権限・状態・識別情報 F1（D1 と照合）→ Prisma CLI の直前に D2（D1 と一致）→ migrate deploy
  * → DB の再確認 F2（F1 と一致、状態 C）→ D3（D1 と一致）。どれかが合わなければ止まる（自動の修復・再接続はしない）。
  * D1・F1・D2 の不一致は Prisma CLI の起動の前に止める（防止）。F2・D3 の不一致は、Prisma CLI の実行の後に異常として検出するだけ（防止ではない）。
@@ -164,17 +167,17 @@ export type MigrationChecks = {
 };
 
 /**
- * migration 用の実DBへの接続の許可（固定のゲート）。scripts/testdb-migrate.mts は LIVE_DATABASE_DISABLED を固定で渡す
- * （環境変数・引数では変えられない。`--apply` も許可を与えない）。有効にするのは、承認を得た後続の工程で、
- * スクリプトのコードを変えたときだけ。単体テストは { mode: "enabled" } を直接渡す。
+ * migration 用の実DBへの接続の許可（固定のゲート）。scripts/testdb-migrate.mts は、Step 3-12B-1 で承認を得て、
+ * 固定の { mode: "enabled" } を渡す（環境変数・引数では変えられない。`--apply` も許可を与えない）。
+ * 無効に戻すときは、スクリプトのコードを LIVE_DATABASE_DISABLED に変える。単体テストは、どちらの値も直接渡す。
  */
 export type LiveDatabaseAccess = { readonly mode: "disabled" } | { readonly mode: "enabled" };
 export const LIVE_DATABASE_DISABLED: LiveDatabaseAccess = Object.freeze({ mode: "disabled" });
 
 /**
  * 読み取り専用の検証モード（`--verify`）の、実DBへの接続の許可。migration 用の LiveDatabaseAccess とは別の型・別の値で、共有しない。
- * scripts/testdb-migrate.mts は READ_ONLY_DATABASE_DISABLED を固定で渡す（環境変数・引数では変えられない）。
- * 有効にするのは、個別の承認を得た後続の工程で、スクリプトのコードを変えたときだけ。単体テストは、偽の判定関数で有効にする。
+ * scripts/testdb-migrate.mts は、Step 3-11B で承認を得て、固定の `enabled-read-only` を渡す（環境変数・引数では変えられない）。
+ * 無効に戻すときは、スクリプトのコードを READ_ONLY_DATABASE_DISABLED に変える。単体テストは、偽の判定関数で有効にする。
  */
 export type ReadOnlyDatabaseAccess =
   | { readonly mode: "disabled" }
@@ -237,7 +240,7 @@ export function buildTestDbMigrateEnv(parentEnv: EnvSource, verifiedDatabaseUrl:
 /**
  * 状態の判定の関数を作る。期待値（テーブル・enum・migration の名前）は、作るときに schema.prisma と prisma/migrations から読む。
  * connect には lib/testing/testDbConnection.ts の connectTestDatabase を渡す（pg を読み込むのは、そのファイルだけ）。
- * まだどこからも呼ばない（scripts/testdb-migrate.mts への組み込みは、実DBへの接続の承認の後）。
+ * scripts/testdb-migrate.mts は、権限・識別情報も読む createTestDatabaseInspector を使い、この関数は使わない（単体テストだけで使う）。
  */
 export function createTestDatabaseClassifier(input: {
   root: string;
@@ -355,7 +358,7 @@ async function runReadOnlyVerify(input: {
     }
   }
 
-  // 読み取り専用の接続の許可（スクリプトでは常に無効。接続の前に止まる）
+  // 読み取り専用の接続の許可（スクリプトでは固定で有効。無効なら、接続の前に止まる）
   if (deps.readOnlyDatabase.mode !== "enabled-read-only") {
     throw new TestDbMigrateError(
       "TESTDB_VERIFY_LIVE_DISABLED",
@@ -399,6 +402,7 @@ async function runReadOnlyVerify(input: {
 }
 
 function formatCheckReport(input: {
+  mode: "check" | "dry-run";
   heading: string;
   liveDatabase: LiveDatabaseAccess;
   readOnlyDatabase: ReadOnlyDatabaseAccess;
@@ -409,14 +413,15 @@ function formatCheckReport(input: {
   childEnv: Record<string, string>;
   droppedKeys: string[];
 }): string {
-  const { heading, liveDatabase, readOnlyDatabase, root, target, execPath, args, childEnv, droppedKeys } = input;
+  const { mode, heading, liveDatabase, readOnlyDatabase, root, target, execPath, args, childEnv, droppedKeys } = input;
   return [
     heading,
     "",
     `connection target: verified ${target.host}:${target.port}/${target.database} as ${target.user} (${TEST_ENV_FILE} DATABASE_URL; password hidden)`,
     `working directory: ${root}`,
     `command: ${path.basename(execPath)} ${args.map((arg) => (path.isAbsolute(arg) ? path.relative(root, arg) : arg)).join(" ")} (no shell)`,
-    "database checks: identity and state (A: empty / B: inconsistent / C: fully migrated) before the Prisma CLI, and again after it (not run in check mode)",
+    "database checks: identity and state (A: empty / B: inconsistent / C: fully migrated) before the Prisma CLI, and again after it " +
+      (mode === "check" ? "(not run in check mode)" : "(not run in this dry run; they run only with --apply)"),
     "migrations run only with --apply; --apply is a confirmation and does not enable the migration gate by itself",
     `live database access (migration gate): ${liveDatabase.mode === "enabled" ? "enabled" : "disabled in this build (--apply stops with TESTDB_MIGRATION_LIVE_DISABLED before reading Docker or connecting)"}`,
     `read-only verification (--verify): ${readOnlyDatabase.mode === "enabled-read-only" ? "enabled" : "disabled in this build (stops with TESTDB_VERIFY_LIVE_DISABLED before connecting)"}`,
@@ -500,11 +505,11 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
       mode === "check"
         ? "[testdb-migrate] check mode: the Prisma CLI was not started and no database connection was made."
         : "[testdb-migrate] dry run (--apply was not given): nothing was migrated; Docker was not read, no database connection was made and the Prisma CLI was not started.";
-    deps.log(formatCheckReport({ heading, liveDatabase: deps.liveDatabase, readOnlyDatabase: deps.readOnlyDatabase, root, target, execPath: deps.execPath, args, childEnv, droppedKeys }));
+    deps.log(formatCheckReport({ mode, heading, liveDatabase: deps.liveDatabase, readOnlyDatabase: deps.readOnlyDatabase, root, target, execPath: deps.execPath, args, childEnv, droppedKeys }));
     return 0;
   }
 
-  // ここからは --apply だけ。実DBへの接続の許可（スクリプトでは常に無効。Docker の読み取り・接続・子プロセスの起動の前に止まる）
+  // ここからは --apply だけ。実DBへの接続の許可（スクリプトでは固定で有効。無効なら、Docker の読み取り・接続・子プロセスの起動の前に止まる）
   if (deps.liveDatabase.mode !== "enabled") {
     throw new TestDbMigrateError(
       "TESTDB_MIGRATION_LIVE_DISABLED",

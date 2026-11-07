@@ -23,7 +23,8 @@ import { isUtcTimestamp, type TestDatabaseServerIdentity } from "./testDbIdentit
  *
  * 状態を判定するだけで、migration・reset・DROP・TRUNCATE・DELETE・自動復旧は行わない。どの状態でも、DBを変更しない。
  * 判定の結果をどう扱うか（A なら migrate deploy、C なら何もしない、B なら拒否）は、呼び出し側が決める。
- * 現時点では、どこからも呼ばない（testdb-migrate への組み込みは別工程）。
+ * scripts/testdb-migrate.mts から、lib/testing/testDbMigrate.ts の createTestDatabaseInspector を通して inspectTestDatabase を呼ぶ
+ * （--verify と、--apply の migration の前後の判定 F1・F2）。classifyTestDatabase は createTestDatabaseClassifier から呼び、スクリプトからは使わない（単体テストだけ）。
  *
  * 実行順序（途中で失敗したら、その時点で止める）:
  * 1. 期待値と接続URLの検証（接続しない）  2. 接続（1回だけ。接続は呼び出し側が `connect` として渡す）
