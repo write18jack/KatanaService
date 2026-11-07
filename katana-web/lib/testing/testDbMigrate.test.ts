@@ -16,6 +16,7 @@ import {
   createTestDatabaseInspector,
   type InspectDatabase,
   LIVE_DATABASE_DISABLED,
+  type ReadDockerIdentity,
   parseTestDbMigrateArgs,
   READ_ONLY_DATABASE_DISABLED,
   runTestDbMigrate,
@@ -74,7 +75,7 @@ type Fake = {
   /** 読み取り専用の検証モード（--verify）の判定（liveDatabase とは別の偽の関数） */
   verify: Mock<InspectDatabase>;
   /** migration 用の Docker の識別情報の読み取り */
-  readDockerIdentity: Mock<() => Promise<TestDbDockerIdentity>>;
+  readDockerIdentity: Mock<ReadDockerIdentity>;
   logs: string[];
   /** 呼ばれた順の記録 */
   calls: string[];
@@ -128,7 +129,7 @@ function fake(
   const servers = [...(overrides.servers ?? [SERVER])];
   const nextServer = () => (servers.length > 1 ? (servers.shift() as TestDatabaseServerIdentity) : servers[0]);
   const dockers = [...(overrides.dockers ?? [DOCKER])];
-  const readDockerIdentity = vi.fn(async () => {
+  const readDockerIdentity = vi.fn<ReadDockerIdentity>(async () => {
     calls.push("docker");
     const next = dockers.length > 1 ? dockers.shift() : dockers[0];
     if (next instanceof Error) throw next;
@@ -148,7 +149,8 @@ function fake(
   });
   const deps: TestDbMigrateDeps = {
     root: ROOT,
-    argv: overrides.argv ?? [],
+    // 既定は --apply（migration の実行の意思表示。許可は liveDatabase で別に与える）
+    argv: overrides.argv ?? ["--apply"],
     execArgv: overrides.execArgv ?? [],
     execPath: EXEC_PATH,
     parentEnv: overrides.parentEnv ?? { PATH: "/usr/bin", HOME: "/home/u" },
@@ -157,9 +159,11 @@ function fake(
       calls.push(`exists:${path.relative(ROOT, absolutePath)}`);
       return !(overrides.missingPaths ?? []).includes(path.relative(ROOT, absolutePath));
     },
-    liveDatabase: overrides.liveDisabled
-      ? LIVE_DATABASE_DISABLED
-      : { mode: "enabled", inspectDatabase: async (input) => ({ state: await classify(input), privileges, server: nextServer() }), readDockerIdentity },
+    liveDatabase: overrides.liveDisabled ? LIVE_DATABASE_DISABLED : { mode: "enabled" },
+    migrationChecks: {
+      readDockerIdentity,
+      inspectDatabase: async (input) => ({ state: await classify(input), privileges, server: nextServer() }),
+    },
     readOnlyDatabase: overrides.readOnlyDisabled ? READ_ONLY_DATABASE_DISABLED : { mode: "enabled-read-only", inspectDatabase: verify },
     spawn,
     log: (text) => logs.push(text),
@@ -201,8 +205,9 @@ const EXPECTED_ARGS = [
 ];
 
 describe("parseTestDbMigrateArgs", () => {
-  it("引数なしは通常実行、--check だけは確認モード、--verify だけは読み取り専用の検証モード", () => {
-    expect(parseTestDbMigrateArgs([])).toBe("run");
+  it("引数なしは予行、--apply だけは実行の意思表示、--check だけは確認モード、--verify だけは読み取り専用の検証モード", () => {
+    expect(parseTestDbMigrateArgs([])).toBe("dry-run");
+    expect(parseTestDbMigrateArgs(["--apply"])).toBe("apply");
     expect(parseTestDbMigrateArgs(["--check"])).toBe("check");
     expect(parseTestDbMigrateArgs(["--verify"])).toBe("verify");
   });
@@ -219,6 +224,18 @@ describe("parseTestDbMigrateArgs", () => {
     [["--verify", "--verify"]],
     [["--verify", "--apply"]],
     [["--verify=true"]],
+    [["--apply", "--apply"]],
+    [["--apply", "--check"]],
+    [["--check", "--apply"]],
+    [["--apply", "--verify"]],
+    [["--apply=true"]],
+    [["--APPLY"]],
+    [["apply"]],
+    [["--apply", "--force"]],
+    [["--apply", "--", "reset"]],
+    [["--apply", "--schema", "x"]],
+    [["toString"]],
+    [["__proto__"]],
   ])(
     "%j は拒否する（Prisma CLI へ引数を渡さない）",
     (args) => {
@@ -387,7 +404,7 @@ describe("runTestDbMigrate：実DBへの接続の許可（強制停止）", () =
     expect(Object.isFrozen(LIVE_DATABASE_DISABLED)).toBe(true);
   });
 
-  it("スクリプト（scripts/testdb-migrate.mts）は、migration 用の許可を固定の LIVE_DATABASE_DISABLED にし、接続の部品は --verify の許可の中だけで使う", () => {
+  it("スクリプト（scripts/testdb-migrate.mts）は、migration 用の許可を固定の LIVE_DATABASE_DISABLED にし、接続の部品は --verify の許可と migrationChecks の中だけで使う", () => {
     const source = codeOf("scripts/testdb-migrate.mts");
     expect(source).toMatch(/^\s*liveDatabase: LIVE_DATABASE_DISABLED,$/m);
     expect(source).not.toMatch(/mode:\s*["']enabled["']/);
@@ -396,12 +413,15 @@ describe("runTestDbMigrate：実DBへの接続の許可（強制停止）", () =
     for (const forbidden of ["classifyTestDatabase", '"pg"', "process.env.KATANA_TESTDB", "process.argv.includes"]) {
       expect(source).not.toContain(forbidden);
     }
-    // 接続の部品は、import と readOnlyDatabase の中の1か所だけ
-    const readOnlyBlock = source.slice(source.indexOf("readOnlyDatabase: {"), source.indexOf("},", source.indexOf("readOnlyDatabase: {")));
+    // 接続の部品は、import と、readOnlyDatabase・migrationChecks の中の各1か所だけ（Step 3-12A）
+    const blockOf = (start: string) => source.slice(source.indexOf(start), source.indexOf("},", source.indexOf(start)));
+    const readOnlyBlock = blockOf("readOnlyDatabase: {");
+    const checksBlock = blockOf("migrationChecks: {");
     expect(source).not.toContain("createTestDatabaseClassifier");
     for (const part of ["connectTestDatabase", "createTestDatabaseInspector"]) {
-      expect(source.match(new RegExp(part, "g"))).toHaveLength(2);
+      expect(source.match(new RegExp(part, "g"))).toHaveLength(3);
       expect(readOnlyBlock).toContain(part);
+      expect(checksBlock).toContain(part);
     }
   });
 
@@ -463,14 +483,14 @@ describe("runTestDbMigrate：確認モード", () => {
     expect(output).toContain("  KATANA_DB_TARGET=test");
     expect(output).toContain("  PRISMA_HIDE_UPDATE_MESSAGE");
     expect(output).toContain("  DATABASE_URL\n");
-    expect(output).toContain("live database access: enabled");
+    expect(output).toContain("live database access (migration gate): enabled");
     for (const secret of SECRETS) expect(output).not.toContain(secret);
   });
 
   it("許可が無効なビルドでは、確認モードでそのことを表示する（確認モード自体は成功する）", async () => {
     const f = fake({ argv: ["--check"], liveDisabled: true });
     await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
-    expect(f.logs.join("\n")).toContain("live database access: disabled in this build");
+    expect(f.logs.join("\n")).toContain("live database access (migration gate): disabled in this build");
   });
 
   it("確認モードでも、親のプロセスの PG* は拒否する（通常実行モードと同じ判定）", async () => {
@@ -599,7 +619,7 @@ describe("runTestDbMigrate：読み取り専用の検証モード（--verify）"
   it("B なら、理由を表示して失敗する（Prisma CLI を起動せず、reset・自動復旧もしない）", async () => {
     const f = fake({ argv: ["--verify"], verifyStates: [STATE_B] });
     const error = await expectError(f, "DATABASE_STATE_INCONSISTENT");
-    expect(error.message).toContain("Nothing was reset or repaired.");
+    expect(error.message).toContain("Nothing was reset or repaired");
     expect(f.spawn).not.toHaveBeenCalled();
     expect(f.classify).not.toHaveBeenCalled();
     expect(f.logs.join("\n")).toContain("database state: B (partially applied, failed or unexpected objects)\n  - migration history does not match");
@@ -1048,7 +1068,7 @@ describe("接続先の識別情報と TOCTOU の照合（Step 3-11E）", () => {
     const f = fake({ servers: [SERVER, { ...SERVER, postmasterStartTime: "2026-11-06T22:50:00.000000Z" }] });
     const error = await expectError(f, "POST_MIGRATION_IDENTITY_MISMATCH");
     expect(error.message).toContain("(postmasterStartTime)");
-    expect(error.message).toContain("Nothing was reset or repaired.");
+    expect(error.message).toContain("Nothing was reset or repaired");
     expect(f.spawn).toHaveBeenCalledTimes(1);
   });
 
@@ -1088,8 +1108,9 @@ describe("接続先の識別情報と TOCTOU の照合（Step 3-11E）", () => {
     await expectStopped(f, "TESTDB_MIGRATION_LIVE_DISABLED");
     const source = codeOf("scripts/testdb-migrate.mts");
     expect(source).toMatch(/^\s*liveDatabase: LIVE_DATABASE_DISABLED,$/m);
-    expect(source).not.toContain("readTestDbDockerIdentity");
-    expect(source).not.toContain("readDockerIdentity");
+    // Docker の識別情報の読み取りは、migrationChecks の中の1か所だけ（Step 3-12A。許可が無効な間は呼ばれない）
+    expect(source.match(/readTestDbDockerIdentity/g)).toHaveLength(2);
+    expect(source.match(/readDockerIdentity:/g)).toHaveLength(1);
   });
 
   it("本物の判定と偽のDB：識別情報の SQL の応答が読めなければ、--verify は VERIFY_CHECK_FAILED（状態を表示しない）", async () => {
@@ -1150,6 +1171,224 @@ describe("--verify の静的な確認（ソース）", () => {
     const pkg = JSON.parse(readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
     expect(pkg.scripts["testdb:verify"]).toBe("node scripts/testdb-migrate.mts --verify");
     expect(pkg.scripts["testdb:migrate"]).toBe("node scripts/testdb-migrate.mts");
+  });
+});
+
+describe("Step 3-12A：--apply と、migration の照合の接続", () => {
+  /** 検証（引数・.env・ファイル）までの呼び出し。ここより後が Docker・DB・Prisma CLI */
+  const PRE_CHECKS = [
+    "read:.env.test",
+    "read:.env",
+    "exists:node_modules/prisma/build/index.js",
+    "exists:prisma.config.ts",
+    "exists:prisma/schema.prisma",
+    "exists:prisma/migrations",
+  ];
+  /** 偽の Prisma CLI に渡された引数が、すべて固定の migrate deploy であること（reset・再実行の引数がない） */
+  const expectOnlyDeploy = (f: Fake) => {
+    for (const [command, args, options] of f.spawn.mock.calls) {
+      expect(command).toBe(EXEC_PATH);
+      expect(args).toEqual(EXPECTED_ARGS);
+      expect(options.shell).toBe(false);
+    }
+    expect(f.spawn.mock.calls.length).toBeLessThanOrEqual(1);
+  };
+
+  it("--apply なし（予行）は、許可が有効でも Docker・DB・Prisma CLI に触れずに 0 で終わる", async () => {
+    const f = fake({ argv: [] });
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.calls).toEqual(PRE_CHECKS);
+    expect(f.readDockerIdentity).not.toHaveBeenCalled();
+    expect(f.classify).not.toHaveBeenCalled();
+    expect(f.verify).not.toHaveBeenCalled();
+    expect(f.spawn).not.toHaveBeenCalled();
+    const output = f.logs.join("\n");
+    expect(output).toContain("dry run (--apply was not given): nothing was migrated");
+    expect(output).toContain("migrations run only with --apply; --apply is a confirmation and does not enable the migration gate by itself");
+    for (const secret of SECRETS) expect(output).not.toContain(secret);
+  });
+
+  it("--apply なし（予行）は、スクリプトと同じ無効な許可でも 0 で終わり、無効であることを表示する", async () => {
+    const f = fake({ argv: [], liveDisabled: true });
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.calls).toEqual(PRE_CHECKS);
+    expect(f.logs.join("\n")).toContain("live database access (migration gate): disabled in this build");
+  });
+
+  it("--apply でも、固定の許可が無効なら Docker を読む前に止まる（--apply は許可を与えない）", async () => {
+    const f = fake({ argv: ["--apply"], liveDisabled: true });
+    const error = await expectStopped(f, "TESTDB_MIGRATION_LIVE_DISABLED");
+    expect(error.message).toContain("--apply alone does not enable it");
+    expect(f.calls).toEqual(PRE_CHECKS);
+  });
+
+  it("--apply でも、許可が無効なら、環境変数に何があっても止まる（許可を環境変数から導かない）", async () => {
+    const f = fake({ argv: ["--apply"], liveDisabled: true, parentEnv: { PATH: "/usr/bin", KATANA_TESTDB_MIGRATION: "enabled", KATANA_TESTDB_APPLY: "1" } });
+    await expectStopped(f, "TESTDB_MIGRATION_LIVE_DISABLED");
+  });
+
+  it("--check は、許可が有効でも Docker・DB・Prisma CLI に触れない", async () => {
+    const f = fake({ argv: ["--check"] });
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.calls).toEqual(PRE_CHECKS);
+    expect(f.readDockerIdentity).not.toHaveBeenCalled();
+    expect(f.spawn).not.toHaveBeenCalled();
+  });
+
+  it("--verify は、許可が有効でも Prisma CLI・migration 用の照合（Docker・判定）を使わない", async () => {
+    const f = fake({ argv: ["--verify"] });
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.readDockerIdentity).not.toHaveBeenCalled();
+    expect(f.classify).not.toHaveBeenCalled();
+    expect(f.verify).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([[["--apply", "--check"]], [["--check", "--apply"]], [["--apply", "--verify"]], [["--verify", "--apply"]], [["--apply", "--apply"]], [["--apply", "--force"]], [["--apply=1"]]])(
+    "%j は、ファイル・Docker・DB に触れる前に ARGUMENTS_INVALID で止まる",
+    async (argv) => {
+      const f = fake({ argv });
+      await expectStopped(f, "ARGUMENTS_INVALID");
+      expect(f.calls).toEqual([]);
+    },
+  );
+
+  it("成功：D1 → F1 → D2 → Prisma CLI → F2 → D3 の順で、Docker の読み取りには runner と同じ root・parentEnv・readEnvFile を渡す", async () => {
+    const f = fake();
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.calls.slice(PRE_CHECKS.length)).toEqual(["docker", "classify", "docker", "spawn", "classify", "docker"]);
+    for (const [input] of f.readDockerIdentity.mock.calls) {
+      expect(input).toEqual({ root: ROOT, parentEnv: f.deps.parentEnv, readEnvFile: f.deps.readEnvFile });
+    }
+    expectOnlyDeploy(f);
+  });
+
+  it.each<[string, Parameters<typeof fake>[0], TestDbMigrateErrorCode, string[]]>([
+    ["D1 の取得の失敗", { dockers: [Object.assign(new Error("x"), { code: "DOCKER_CONTEXT_MISMATCH" })] }, "DOCKER_IDENTITY_FAILED", ["docker"]],
+    ["F1 の本人確認の失敗", { states: [new IntegrationDatabaseCheckError("MARKER_MISMATCH", "x")] }, "STATE_CHECK_FAILED", ["docker", "classify"]],
+    ["F1 の状態 B", { states: [STATE_B] }, "DATABASE_STATE_INCONSISTENT", ["docker", "classify"]],
+    ["F1 の権限不足", { privileges: { databaseCreate: false } }, "MIGRATION_PRIVILEGES_INSUFFICIENT", ["docker", "classify"]],
+    ["D1・F1 の照合の不一致", { servers: [{ ...SERVER, postmasterStartTime: "2026-11-06T20:00:00.000000Z" }] }, "SERVER_IDENTITY_MISMATCH", ["docker", "classify"]],
+    ["D2 の不一致", { dockers: [DOCKER, { ...DOCKER, restartCount: 1 }] }, "DOCKER_IDENTITY_MISMATCH", ["docker", "classify", "docker"]],
+    ["D2 の取得の失敗", { dockers: [DOCKER, Object.assign(new Error("x"), { code: "DOCKER_COMMAND_FAILED" })] }, "DOCKER_IDENTITY_FAILED", ["docker", "classify", "docker"]],
+  ])("CLI の起動の前の拒否：%s なら、Prisma CLI を起動せずに止まる", async (_label, overrides, code, order) => {
+    const f = fake(overrides);
+    const error = await expectError(f, code);
+    expect(f.calls.slice(PRE_CHECKS.length)).toEqual(order);
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(error.message).not.toContain("detection after the fact");
+  });
+
+  it("Prisma CLI の失敗：部分的な適用の可能性を報告し、再実行・reset・F2・D3 をしない", async () => {
+    const f = fake();
+    f.spawn.mockImplementationOnce(async () => {
+      f.calls.push("spawn");
+      return 1;
+    });
+    const error = await expectError(f, "MIGRATION_FAILED");
+    expect(error.message).toContain("may have been partially applied");
+    expect(error.message).toContain("Nothing was reset or retried");
+    expect(error.message).toContain("The post-migration checks (F2, D3) were not run and the database state is unverified.");
+    expect(f.calls.slice(PRE_CHECKS.length)).toEqual(["docker", "classify", "docker", "spawn"]);
+    expectOnlyDeploy(f);
+  });
+
+  it("Prisma CLI を起動できない（偽のプロセスが reject）：生のエラーを表示せず、部分的な適用の可能性を報告する", async () => {
+    const f = fake();
+    f.spawn.mockImplementationOnce(async () => {
+      f.calls.push("spawn");
+      throw new Error(`EACCES ${TEST_URL} ${PASSWORD}`);
+    });
+    const error = await expectError(f, "MIGRATION_FAILED");
+    expect(error.message).toContain("may have been partially applied");
+    expect(error.message).not.toContain("EACCES");
+    expect(error.message).toContain("(F2, D3) were not run");
+    expect(f.calls.slice(PRE_CHECKS.length)).toEqual(["docker", "classify", "docker", "spawn"]);
+  });
+
+  it.each<[string, Parameters<typeof fake>[0], TestDbMigrateErrorCode, string[]]>([
+    ["F2 の識別情報の不一致", { servers: [SERVER, { ...SERVER, serverAddress: "172.18.0.9", postmasterStartTime: "2026-11-06T23:00:00.000000Z" }] }, "POST_MIGRATION_IDENTITY_MISMATCH", ["docker", "classify", "docker", "spawn", "classify"]],
+    ["F2 の本人確認の失敗", { states: [STATE_A, new IntegrationDatabaseCheckError("CURRENT_USER_MISMATCH", "x")] }, "POST_MIGRATION_CHECK_FAILED", ["docker", "classify", "docker", "spawn", "classify"]],
+    ["D3 の不一致", { dockers: [DOCKER, DOCKER, { ...DOCKER, startedAt: "2026-11-07T00:00:00.000000000Z" }] }, "POST_MIGRATION_IDENTITY_MISMATCH", ["docker", "classify", "docker", "spawn", "classify", "docker"]],
+    ["D3 の取得の失敗", { dockers: [DOCKER, DOCKER, Object.assign(new Error("x"), { code: "DOCKER_IDENTITY_MISMATCH" })] }, "DOCKER_IDENTITY_FAILED", ["docker", "classify", "docker", "spawn", "classify", "docker"]],
+    ["最終状態が C でない（A のまま）", { states: [STATE_A, STATE_A] }, "POST_MIGRATION_STATE_MISMATCH", ["docker", "classify", "docker", "spawn", "classify", "docker"]],
+    ["最終状態が B", { states: [STATE_A, STATE_B] }, "POST_MIGRATION_STATE_MISMATCH", ["docker", "classify", "docker", "spawn", "classify", "docker"]],
+  ])("実行後の異常検出：%s は、防止ではなく事後の検出として報告し、再実行・reset をしない", async (_label, overrides, code, order) => {
+    const f = fake(overrides);
+    const error = await expectError(f, code);
+    expect(f.calls.slice(PRE_CHECKS.length)).toEqual(order);
+    expect(error.message).toContain("detection after the fact, not prevention");
+    expect(error.message).toContain("nothing was retried");
+    expectOnlyDeploy(f);
+    expect(f.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("最終状態 C：F1 = F2、D1 = D3 で、C のときだけ成功を表示する", async () => {
+    const f = fake();
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.logs.at(-1)).toContain("post-migration state C");
+  });
+
+  it("D1 の取得の失敗は、元のメッセージ（URL・パスワード）を表示しない", async () => {
+    const f = fake({ dockers: [Object.assign(new Error(`${TEST_URL} ${PASSWORD} ${ADMIN_PASSWORD}`), { code: "DOCKER_COMMAND_FAILED" })] });
+    const error = await expectError(f, "DOCKER_IDENTITY_FAILED");
+    expect(error.message).toContain("(D1) failed (DOCKER_COMMAND_FAILED). The Prisma CLI was not started.");
+  });
+
+  it("スクリプトは migrationChecks に本物の関数を渡し、許可は固定の無効値のまま（--apply・環境変数で切り替えない）", () => {
+    const source = codeOf("scripts/testdb-migrate.mts");
+    const expected = [
+      "  migrationChecks: {",
+      "    readDockerIdentity: (input) => readTestDbDockerIdentity({ ...input, run: runDockerCommand }),",
+      "    inspectDatabase: (input) => createTestDatabaseInspector({ root: ROOT, connect: connectTestDatabase })(input),",
+      "  },",
+    ].join("\n");
+    expect(source).toContain(expected);
+    expect(source).toMatch(/^\s*liveDatabase: LIVE_DATABASE_DISABLED,$/m);
+    expect(source.match(/liveDatabase/g)).toHaveLength(1);
+    expect(source).not.toMatch(/mode:\s*["']enabled["']/);
+    expect(source).not.toContain("--apply");
+    expect(source).not.toContain("scripts/testdb.mts");
+    expect(source).not.toMatch(/from "\.\/testdb\.mts"/);
+  });
+
+  it("Docker の識別のモジュール（lib/testing/testDbDocker.ts）と scripts/testdb.mts は、読み込んだだけでは Docker のコマンドも main() も実行しない", async () => {
+    const execFile = vi.fn();
+    const spawnChild = vi.fn();
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({ execFile, spawn: spawnChild, default: { execFile, spawn: spawnChild } }));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const exitCode = process.exitCode;
+    try {
+      const shared = await import("./testDbDocker.ts");
+      const script = await import("../../scripts/testdb.mts");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(typeof shared.readTestDbDockerIdentity).toBe("function");
+      expect(script.readTestDbDockerIdentity).toBe(shared.readTestDbDockerIdentity);
+      expect(execFile).not.toHaveBeenCalled();
+      expect(spawnChild).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(exitCode);
+    } finally {
+      error.mockRestore();
+      log.mockRestore();
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
+  });
+
+  it("共有モジュールは、トップレベルで Docker のコマンド・環境変数・ファイルを使わず、main() を持たない", () => {
+    const source = codeOf("lib/testing/testDbDocker.ts");
+    expect(source).not.toMatch(/\bfunction main\(/);
+    expect(source).not.toContain("import.meta");
+    expect(source).not.toContain("process.env");
+    expect(source).not.toContain("process.argv");
+    expect(source).not.toMatch(/^(?:await |run|execFile|readTestDbDockerIdentity|runTestDb)\S*\(/m);
+    // Docker のコマンドは shell を使わない
+    expect(source).not.toMatch(/shell:\s*true/);
+    expect(source).not.toMatch(/\bexec\(|execSync|spawnSync/);
   });
 });
 

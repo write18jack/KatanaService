@@ -43,23 +43,31 @@ import {
  * 外部とのやりとり（env ファイルの読み込み、ファイルの存在確認、DBの状態の判定、子プロセスの起動、表示）は
  * すべて引数で受け取る。そのため、単体テストでは Prisma CLI を起動せず、DBにも接続せずに検証できる。
  *
+ * 引数（Step 3-12A）: 引数なしは予行（検証とコマンドの表示だけ。接続・Docker の読み取り・Prisma CLI の起動をしない）、
+ * `--apply` は migration の実行の意思表示、`--check` は確認モード、`--verify` は読み取り専用の検証モード。どれも1つだけ受け付け、
+ * 併用（`--apply --check` など）や未知の引数は、ファイル・Docker・DB に触れる前に ARGUMENTS_INVALID で止める。
+ * `--apply` は意思の確認だけで、それ単体では migration を許可しない（固定の liveDatabase が無効なら、Docker・DB に触れる前に止まる）。
+ *
  * 実行順序（途中で失敗したら、その時点で止める。別の接続先は試さない）:
  * 1. 引数の検証、Node の起動オプション（execArgv・NODE_OPTIONS）の確認  2. `.env.test` の読み込み
  * 3. `.env` の開発用DBの接続先の取得  4. テストDBのURLの検証（assertTestDatabaseTarget）
  * 5. パスワードの検証（assertTestDatabaseCredentials。R14）
  * 6. 親のプロセスの PG*・DOTENV_* の拒否（状態の判定の接続は、このプロセスの中で pg が行い、pg は PG* を読むため）
  * 7. 子プロセスの環境変数の生成（作った後にもう一度検証）  8. 実行する Prisma CLI のコマンドの確認
- *    （確認モードはここで表示して終了する。DBには接続しない）
- * 実DBへの接続の許可（liveDatabase）：無効なら、ここで TESTDB_MIGRATION_LIVE_DISABLED で止まる。
+ *    （確認モード・予行（`--apply` なし）はここで表示して終了する。DB・Docker には接続しない）
+ * 実DBへの接続の許可（liveDatabase。`--apply` のときだけ確かめる）：無効なら、ここで TESTDB_MIGRATION_LIVE_DISABLED で止まる。
+ * 照合と判定の実装（migrationChecks。readDockerIdentity・inspectDatabase）は、許可とは別に注入する。許可が無効なら、どちらも呼ばない。
  * 9〜11. 読み取り専用の接続・本人確認・状態 A・B・C の判定と、migration に必要な権限の読み取り（inspectDatabase。接続は判定ごとに1回で、終わったら閉じる）
  * 12. A のときだけ、権限がすべてそろっていることを確かめてから、固定のコマンドで Prisma CLI（`migrate deploy`）を起動する
  *     （不足なら MIGRATION_PRIVILEGES_INSUFFICIENT で止まる）。B は理由を表示して止まり、C は起動せずに成功とする
  * 13. migration の後に、別の接続でもう一度、本人確認と状態の判定を行う  14. C であることを確かめて終了する
  *
- * 接続先の照合（Step 3-11E。TOCTOU の対策。migration 用の許可が有効なときだけ動く。スクリプトでは無効のまま）:
+ * 接続先の照合（Step 3-11E。TOCTOU の対策。migration 用の許可が有効なときだけ動く。スクリプトでは無効のまま。
+ * Step 3-12A で、スクリプトから本物の readTestDbDockerIdentity・createTestDatabaseInspector を migrationChecks として渡すようにした）:
  * Docker の識別情報 D1 → DB の本人確認・権限・状態・識別情報 F1（D1 と照合）→ Prisma CLI の直前に D2（D1 と一致）→ migrate deploy
  * → DB の再確認 F2（F1 と一致、状態 C）→ D3（D1 と一致）。どれかが合わなければ止まる（自動の修復・再接続はしない）。
  * D1・F1・D2 の不一致は Prisma CLI の起動の前に止める（防止）。F2・D3 の不一致は、Prisma CLI の実行の後に異常として検出するだけ（防止ではない）。
+ * Prisma CLI が失敗したら、部分的に適用された可能性を表示して止まる（自動の再実行・reset・F2・D3 はしない）。
  * これは読んだ時点の照合で、Prisma CLI の新しい接続が同じDBに届くことを完全には保証しない（入れ替わりは事後に検出する）。
  *
  * 読み取り専用の検証モード（`--verify`。Step 3-11B）は、1〜7を共有した後、通常実行モードとは別の経路に分かれる:
@@ -121,7 +129,8 @@ export class TestDbMigrateError extends Error {
 }
 
 type EnvSource = Readonly<Record<string, string | undefined>>;
-export type TestDbMigrateMode = "run" | "check" | "verify";
+/** dry-run：引数なし（予行）。apply：`--apply`（実行の意思表示。許可は liveDatabase で別に確かめる） */
+export type TestDbMigrateMode = "dry-run" | "apply" | "check" | "verify";
 
 export type SpawnOptions = {
   cwd: string;
@@ -136,14 +145,30 @@ export type ClassifyDatabase = (input: { databaseUrl: string; developmentDatabas
 export type InspectDatabase = (input: Parameters<ClassifyDatabase>[0]) => Promise<TestDatabaseInspection>;
 
 /**
- * 実DBへの接続の許可。scripts/testdb-migrate.mts は LIVE_DATABASE_DISABLED を固定で渡す（環境変数・引数では変えられない）。
- * 有効にするのは、承認を得た後続の工程で、スクリプトのコードを変えたときだけ。単体テストは、偽の判定関数で有効にする。
+ * テストDBのコンテナの識別情報を、読み取り専用の docker コマンドで読む（lib/testing/testDbDocker.ts の readTestDbDockerIdentity）。
+ * .env.test・.env・親の環境変数は、runner と同じもの（root・parentEnv・readEnvFile）を渡す。
  */
-/** テストDBのコンテナの識別情報を、読み取り専用の docker コマンドで読む（scripts/testdb.mts の readTestDbDockerIdentity） */
-export type ReadDockerIdentity = () => Promise<TestDbDockerIdentity>;
-export type LiveDatabaseAccess =
-  | { readonly mode: "disabled" }
-  | { readonly mode: "enabled"; readonly inspectDatabase: InspectDatabase; readonly readDockerIdentity: ReadDockerIdentity };
+export type ReadDockerIdentity = (input: {
+  root: string;
+  parentEnv: EnvSource;
+  readEnvFile: (absolutePath: string) => EnvSource | undefined;
+}) => Promise<TestDbDockerIdentity>;
+
+/**
+ * migration の前後の照合と判定の実装（Step 3-12A で、許可とは別に注入するようにした）。
+ * 使うのは、`--apply` があり、かつ liveDatabase が有効なときだけ。どちらかが欠ければ、どちらも呼ばない。
+ */
+export type MigrationChecks = {
+  readonly readDockerIdentity: ReadDockerIdentity;
+  readonly inspectDatabase: InspectDatabase;
+};
+
+/**
+ * migration 用の実DBへの接続の許可（固定のゲート）。scripts/testdb-migrate.mts は LIVE_DATABASE_DISABLED を固定で渡す
+ * （環境変数・引数では変えられない。`--apply` も許可を与えない）。有効にするのは、承認を得た後続の工程で、
+ * スクリプトのコードを変えたときだけ。単体テストは { mode: "enabled" } を直接渡す。
+ */
+export type LiveDatabaseAccess = { readonly mode: "disabled" } | { readonly mode: "enabled" };
 export const LIVE_DATABASE_DISABLED: LiveDatabaseAccess = Object.freeze({ mode: "disabled" });
 
 /**
@@ -169,8 +194,10 @@ export type TestDbMigrateDeps = {
   /** env ファイルを dotenv.parse で読む。ファイルがなければ undefined */
   readEnvFile: (absolutePath: string) => EnvSource | undefined;
   pathExists: (absolutePath: string) => boolean;
-  /** 実DBへの接続の許可と、状態の判定。通常実行モードで、確認モードの終了点より後にだけ使う */
+  /** migration 用の実DBへの接続の許可（固定のゲート）。`--apply` のときだけ、確認モードの終了点より後で確かめる */
   liveDatabase: LiveDatabaseAccess;
+  /** migration の前後の照合と判定（D1・F1・D2・F2・D3）。`--apply` で、かつ liveDatabase が有効なときだけ呼ぶ */
+  migrationChecks: MigrationChecks;
   /** 読み取り専用の検証モード（--verify）だけで使う、実DBへの接続の許可と状態の判定。liveDatabase とは共有しない */
   readOnlyDatabase: ReadOnlyDatabaseAccess;
   /** 子プロセスを起動し、終了コードを返す */
@@ -178,11 +205,12 @@ export type TestDbMigrateDeps = {
   log: (text: string) => void;
 };
 
+const ACCEPTED_ARGS: Readonly<Record<string, TestDbMigrateMode>> = Object.freeze({ "--apply": "apply", "--check": "check", "--verify": "verify" });
+
 export function parseTestDbMigrateArgs(args: readonly string[]): TestDbMigrateMode {
-  if (args.length === 0) return "run";
-  if (args.length === 1 && args[0] === "--check") return "check";
-  if (args.length === 1 && args[0] === "--verify") return "verify";
-  throw new TestDbMigrateError("ARGUMENTS_INVALID", "the only accepted arguments are --check or --verify (one at a time).");
+  if (args.length === 0) return "dry-run";
+  if (args.length === 1 && Object.hasOwn(ACCEPTED_ARGS, args[0])) return ACCEPTED_ARGS[args[0]];
+  throw new TestDbMigrateError("ARGUMENTS_INVALID", "the only accepted arguments are --apply, --check or --verify (one at a time).");
 }
 
 /** 検証関数を実行し、失敗したらエラーコードだけを含むエラーに置き換える（拒否された値を表示しない） */
@@ -246,22 +274,34 @@ function formatServerIdentity(server: TestDatabaseServerIdentity): string[] {
   ];
 }
 
+/** Prisma CLI の実行の後の異常（F2・D3）の共通の結び。防止ではなく、事後の検出であることを明記する */
+const AFTER_CLI_NOTE =
+  "The Prisma CLI already ran, so this is detection after the fact, not prevention; the migration may have been applied. Nothing was reset or repaired, and nothing was retried.";
+
 /** Docker の識別情報を読む。失敗したら、コードだけを含むエラーに置き換える（自動の再試行はしない） */
-async function readDockerOrStop(read: ReadDockerIdentity, when: string): Promise<TestDbDockerIdentity> {
+async function readDockerOrStop(deps: TestDbMigrateDeps, when: "D1" | "D2" | "D3"): Promise<TestDbDockerIdentity> {
   try {
-    return await read();
+    return await deps.migrationChecks.readDockerIdentity({ root: deps.root, parentEnv: deps.parentEnv, readEnvFile: deps.readEnvFile });
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
     const detail = typeof code === "string" && /^[A-Z][A-Z_]*$/.test(code) ? code : "unknown";
-    throw new TestDbMigrateError("DOCKER_IDENTITY_FAILED", `the docker identity check ${when} failed (${detail}); the Prisma CLI was not started for this check.`);
+    const outcome = when === "D3" ? AFTER_CLI_NOTE : "The Prisma CLI was not started.";
+    throw new TestDbMigrateError("DOCKER_IDENTITY_FAILED", `the docker identity check ${DOCKER_CHECK_LABELS[when]} failed (${detail}). ${outcome}`);
   }
 }
+
+const DOCKER_CHECK_LABELS = {
+  D1: "before the database check (D1)",
+  D2: "before the Prisma CLI (D2)",
+  D3: "after the Prisma CLI (D3)",
+} as const;
 
 /** Docker の識別情報が、最初に読んだ値から変わっていないこと */
 function assertSameDocker(first: TestDbDockerIdentity, now: TestDbDockerIdentity, code: "DOCKER_IDENTITY_MISMATCH" | "POST_MIGRATION_IDENTITY_MISMATCH"): void {
   const changes = dockerIdentityChanges(first, now);
   if (changes.length > 0) {
-    throw new TestDbMigrateError(code, `the test database container changed (${changes.join(", ")}). Nothing was reset or repaired.`);
+    const outcome = code === "DOCKER_IDENTITY_MISMATCH" ? "The Prisma CLI was not started. Nothing was reset or repaired." : AFTER_CLI_NOTE;
+    throw new TestDbMigrateError(code, `the test database container changed (${changes.join(", ")}). ${outcome}`);
   }
 }
 
@@ -291,7 +331,8 @@ async function inspectOrStop(
     return await inspect(input);
   } catch (error) {
     const detail = error instanceof IntegrationDatabaseCheckError ? error.code : "unknown";
-    throw new TestDbMigrateError(code, `the ${CHECK_LABELS[code]} database check failed (${detail}); the Prisma CLI was not started for this check.`);
+    const outcome = code === "POST_MIGRATION_CHECK_FAILED" ? AFTER_CLI_NOTE : "The Prisma CLI was not started.";
+    throw new TestDbMigrateError(code, `the ${CHECK_LABELS[code]} database check failed (${detail}). ${outcome}`);
   }
 }
 
@@ -358,6 +399,7 @@ async function runReadOnlyVerify(input: {
 }
 
 function formatCheckReport(input: {
+  heading: string;
   liveDatabase: LiveDatabaseAccess;
   readOnlyDatabase: ReadOnlyDatabaseAccess;
   root: string;
@@ -367,15 +409,16 @@ function formatCheckReport(input: {
   childEnv: Record<string, string>;
   droppedKeys: string[];
 }): string {
-  const { liveDatabase, readOnlyDatabase, root, target, execPath, args, childEnv, droppedKeys } = input;
+  const { heading, liveDatabase, readOnlyDatabase, root, target, execPath, args, childEnv, droppedKeys } = input;
   return [
-    "[testdb-migrate] check mode: the Prisma CLI was not started and no database connection was made.",
+    heading,
     "",
     `connection target: verified ${target.host}:${target.port}/${target.database} as ${target.user} (${TEST_ENV_FILE} DATABASE_URL; password hidden)`,
     `working directory: ${root}`,
     `command: ${path.basename(execPath)} ${args.map((arg) => (path.isAbsolute(arg) ? path.relative(root, arg) : arg)).join(" ")} (no shell)`,
     "database checks: identity and state (A: empty / B: inconsistent / C: fully migrated) before the Prisma CLI, and again after it (not run in check mode)",
-    `live database access: ${liveDatabase.mode === "enabled" ? "enabled" : "disabled in this build (normal mode stops with TESTDB_MIGRATION_LIVE_DISABLED before connecting)"}`,
+    "migrations run only with --apply; --apply is a confirmation and does not enable the migration gate by itself",
+    `live database access (migration gate): ${liveDatabase.mode === "enabled" ? "enabled" : "disabled in this build (--apply stops with TESTDB_MIGRATION_LIVE_DISABLED before reading Docker or connecting)"}`,
     `read-only verification (--verify): ${readOnlyDatabase.mode === "enabled-read-only" ? "enabled" : "disabled in this build (stops with TESTDB_VERIFY_LIVE_DISABLED before connecting)"}`,
     "",
     "child environment:",
@@ -451,22 +494,27 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
   }
   const args = [path.join(root, PRISMA_CLI_ENTRY), ...PRISMA_MIGRATE_COMMAND, "--config", path.join(root, PRISMA_CONFIG_FILE)];
 
-  if (mode === "check") {
-    deps.log(formatCheckReport({ liveDatabase: deps.liveDatabase, readOnlyDatabase: deps.readOnlyDatabase, root, target, execPath: deps.execPath, args, childEnv, droppedKeys }));
+  // 確認モードと予行（--apply なし）は、ここで表示して終わる（Docker・DB に触れず、Prisma CLI も起動しない）
+  if (mode === "check" || mode === "dry-run") {
+    const heading =
+      mode === "check"
+        ? "[testdb-migrate] check mode: the Prisma CLI was not started and no database connection was made."
+        : "[testdb-migrate] dry run (--apply was not given): nothing was migrated; Docker was not read, no database connection was made and the Prisma CLI was not started.";
+    deps.log(formatCheckReport({ heading, liveDatabase: deps.liveDatabase, readOnlyDatabase: deps.readOnlyDatabase, root, target, execPath: deps.execPath, args, childEnv, droppedKeys }));
     return 0;
   }
 
-  // 実DBへの接続の許可（スクリプトでは常に無効。接続・子プロセスの起動の前に止まる）
+  // ここからは --apply だけ。実DBへの接続の許可（スクリプトでは常に無効。Docker の読み取り・接続・子プロセスの起動の前に止まる）
   if (deps.liveDatabase.mode !== "enabled") {
     throw new TestDbMigrateError(
       "TESTDB_MIGRATION_LIVE_DISABLED",
-      "live database access is disabled in this build; refusing to connect to the test database or start the Prisma CLI.",
+      "live database access is disabled in this build (--apply alone does not enable it); refusing to connect to the test database, read Docker or start the Prisma CLI.",
     );
   }
-  const { inspectDatabase, readDockerIdentity } = deps.liveDatabase;
+  const { inspectDatabase } = deps.migrationChecks;
 
   // 照合1・2. Docker の安全条件と識別情報 D1（読み取りだけ。安全条件は readDockerIdentity の中で確かめる）
-  const docker1 = await readDockerOrStop(readDockerIdentity, "before the database check");
+  const docker1 = await readDockerOrStop(deps, "D1");
 
   // 9〜11. 読み取り専用の接続・本人確認・状態の判定・権限・DB の識別情報 F1
   const { state: before, privileges, server: server1 } = await inspectOrStop(inspectDatabase, checkInput, "STATE_CHECK_FAILED");
@@ -500,19 +548,30 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
     );
   }
   // 照合5・6. Prisma CLI の直前に D2 を読み、D1 と一致したときだけ起動する
-  assertSameDocker(docker1, await readDockerOrStop(readDockerIdentity, "before the Prisma CLI"), "DOCKER_IDENTITY_MISMATCH");
+  assertSameDocker(docker1, await readDockerOrStop(deps, "D2"), "DOCKER_IDENTITY_MISMATCH");
   deps.log(
     `[testdb-migrate] identity checks passed (container ${docker1.containerId.slice(0, 12)}, inet_server_port ${server1.serverPort}, ` +
       `inet_server_addr ${addressMatchesContainer(server1, docker1) ? "matches" : "does not match"} the container network address; recorded only).`,
   );
+  // 失敗しても、自動の再実行・reset・F2・D3 はしない（部分的に適用された可能性を報告して止まる）
   let exitCode: number;
   try {
     exitCode = await deps.spawn(deps.execPath, args, { cwd: root, env: childEnv, shell: false, stdio: "inherit" });
   } catch {
-    throw new TestDbMigrateError("MIGRATION_FAILED", "the Prisma CLI could not be started. Nothing was reset.");
+    throw new TestDbMigrateError(
+      "MIGRATION_FAILED",
+      "the Prisma CLI could not be started or its exit could not be observed; the migration may have been partially applied. " +
+        "The post-migration checks (F2, D3) were not run and the database state is unverified. " +
+        "Nothing was reset or retried; check the database state with npm run testdb:verify before doing anything else.",
+    );
   }
   if (exitCode !== 0) {
-    throw new TestDbMigrateError("MIGRATION_FAILED", `prisma migrate deploy exited with code ${exitCode}. Nothing was reset; check the database state before retrying.`);
+    throw new TestDbMigrateError(
+      "MIGRATION_FAILED",
+      `prisma migrate deploy exited with code ${exitCode}; the migration may have been partially applied. ` +
+        "The post-migration checks (F2, D3) were not run and the database state is unverified. " +
+        "Nothing was reset or retried; check the database state with npm run testdb:verify before doing anything else.",
+    );
   }
 
   // 13. migration の後に、別の接続でもう一度、本人確認と状態の判定。照合7〜9. F2 = F1、D3 = D1
@@ -521,15 +580,15 @@ export async function runTestDbMigrate(deps: TestDbMigrateDeps): Promise<number>
   if (serverChanges.length > 0) {
     throw new TestDbMigrateError(
       "POST_MIGRATION_IDENTITY_MISMATCH",
-      `the database server changed during the migration (${serverChanges.join(", ")}). Nothing was reset or repaired.`,
+      `the database server changed during the migration (${serverChanges.join(", ")}). ${AFTER_CLI_NOTE}`,
     );
   }
-  assertSameDocker(docker1, await readDockerOrStop(readDockerIdentity, "after the migration"), "POST_MIGRATION_IDENTITY_MISMATCH");
+  assertSameDocker(docker1, await readDockerOrStop(deps, "D3"), "POST_MIGRATION_IDENTITY_MISMATCH");
   if (after.state !== "C") {
     if (after.state === "B") deps.log(["[testdb-migrate] post-migration state B:", ...after.reasons.map((r) => `  - ${r}`)].join("\n"));
     throw new TestDbMigrateError(
       "POST_MIGRATION_STATE_MISMATCH",
-      `after prisma migrate deploy, the test database is in state ${after.state}, not C. Nothing was reset.`,
+      `after prisma migrate deploy, the test database is in state ${after.state}, not C. ${AFTER_CLI_NOTE}`,
     );
   }
 
