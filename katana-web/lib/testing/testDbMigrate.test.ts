@@ -47,14 +47,15 @@ const codeOf = (file: string) =>
     .replace(/^\s*\/\/.*$/gm, "")
     .replace(/\s\/\/ .*$/gm, "");
 
-/** scripts/testdb-migrate.mts の migration 用の許可の行（Step 3-12B-1。固定の有効値だけ。条件分岐・環境変数・引数なし） */
-const SCRIPT_LIVE_ENABLED_LINE = /^ {2}liveDatabase: \{ mode: "enabled" \},$/m;
-/** スクリプトの migration 用の許可が、固定の有効値の1か所だけであること */
-function expectScriptGateFixedEnabled(source: string) {
-  expect(source).toMatch(SCRIPT_LIVE_ENABLED_LINE);
+/** scripts/testdb-migrate.mts の migration 用の許可の行（Step 3-12B-4 で無効に戻した。固定の無効値だけ。条件分岐・環境変数・引数なし） */
+const SCRIPT_LIVE_DISABLED_LINE = /^ {2}liveDatabase: LIVE_DATABASE_DISABLED,$/m;
+/** スクリプトの migration 用の許可が、固定の無効値の1か所だけで、有効値がどこにもないこと */
+function expectScriptGateFixedDisabled(source: string) {
+  expect(source).toMatch(SCRIPT_LIVE_DISABLED_LINE);
   expect(source.match(/liveDatabase/g)).toHaveLength(1);
-  expect(source.match(/mode:\s*["']enabled["']/g)).toHaveLength(1);
-  expect(source).not.toContain("LIVE_DATABASE_DISABLED");
+  expect(source).not.toMatch(/mode:\s*["']enabled["']/);
+  // import の1回と、liveDatabase に渡す1回だけ
+  expect(source.match(/LIVE_DATABASE_DISABLED/g)).toHaveLength(2);
 }
 
 const STATE_A: TestDatabaseState = { state: "A" };
@@ -414,10 +415,10 @@ describe("runTestDbMigrate：実DBへの接続の許可（強制停止）", () =
     expect(Object.isFrozen(LIVE_DATABASE_DISABLED)).toBe(true);
   });
 
-  it("スクリプト（scripts/testdb-migrate.mts）は、migration 用の許可を固定の { mode: \"enabled\" } にし（Step 3-12B-1）、接続の部品は --verify の許可と migrationChecks の中だけで使う", () => {
+  it("スクリプト（scripts/testdb-migrate.mts）は、migration 用の許可を固定の LIVE_DATABASE_DISABLED にし（Step 3-12B-4）、接続の部品は --verify の許可と migrationChecks の中だけで使う", () => {
     const source = codeOf("scripts/testdb-migrate.mts");
     // 許可は引数・環境変数から決めない（liveDatabase に渡す値は固定のリテラルだけ）
-    expectScriptGateFixedEnabled(source);
+    expectScriptGateFixedDisabled(source);
     for (const forbidden of ["classifyTestDatabase", '"pg"', "process.env.KATANA_TESTDB", "process.argv.includes"]) {
       expect(source).not.toContain(forbidden);
     }
@@ -945,9 +946,9 @@ describe("migration に必要な権限（Step 3-11D）", () => {
     expect(f.spawn).toHaveBeenCalledTimes(1);
   });
 
-  it("許可が無効なら、権限の検査より前に接続せずに止まる。スクリプトの許可は固定の有効値（Step 3-12B-1）", async () => {
+  it("許可が無効なら、権限の検査より前に接続せずに止まる。スクリプトの許可は固定の無効値（Step 3-12B-4）", async () => {
     await expectStopped(fake({ liveDisabled: true }), "TESTDB_MIGRATION_LIVE_DISABLED");
-    expectScriptGateFixedEnabled(codeOf("scripts/testdb-migrate.mts"));
+    expectScriptGateFixedDisabled(codeOf("scripts/testdb-migrate.mts"));
   });
 
   it("本物の判定と偽のDB：権限が不足していても状態は A と判定され、--verify は不足として失敗する", async () => {
@@ -1109,11 +1110,11 @@ describe("接続先の識別情報と TOCTOU の照合（Step 3-11E）", () => {
     }
   });
 
-  it("許可が無効なら Docker の読み取りも、接続も、Prisma CLI もない。スクリプトの許可は固定の有効値で、Docker の読み取りは migrationChecks の中だけ", async () => {
+  it("許可が無効なら Docker の読み取りも、接続も、Prisma CLI もない。スクリプトの許可は固定の無効値で、Docker の読み取りは migrationChecks の中だけ", async () => {
     const f = fake({ liveDisabled: true });
     await expectStopped(f, "TESTDB_MIGRATION_LIVE_DISABLED");
     const source = codeOf("scripts/testdb-migrate.mts");
-    expectScriptGateFixedEnabled(source);
+    expectScriptGateFixedDisabled(source);
     // Docker の識別情報の読み取りは、migrationChecks の中の1か所だけ（Step 3-12A。--apply のときだけ呼ばれる）
     expect(source.match(/readTestDbDockerIdentity/g)).toHaveLength(2);
     expect(source.match(/readDockerIdentity:/g)).toHaveLength(1);
@@ -1341,7 +1342,7 @@ describe("Step 3-12A：--apply と、migration の照合の接続", () => {
     expect(error.message).toContain("(D1) failed (DOCKER_COMMAND_FAILED). The Prisma CLI was not started.");
   });
 
-  it("スクリプトは migrationChecks に本物の関数を渡し、許可は固定の有効値（--apply・環境変数で切り替えない。Step 3-12B-1）", () => {
+  it("スクリプトは migrationChecks に本物の関数を渡し、許可は固定の無効値（--apply・環境変数で切り替えない。Step 3-12B-4）", () => {
     const source = codeOf("scripts/testdb-migrate.mts");
     const expected = [
       "  migrationChecks: {",
@@ -1350,7 +1351,7 @@ describe("Step 3-12A：--apply と、migration の照合の接続", () => {
       "  },",
     ].join("\n");
     expect(source).toContain(expected);
-    expectScriptGateFixedEnabled(source);
+    expectScriptGateFixedDisabled(source);
     expect(source).not.toContain("--apply");
     expect(source).not.toContain("scripts/testdb.mts");
     expect(source).not.toMatch(/from "\.\/testdb\.mts"/);
@@ -1396,9 +1397,9 @@ describe("Step 3-12A：--apply と、migration の照合の接続", () => {
   });
 });
 
-describe("Step 3-12B-1：固定ゲートの有効化（スクリプトと同じ有効な許可。偽の関数だけで、Docker・DB・Prisma CLI は使わない）", () => {
-  /** スクリプトと同じ値（Step 3-12B-1）。fake() の既定も同じ有効値 */
-  const SCRIPT_GATE = { mode: "enabled" } as const;
+describe("Step 3-12B-1：有効な許可での runner の安全性（モックで有効にした許可。偽の関数だけで、Docker・DB・Prisma CLI は使わない）", () => {
+  /** モックで明示的に有効にした許可（fake() の既定）。スクリプトの値は Step 3-12B-4 から LIVE_DATABASE_DISABLED */
+  const MOCK_GATE = { mode: "enabled" } as const;
   const PRE_CHECKS = [
     "read:.env.test",
     "read:.env",
@@ -1408,16 +1409,16 @@ describe("Step 3-12B-1：固定ゲートの有効化（スクリプトと同じ�
     "exists:prisma/migrations",
   ];
 
-  it("スクリプトの許可は固定の有効値で、引数は process.argv をそのまま渡し、許可の判定に使わない", () => {
+  it("スクリプトの許可は固定の無効値で、引数は process.argv をそのまま渡し、許可の判定に使わない。モックの既定は有効値", () => {
     const source = codeOf("scripts/testdb-migrate.mts");
-    expectScriptGateFixedEnabled(source);
+    expectScriptGateFixedDisabled(source);
     expect(source).toMatch(/^ {2}argv: process\.argv\.slice\(2\),$/m);
     expect(source.match(/process\.argv/g)).toHaveLength(1);
     expect(source.match(/process\.env/g)).toHaveLength(1);
     // 許可の値に、条件式・関数呼び出し・変数を使わない
     const gateLine = source.split("\n").find((line) => line.includes("liveDatabase"));
-    expect(gateLine).toBe('  liveDatabase: { mode: "enabled" },');
-    expect(fake().deps.liveDatabase).toEqual(SCRIPT_GATE);
+    expect(gateLine).toBe("  liveDatabase: LIVE_DATABASE_DISABLED,");
+    expect(fake().deps.liveDatabase).toEqual(MOCK_GATE);
   });
 
   it.each<[string, string[]]>([
@@ -1427,7 +1428,7 @@ describe("Step 3-12B-1：固定ゲートの有効化（スクリプトと同じ�
   ])("%s は、許可が有効でも Prisma CLI を起動せず、migration 用の Docker の読み取り・判定も使わない", async (_label, argv) => {
     const f = fake({ argv });
     await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
-    expect(f.deps.liveDatabase).toEqual(SCRIPT_GATE);
+    expect(f.deps.liveDatabase).toEqual(MOCK_GATE);
     expect(f.spawn).not.toHaveBeenCalled();
     expect(f.readDockerIdentity).not.toHaveBeenCalled();
     expect(f.classify).not.toHaveBeenCalled();
@@ -1508,6 +1509,70 @@ describe("Step 3-12B-1：固定ゲートの有効化（スクリプトと同じ�
     expect(output).toContain("and again after it (not run in check mode)");
     expect(output).not.toContain("dry run");
     expect(output).toContain("live database access (migration gate): enabled");
+  });
+});
+
+describe("Step 3-12B-4：固定ゲートの無効化（スクリプトと同じ LIVE_DATABASE_DISABLED。偽の関数だけで、Docker・DB・Prisma CLI は使わない）", () => {
+  const PRE_CHECKS = [
+    "read:.env.test",
+    "read:.env",
+    "exists:node_modules/prisma/build/index.js",
+    "exists:prisma.config.ts",
+    "exists:prisma/schema.prisma",
+    "exists:prisma/migrations",
+  ];
+
+  it("スクリプトの許可の行は、固定の LIVE_DATABASE_DISABLED（import から来る凍結された無効値）だけ", () => {
+    const source = codeOf("scripts/testdb-migrate.mts");
+    expectScriptGateFixedDisabled(source);
+    expect(source).toMatch(/import \{[^}]*\bLIVE_DATABASE_DISABLED\b[^}]*\} from "\.\.\/lib\/testing\/testDbMigrate\.ts";/);
+    expect(LIVE_DATABASE_DISABLED).toEqual({ mode: "disabled" });
+    expect(Object.isFrozen(LIVE_DATABASE_DISABLED)).toBe(true);
+  });
+
+  it("--apply でも、事前の検証の後、Docker・DB・Prisma CLI に触れる前に TESTDB_MIGRATION_LIVE_DISABLED で止まる", async () => {
+    const f = fake({ argv: ["--apply"], liveDisabled: true });
+    const error = await expectStopped(f, "TESTDB_MIGRATION_LIVE_DISABLED");
+    expect(error.message).toContain("refusing to connect to the test database, read Docker or start the Prisma CLI");
+    expect(f.calls).toEqual(PRE_CHECKS);
+  });
+
+  it("--apply と無効な許可でも、事前の検証の失敗は先に報告する（検証は省略しない）", async () => {
+    await expectStopped(fake({ argv: ["--apply"], liveDisabled: true, parentEnv: { PATH: "/usr/bin", PGHOST: "db.example.com" } }), "UNSAFE_PARENT_ENV");
+    await expectStopped(fake({ argv: ["--apply"], liveDisabled: true, missingPaths: ["prisma/migrations"] }), "REQUIRED_FILE_MISSING");
+  });
+
+  it.each<[string, string[], string]>([
+    ["引数なし（予行）", [], "dry run (--apply was not given)"],
+    ["--check", ["--check"], "check mode"],
+  ])("%s は、無効な許可で 0 で終わり、Prisma CLI・Docker・判定を使わず、ゲートが無効であることを表示する", async (_label, argv, heading) => {
+    const f = fake({ argv, liveDisabled: true });
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.calls).toEqual(PRE_CHECKS);
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.readDockerIdentity).not.toHaveBeenCalled();
+    expect(f.classify).not.toHaveBeenCalled();
+    const output = f.logs.join("\n");
+    expect(output).toContain(heading);
+    expect(output).toContain("live database access (migration gate): disabled in this build (--apply stops with TESTDB_MIGRATION_LIVE_DISABLED before reading Docker or connecting)");
+    for (const secret of SECRETS) expect(output).not.toContain(secret);
+  });
+
+  it("予行の表示は、無効な許可でも予行の文言で、確認モードの文言を含まない", async () => {
+    const f = fake({ argv: [], liveDisabled: true });
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    const output = f.logs.join("\n");
+    expect(output).toContain("and again after it (not run in this dry run; they run only with --apply)");
+    expect(output).not.toContain("check mode");
+  });
+
+  it("--verify は、migration 用の許可が無効でも読み取り専用の判定を1回だけ行い、Prisma CLI・Docker を使わない", async () => {
+    const f = fake({ argv: ["--verify"], liveDisabled: true });
+    await expect(runTestDbMigrate(f.deps)).resolves.toBe(0);
+    expect(f.verify).toHaveBeenCalledTimes(1);
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.readDockerIdentity).not.toHaveBeenCalled();
+    expect(f.classify).not.toHaveBeenCalled();
   });
 });
 
