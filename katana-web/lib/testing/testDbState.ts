@@ -283,7 +283,8 @@ export function missingMigrationPrivileges(privileges: TestDatabasePrivileges): 
 /** 検査のトランザクションの中だけ、search_path を pg_catalog に固定する（ROLLBACK で元に戻る） */
 export const PIN_SEARCH_PATH_SQL = `SELECT pg_catalog.set_config('search_path', 'pg_catalog', true) AS "searchPath"`;
 
-async function pinSearchPath(client: IntegrationDbClient): Promise<void> {
+/** lib/testing/migrationChecksum.ts の照合でも使う（Step 3-12B-5A） */
+export async function pinSearchPath(client: IntegrationDbClient): Promise<void> {
   const [row] = await select(client, "search_path pin", PIN_SEARCH_PATH_SQL);
   if (row?.searchPath !== "pg_catalog") {
     throw new IntegrationDatabaseCheckError("SEARCH_PATH_NOT_PINNED", "search_path could not be pinned to pg_catalog.");
