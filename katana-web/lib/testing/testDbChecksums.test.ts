@@ -432,10 +432,10 @@ describe("静的な確認（ソース）", () => {
       .replace(/^\s*\/\/.*$/gm, "")
       .replace(/\s\/\/ .*$/gm, "");
 
-  it("スクリプトのゲートは固定の CHECKSUM_DATABASE_DISABLED で、引数・環境変数から決めない", () => {
+  it("スクリプトのゲートは固定の読み取り専用の有効値（Step 3-12B-5C-3B で一時的に有効化）で、引数・環境変数から決めない", () => {
     const source = code("scripts/testdb-checksums.mts");
     const gateLines = source.split("\n").filter((line) => line.includes("checksumDatabase"));
-    expect(gateLines).toEqual(["  checksumDatabase: CHECKSUM_DATABASE_DISABLED,"]);
+    expect(gateLines).toEqual(['  checksumDatabase: { mode: "enabled-read-only" },']);
     expect(source.match(/process\.argv/g)).toHaveLength(1);
     expect(source).toMatch(/^ {2}argv: process\.argv\.slice\(2\),$/m);
     expect(source.match(/process\.env/g)).toHaveLength(1);
