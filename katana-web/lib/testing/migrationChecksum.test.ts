@@ -15,6 +15,8 @@ import {
   type MigrationFs,
   readLocalMigrationChecksums,
 } from "./migrationChecksum";
+import type { PinnedServerExpectation, TestDatabaseServerIdentity, TestDbDockerIdentity } from "./testDbIdentity";
+import { SERVER_IDENTITY_SQL } from "./testDbState";
 
 // DB にも Docker にも接続しない。ファイルシステムは偽のもの（読み取りだけ）か、リポジトリの prisma/migrations の読み取りだけを使う
 const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -210,8 +212,24 @@ describe("compareMigrationChecksums：DB の履歴との照合（偽の履歴）
   });
 });
 
-/** 偽のDBクライアント（実DBには接続しない）。送られた SQL を記録する */
-function fakeClient(options: { rows?: Record<string, unknown>[]; identity?: Record<string, unknown>; failOn?: string } = {}) {
+/** D1 で読んだ Docker の識別情報（偽の値） */
+const DOCKER: TestDbDockerIdentity = {
+  containerId: "a".repeat(64),
+  imageId: `sha256:${"b".repeat(64)}`,
+  startedAt: "2026-11-06T22:46:49.619782389Z",
+  restartCount: 0,
+  networkId: "c".repeat(64),
+  networkIp: "172.18.0.2",
+  volumes: ["katana-web_postgres_data"],
+  developmentVolume: ["katana-web_postgres_data"],
+  portPublishers: ["katana-test-db"],
+};
+/** F1 で読んだ DB の識別情報（コンテナの起動の約1.5秒後に postmaster が起動した） */
+const F1_SERVER: TestDatabaseServerIdentity = { serverAddress: "172.18.0.2", serverPort: 5432, postmasterStartTime: "2026-11-06T22:46:51.123456Z" };
+const PINNED: PinnedServerExpectation = { docker: DOCKER, server: F1_SERVER };
+
+/** 偽のDBクライアント（実DBには接続しない）。送られた SQL を記録する。server は SERVER_IDENTITY_SQL の行（既定は F1 と同じ） */
+function fakeClient(options: { rows?: Record<string, unknown>[]; identity?: Record<string, unknown>; failOn?: string; serverRows?: Record<string, unknown>[] } = {}) {
   const queries: string[] = [];
   const end = vi.fn(async () => undefined);
   const client: IntegrationDbClient = {
@@ -226,6 +244,7 @@ function fakeClient(options: { rows?: Record<string, unknown>[]; identity?: Reco
           rows: [options.identity ?? { database: "katana_test", currentUser: "katana_test_user", sessionUser: "katana_test_user", marker: TEST_DATABASE_MARKER, serverPort: 5432 }],
         };
       }
+      if (sql === SERVER_IDENTITY_SQL) return { rows: options.serverRows ?? [{ ...F1_SERVER }] };
       if (sql === MIGRATION_CHECKSUM_SQL) return { rows: options.rows ?? goodRows() };
       throw new Error(`unexpected SQL in test: ${sql}`);
     },
@@ -235,9 +254,9 @@ function fakeClient(options: { rows?: Record<string, unknown>[]; identity?: Reco
 }
 
 describe("inspectMigrationChecksums：読み取り専用の照合（偽のDBクライアント。実DBには接続しない）", () => {
-  it("一致：BEGIN READ ONLY → search_path の固定 → 本人確認 → 履歴の SELECT → ROLLBACK → 接続の解放。読み取りの SQL だけ", async () => {
+  it("一致：BEGIN READ ONLY → search_path の固定 → 本人確認 → サーバーの識別情報 → 履歴の SELECT → ROLLBACK → 接続の解放。読み取りの SQL だけ", async () => {
     const db = fakeClient();
-    const result = await inspectMigrationChecksums({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL, migrationsDir: DIR, connect: db.connect, fs: fakeFs() });
+    const result = await inspectMigrationChecksums({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL, migrationsDir: DIR, connect: db.connect, expectedServer: PINNED, fs: fakeFs() });
     expect(result.matches).toBe(true);
     expect(db.connect).toHaveBeenCalledTimes(1);
     expect(db.connect).toHaveBeenCalledWith(TEST_URL);
@@ -245,15 +264,17 @@ describe("inspectMigrationChecksums：読み取り専用の照合（偽のDBク�
     expect(db.queries[1]).toContain("set_config('search_path', 'pg_catalog', true)");
     expect(db.queries[2]).toContain("SHOW transaction_read_only");
     expect(db.queries[3]).toContain("current_database()");
-    expect(db.queries[4]).toBe(MIGRATION_CHECKSUM_SQL);
+    expect(db.queries[4]).toBe(SERVER_IDENTITY_SQL);
+    expect(db.queries[5]).toBe(MIGRATION_CHECKSUM_SQL);
     expect(db.queries.at(-1)).toBe("ROLLBACK");
+    expect(db.queries).toHaveLength(7);
     expect(db.end).toHaveBeenCalledTimes(1);
     for (const sql of db.queries) expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|CREATE|ALTER|GRANT|REVOKE)\b/i);
   });
 
   it("不一致は結果として返す（DB は変更しない。ROLLBACK して閉じる）", async () => {
     const db = fakeClient({ rows: goodRows().map((r) => (r.name === M1 ? { ...r, rolledBack: true } : r)) });
-    const result = await inspectMigrationChecksums({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL, migrationsDir: DIR, connect: db.connect, fs: fakeFs() });
+    const result = await inspectMigrationChecksums({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL, migrationsDir: DIR, connect: db.connect, expectedServer: PINNED, fs: fakeFs() });
     expect(result).toMatchObject({ matches: false, rolledBack: [M1] });
     expect(db.queries.at(-1)).toBe("ROLLBACK");
   });
@@ -261,14 +282,14 @@ describe("inspectMigrationChecksums：読み取り専用の照合（偽のDBク�
   it("ローカルの読み取りに失敗したら、接続しない", async () => {
     const db = fakeClient();
     await expect(
-      inspectMigrationChecksums({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL, migrationsDir: DIR, connect: db.connect, fs: fakeFs({ nodes: { [`${DIR}/${M1}/migration.sql`]: undefined } }) }),
+      inspectMigrationChecksums({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL, migrationsDir: DIR, connect: db.connect, expectedServer: PINNED, fs: fakeFs({ nodes: { [`${DIR}/${M1}/migration.sql`]: undefined } }) }),
     ).rejects.toMatchObject({ code: "MIGRATION_FILE_MISSING" });
     expect(db.connect).not.toHaveBeenCalled();
   });
 
   it("開発用DBの接続先なら、接続せずに拒否する", async () => {
     const db = fakeClient();
-    const error = await inspectMigrationChecksums({ databaseUrl: DEV_URL, developmentDatabaseUrl: DEV_URL, migrationsDir: DIR, connect: db.connect, fs: fakeFs() }).catch((e: unknown) => e);
+    const error = await inspectMigrationChecksums({ databaseUrl: DEV_URL, developmentDatabaseUrl: DEV_URL, migrationsDir: DIR, connect: db.connect, expectedServer: PINNED, fs: fakeFs() }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(MigrationChecksumError);
     expect((error as MigrationChecksumError).code).toBe("TARGET_REJECTED");
     for (const secret of SECRETS) expect((error as Error).message).not.toContain(secret);
@@ -277,7 +298,7 @@ describe("inspectMigrationChecksums：読み取り専用の照合（偽のDBク�
 
   it("本人確認に失敗したら、履歴を読まずに止まる（ROLLBACK して閉じる）", async () => {
     const db = fakeClient({ identity: { database: "katana", currentUser: "katana_test_user", sessionUser: "katana_test_user", marker: TEST_DATABASE_MARKER, serverPort: 5432 } });
-    await expect(inspectMigrationChecksums({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL, migrationsDir: DIR, connect: db.connect, fs: fakeFs() })).rejects.toMatchObject({
+    await expect(inspectMigrationChecksums({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL, migrationsDir: DIR, connect: db.connect, expectedServer: PINNED, fs: fakeFs() })).rejects.toMatchObject({
       code: "DATABASE_MISMATCH",
     });
     expect(db.queries).not.toContain(MIGRATION_CHECKSUM_SQL);
@@ -287,11 +308,107 @@ describe("inspectMigrationChecksums：読み取り専用の照合（偽のDBク�
 
   it("履歴の SQL が失敗したら止まり、ドライバのメッセージ（接続URL）を表示しない", async () => {
     const db = fakeClient({ failOn: "_prisma_migrations" });
-    const error = await inspectMigrationChecksums({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL, migrationsDir: DIR, connect: db.connect, fs: fakeFs() }).catch((e: unknown) => e);
+    const error = await inspectMigrationChecksums({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL, migrationsDir: DIR, connect: db.connect, expectedServer: PINNED, fs: fakeFs() }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(IntegrationDatabaseCheckError);
     expect((error as Error).message).toContain("(42P01)");
     for (const secret of SECRETS) expect((error as Error).message).not.toContain(secret);
     expect(db.queries.at(-1)).toBe("ROLLBACK");
+  });
+});
+
+describe("inspectMigrationChecksums：checksum の接続でのサーバーの識別（Step 3-12B-5C-2。偽のDBクライアント）", () => {
+  const run = (db: ReturnType<typeof fakeClient>, expectedServer: PinnedServerExpectation = PINNED) =>
+    inspectMigrationChecksums({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL, migrationsDir: DIR, connect: db.connect, expectedServer, fs: fakeFs() }).catch((e: unknown) => e);
+
+  /** 止まったこと・履歴を読まなかったこと・ROLLBACK と接続の解放・秘密情報を表示しないこと */
+  const expectStoppedBeforeHistory = (db: ReturnType<typeof fakeClient>, error: unknown, code: string) => {
+    expect(error).toBeInstanceOf(Error);
+    expect((error as { code?: string }).code).toBe(code);
+    expect(db.queries).not.toContain(MIGRATION_CHECKSUM_SQL);
+    expect(db.queries.at(-1)).toBe("ROLLBACK");
+    expect(db.end).toHaveBeenCalledTimes(1);
+    for (const secret of SECRETS) expect((error as Error).message).not.toContain(secret);
+    return (error as Error).message;
+  };
+
+  it("1. 識別情報（IP・ポート・起動時刻・F1）と checksum がすべて一致", async () => {
+    const db = fakeClient();
+    expect(await run(db)).toMatchObject({ matches: true });
+    expect(db.queries.indexOf(SERVER_IDENTITY_SQL)).toBeLessThan(db.queries.indexOf(MIGRATION_CHECKSUM_SQL));
+    expect(db.queries.indexOf(SERVER_IDENTITY_SQL)).toBeGreaterThan(db.queries.findIndex((q) => q.includes("current_database()")));
+  });
+
+  it("2. サーバーの IP が D1 のコンテナの IP と違えば、F1 と同じでも止まる", async () => {
+    const other = { ...F1_SERVER, serverAddress: "172.18.0.9" };
+    const db = fakeClient({ serverRows: [{ ...other }] });
+    const message = expectStoppedBeforeHistory(db, await run(db, { docker: DOCKER, server: other }), "SERVER_IDENTITY_MISMATCH");
+    expect(message).toContain("server address does not match the container network address");
+    expect(message).not.toContain("172.18.0.9");
+  });
+
+  it("3. サーバーのポートが 5432 でなければ止まる", async () => {
+    const db = fakeClient({ serverRows: [{ ...F1_SERVER, serverPort: 5433 }] });
+    const message = expectStoppedBeforeHistory(db, await run(db), "SERVER_IDENTITY_MISMATCH");
+    expect(message).toContain("server port is not 5432");
+    expect(message).toContain("serverPort differs from F1");
+  });
+
+  it("4. PostgreSQL の起動時刻が F1 と違えば（D1 の範囲内でも）止まる", async () => {
+    const db = fakeClient({ serverRows: [{ ...F1_SERVER, postmasterStartTime: "2026-11-06T22:46:52.000000Z" }] });
+    expect(expectStoppedBeforeHistory(db, await run(db), "SERVER_IDENTITY_MISMATCH")).toContain("postmasterStartTime differs from F1");
+  });
+
+  it("5. 起動時刻が D1 の StartedAt の許容範囲の外なら（F1 と同じでも）止まる", async () => {
+    const late = { ...F1_SERVER, postmasterStartTime: "2026-11-06T22:50:00.000000Z" };
+    const db = fakeClient({ serverRows: [{ ...late }] });
+    expect(expectStoppedBeforeHistory(db, await run(db, { docker: DOCKER, server: late }), "SERVER_IDENTITY_MISMATCH")).toContain("outside the container start window");
+  });
+
+  it("6. F1 の識別情報と違えば止まる（IP の違い。D1 とも合わない）", async () => {
+    const db = fakeClient({ serverRows: [{ ...F1_SERVER, serverAddress: "10.0.0.5" }] });
+    expect(expectStoppedBeforeHistory(db, await run(db), "SERVER_IDENTITY_MISMATCH")).toContain("serverAddress differs from F1");
+  });
+
+  it("7. DB の本人確認（DB名・current_user・session_user・DBのコメント・読み取り専用）に失敗したら、識別情報も履歴も読まない", async () => {
+    const good = { database: "katana_test", currentUser: "katana_test_user", sessionUser: "katana_test_user", marker: TEST_DATABASE_MARKER, serverPort: 5432 };
+    for (const [identity, code] of [
+      [{ ...good, database: "katana" }, "DATABASE_MISMATCH"],
+      [{ ...good, currentUser: "postgres" }, "CURRENT_USER_MISMATCH"],
+      [{ ...good, sessionUser: "postgres" }, "SESSION_USER_MISMATCH"],
+      [{ ...good, marker: null }, "MARKER_MISMATCH"],
+    ] as const) {
+      const db = fakeClient({ identity });
+      expectStoppedBeforeHistory(db, await run(db), code);
+      expect(db.queries).not.toContain(SERVER_IDENTITY_SQL);
+    }
+  });
+
+  it("8. サーバーの識別情報の SQL が失敗したら止まる（ドライバのメッセージを表示しない）", async () => {
+    const db = fakeClient({ failOn: "inet_server_addr" });
+    expect(expectStoppedBeforeHistory(db, await run(db), "QUERY_FAILED")).toContain("(42P01)");
+  });
+
+  it("9. NULL・不正な型・行数の違いは、読めないものとして止まる（一致とは扱わない）", async () => {
+    for (const serverRows of [
+      [{ ...F1_SERVER, serverAddress: null }],
+      [{ ...F1_SERVER, serverPort: "5432" }],
+      [{ ...F1_SERVER, serverPort: null }],
+      [{ ...F1_SERVER, serverPort: 0 }],
+      [{ ...F1_SERVER, postmasterStartTime: null }],
+      [{ ...F1_SERVER, postmasterStartTime: "2026-11-06 22:46:51" }],
+      [{ ...F1_SERVER, serverAddress: "not an ip" }],
+      [],
+      [{ ...F1_SERVER }, { ...F1_SERVER }],
+    ]) {
+      const db = fakeClient({ serverRows });
+      expectStoppedBeforeHistory(db, await run(db), "SERVER_IDENTITY_UNAVAILABLE");
+    }
+  });
+
+  it("13. 識別の不一致のメッセージには、値（IP・時刻）・接続URL・パスワードを含めない（項目名だけ）", async () => {
+    const db = fakeClient({ serverRows: [{ serverAddress: "192.0.2.10", serverPort: 6543, postmasterStartTime: "2026-11-07T01:02:03.456789Z" }] });
+    const message = expectStoppedBeforeHistory(db, await run(db), "SERVER_IDENTITY_MISMATCH");
+    for (const value of ["192.0.2.10", "6543", "2026-11-07", "172.18.0.2", DOCKER.containerId]) expect(message).not.toContain(value);
   });
 });
 

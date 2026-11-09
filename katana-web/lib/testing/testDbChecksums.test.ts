@@ -8,6 +8,7 @@ import {
   type LocalMigrationChecksum,
   MIGRATION_CHECKSUM_SQL,
   type MigrationChecksumComparison,
+  MigrationChecksumError,
   readLocalMigrationChecksums,
 } from "./migrationChecksum";
 import { SCHEMA_DIFF_DISABLED } from "./schemaDiff";
@@ -22,7 +23,7 @@ import {
 } from "./testDbChecksums";
 import type { TestDatabaseServerIdentity, TestDbDockerIdentity } from "./testDbIdentity";
 import { type InspectDatabase, LIVE_DATABASE_DISABLED, type ReadDockerIdentity } from "./testDbMigrate";
-import type { TestDatabasePrivileges, TestDatabaseState } from "./testDbState";
+import { SERVER_IDENTITY_SQL, type TestDatabasePrivileges, type TestDatabaseState } from "./testDbState";
 
 // DB にも Docker にも接続せず、Prisma CLI も起動しない。Docker・DB の判定・checksum の照合は、すべて偽の関数で置き換える
 // （リポジトリの prisma/migrations は読むだけ）
@@ -255,7 +256,8 @@ describe("--verify の手順（モックで有効にしたゲート）", () => {
     const f = fake();
     await expect(runTestDbChecksums(f.deps)).resolves.toBe(0);
     expect(f.calls).toEqual([...PRE, "docker", "inspect", "docker", "checksums", "inspect", "docker"]);
-    expect(f.checksums).toHaveBeenCalledWith({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL });
+    // D1・F1 の識別情報を、checksum の接続に渡す（同じ接続の中で、履歴を読む前に照合する）
+    expect(f.checksums).toHaveBeenCalledWith({ databaseUrl: TEST_URL, developmentDatabaseUrl: DEV_URL, expectedServer: { docker: DOCKER, server: SERVER } });
     expect(f.logs.join("\n")).toContain(`all ${EXPECTED_MIGRATION_COUNT} migration checksums match exactly`);
     expectNoSecrets(f);
   });
@@ -316,6 +318,20 @@ describe("--verify の手順（モックで有効にしたゲート）", () => {
     expect(f.calls.slice(-3)).toEqual(["checksums", "inspect", "docker"]);
   });
 
+  it("checksum の接続の識別の不一致は、F2・D3 を行った上で失敗（項目名だけ。checksum の結果は使わない）", async () => {
+    const f = fake({ checksum: new MigrationChecksumError("SERVER_IDENTITY_MISMATCH", "the checksum connection does not reach the verified server (serverPort differs from F1).") });
+    const error = await expectError(f, "CHECKSUM_CONNECTION_IDENTITY_MISMATCH");
+    expect(error.message).toContain("serverPort differs from F1");
+    expect(error.message).toContain("The migration history was not read.");
+    expect(f.calls.slice(-3)).toEqual(["checksums", "inspect", "docker"]);
+  });
+
+  it("12. checksum の接続の識別の不一致より、F2・D3 の異常を先に報告する（事後の検証は省略しない）", async () => {
+    const mismatch = new MigrationChecksumError("SERVER_IDENTITY_MISMATCH", "x");
+    await expectError(fake({ checksum: mismatch, dockers: [DOCKER, DOCKER, { ...DOCKER, restartCount: 1 }] }), "POST_IDENTITY_MISMATCH");
+    await expectError(fake({ checksum: mismatch, states: [STATE_C, STATE_B] }), "POST_STATE_MISMATCH");
+  });
+
   it("F2・D3 の失敗・不一致・状態の変化は、checksum が一致していても成功と扱わない", async () => {
     await expectError(fake({ states: [STATE_C, new IntegrationDatabaseCheckError("CONNECT_FAILED", "x")] }), "POST_CHECK_FAILED");
     await expectError(fake({ servers: [SERVER, { ...SERVER, serverAddress: "172.18.0.9" }] }), "POST_IDENTITY_MISMATCH");
@@ -327,7 +343,7 @@ describe("--verify の手順（モックで有効にしたゲート）", () => {
 
 describe("本物の inspectMigrationChecksums と偽のDBクライアント（実DBには接続しない）", () => {
   /** 読み取り専用のトランザクションの SQL だけに応答する偽のクライアント */
-  function fakeDb(o: { rows?: Record<string, unknown>[]; failOn?: string; readOnly?: string } = {}) {
+  function fakeDb(o: { rows?: Record<string, unknown>[]; failOn?: string; readOnly?: string; server?: Record<string, unknown> } = {}) {
     const queries: string[] = [];
     const end = vi.fn(async () => undefined);
     const client: IntegrationDbClient = {
@@ -340,6 +356,7 @@ describe("本物の inspectMigrationChecksums と偽のDBクライアント（�
         if (sql.includes("current_database()")) {
           return { rows: [{ database: "katana_test", currentUser: "katana_test_user", sessionUser: "katana_test_user", marker: TEST_DATABASE_MARKER, serverPort: 5432 }] };
         }
+        if (sql === SERVER_IDENTITY_SQL) return { rows: [o.server ?? { ...SERVER }] };
         if (sql === MIGRATION_CHECKSUM_SQL) return { rows: o.rows ?? goodRows() };
         throw new Error(`unexpected SQL in test: ${sql}`);
       },
@@ -350,7 +367,7 @@ describe("本物の inspectMigrationChecksums と偽のDBクライアント（�
   const real = (db: ReturnType<typeof fakeDb>): TestDbChecksumsDeps["inspectChecksums"] => (input) =>
     inspectMigrationChecksums({ ...input, migrationsDir: path.join(REPO_ROOT, "prisma", "migrations"), connect: db.connect });
 
-  it("一致：BEGIN READ ONLY・search_path の固定・transaction_read_only=on・本人確認・SELECT・ROLLBACK・接続の解放", async () => {
+  it("一致：BEGIN READ ONLY・search_path の固定・transaction_read_only=on・本人確認・サーバーの識別・SELECT・ROLLBACK・接続の解放", async () => {
     const db = fakeDb();
     await expect(runTestDbChecksums(fake({ inspectChecksums: real(db) }).deps)).resolves.toBe(0);
     expect(db.connect).toHaveBeenCalledWith(TEST_URL);
@@ -358,8 +375,36 @@ describe("本物の inspectMigrationChecksums と偽のDBクライアント（�
     expect(db.queries.at(-1)).toBe("ROLLBACK");
     expect(db.queries.some((q) => q.includes("set_config('search_path', 'pg_catalog', true)"))).toBe(true);
     expect(db.queries).toContain("SHOW transaction_read_only");
+    expect(db.queries.indexOf(SERVER_IDENTITY_SQL)).toBeGreaterThan(0);
+    expect(db.queries.indexOf(SERVER_IDENTITY_SQL)).toBeLessThan(db.queries.indexOf(MIGRATION_CHECKSUM_SQL));
     for (const q of db.queries.slice(1, -1)) expect(q.trimStart()).toMatch(/^(SELECT|SHOW) /);
     expect(db.end).toHaveBeenCalledTimes(1);
+  });
+
+  it("checksum の接続で読んだサーバー（IP・ポート・起動時刻）が D1・F1 と違えば、履歴を読まずに失敗する（ROLLBACK・接続の解放。F2・D3 は行う）", async () => {
+    for (const server of [
+      { ...SERVER, serverAddress: "172.18.0.9" },
+      { ...SERVER, serverPort: 5433 },
+      { ...SERVER, postmasterStartTime: "2026-11-06T22:46:52.000000Z" },
+      { ...SERVER, postmasterStartTime: "2026-11-07T22:46:51.000000Z" },
+    ]) {
+      const db = fakeDb({ server });
+      const f = fake({ inspectChecksums: real(db) });
+      const error = await expectError(f, "CHECKSUM_CONNECTION_IDENTITY_MISMATCH");
+      // 項目名だけを表示し、値（IP・ポート・時刻）は表示しない
+      for (const value of ["172.18.0.9", "5433", "2026-11-06T22:46:52", "2026-11-07"]) expect(error.message).not.toContain(value);
+      expect(db.queries).not.toContain(MIGRATION_CHECKSUM_SQL);
+      expect(db.queries.at(-1)).toBe("ROLLBACK");
+      expect(db.end).toHaveBeenCalledTimes(1);
+      expect(f.calls.slice(-3)).toEqual(["checksums", "inspect", "docker"]);
+    }
+  });
+
+  it("checksum の接続で、サーバーの識別情報が読めない（NULL）なら、履歴を読まずに失敗する", async () => {
+    const db = fakeDb({ server: { ...SERVER, serverAddress: null } });
+    expect((await expectError(fake({ inspectChecksums: real(db) }), "CHECKSUM_CHECK_FAILED")).message).toContain("SERVER_IDENTITY_UNAVAILABLE");
+    expect(db.queries).not.toContain(MIGRATION_CHECKSUM_SQL);
+    expect(db.queries.at(-1)).toBe("ROLLBACK");
   });
 
   it("transaction_read_only が on でなければ、履歴を読まずに失敗する", async () => {

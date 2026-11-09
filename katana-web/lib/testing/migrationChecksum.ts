@@ -10,7 +10,8 @@ import {
   runReadOnlyCheck,
   select,
 } from "./integrationDatabaseCheck.ts";
-import { pinSearchPath } from "./testDbState.ts";
+import { type PinnedServerExpectation, pinnedServerMismatches } from "./testDbIdentity.ts";
+import { pinSearchPath, readServerIdentity } from "./testDbState.ts";
 
 /**
  * migration の checksum の照合（Step 3-12B-5A。完了条件2の一部）。
@@ -57,6 +58,7 @@ export type MigrationChecksumErrorCode =
   | "NO_MIGRATIONS"
   | "DUPLICATE_LOCAL_MIGRATION"
   | "TARGET_REJECTED"
+  | "SERVER_IDENTITY_MISMATCH"
   | "CHECKSUM_HISTORY_MISMATCH";
 
 export class MigrationChecksumError extends Error {
@@ -291,14 +293,20 @@ export type InspectMigrationChecksumsInput = {
   migrationsDir: string;
   /** 検証済みの接続URLで1回だけ接続する（lib/testing/testDbConnection.ts の connectTestDatabase を渡す想定） */
   connect: (databaseUrl: string) => Promise<IntegrationDbClient>;
+  /**
+   * D1（Docker）・F1（DB）で確かめた識別情報（Step 3-12B-5C-2。必須）。この接続で読んだサーバーの識別情報が、
+   * これと合わなければ、履歴を読まずに SERVER_IDENTITY_MISMATCH で止まる（pinnedServerMismatches）。
+   */
+  expectedServer: PinnedServerExpectation;
   fs?: MigrationFs;
 };
 
 /**
  * ローカルの checksum を計算してから、読み取り専用の接続で DB の履歴と照合する（lib/testing/testDbChecksums.ts から、固定のゲートが有効なときだけ呼ぶ。Step 3-12B-5C-1 では無効）。
  * 順序：ローカルの読み取り（失敗なら接続しない）→ 接続先の検証（接続しない）→ 接続 → BEGIN READ ONLY → search_path の固定
- * → 本人確認 → 履歴の SELECT → ROLLBACK → 接続の解放（runReadOnlyCheck）。照合の結果を返すだけで、DB は変更しない。
- * Docker の識別情報の照合は、呼び出し側（runner）で行う。
+ * → 本人確認（transaction_read_only・DB名・current_user・session_user・DBのコメント）→ サーバーの識別情報の読み取りと、
+ * D1・F1 との照合（Step 3-12B-5C-2）→ 履歴の SELECT → ROLLBACK → 接続の解放（runReadOnlyCheck）。照合の結果を返すだけで、DB は変更しない。
+ * 本人確認・識別情報の照合に通るまで、`_prisma_migrations` は読まない。D2・D3 の照合は、呼び出し側（runner）で行う。
  */
 export async function inspectMigrationChecksums(input: InspectMigrationChecksumsInput): Promise<MigrationChecksumComparison> {
   const local = readLocalMigrationChecksums(input.migrationsDir, input.fs);
@@ -313,6 +321,11 @@ export async function inspectMigrationChecksums(input: InspectMigrationChecksums
   return runReadOnlyCheck(input.connect, input.databaseUrl, async (client) => {
     await pinSearchPath(client);
     await assertDatabaseIdentity(client); // 失敗したら throw され、履歴を読まない
+    // この接続が D1・F1 で確かめたサーバーと同じであること（失敗したら throw され、履歴を読まない）
+    const mismatches = pinnedServerMismatches(await readServerIdentity(client), input.expectedServer);
+    if (mismatches.length > 0) {
+      throw new MigrationChecksumError("SERVER_IDENTITY_MISMATCH", `the checksum connection does not reach the verified server (${mismatches.join(", ")}).`);
+    }
     return compareMigrationChecksums(await readMigrationChecksumRows(client), local);
   });
 }

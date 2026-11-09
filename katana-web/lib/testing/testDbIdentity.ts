@@ -99,7 +99,31 @@ export function serverDockerMismatches(server: TestDatabaseServerIdentity, docke
   return offset >= -POSTMASTER_START_EARLIEST_MS && offset <= POSTMASTER_START_LATEST_MS ? [] : ["postmaster start time is outside the container start window"];
 }
 
-/** inet_server_addr() がコンテナの IP と同じか（記録用。判定には使わない） */
+/** inet_server_addr() がコンテナの IP と同じか（migration・F1・F2 では記録用。checksum の照合の接続では必須。pinnedServerMismatches） */
 export function addressMatchesContainer(server: TestDatabaseServerIdentity, docker: TestDbDockerIdentity): boolean {
   return server.serverAddress === docker.networkIp;
+}
+
+/** checksum の照合の接続が、D1・F1 で確かめたものと同じサーバーであることの期待値（Step 3-12B-5C-2） */
+export type PinnedServerExpectation = {
+  /** D1 で読んだ Docker の識別情報 */
+  readonly docker: TestDbDockerIdentity;
+  /** F1 で読んだ DB の識別情報 */
+  readonly server: TestDatabaseServerIdentity;
+};
+
+/**
+ * checksum の照合の接続で読んだ識別情報の不一致（項目名だけを返す。上の関数の組み合わせで、判定を作り直さない）。
+ * - ポートが 5432（serverIdentityMismatches）
+ * - pg_postmaster_start_time() が D1 の State.StartedAt の範囲内（serverDockerMismatches）
+ * - inet_server_addr() が D1 のコンテナの IP と一致（addressMatchesContainer。この接続では必須にする）
+ * - 3つの値が F1 と完全に一致（serverIdentityChanges）
+ */
+export function pinnedServerMismatches(server: TestDatabaseServerIdentity, expected: PinnedServerExpectation): string[] {
+  return [
+    ...serverIdentityMismatches(server),
+    ...serverDockerMismatches(server, expected.docker),
+    ...(addressMatchesContainer(server, expected.docker) ? [] : ["server address does not match the container network address"]),
+    ...serverIdentityChanges(expected.server, server).map((key) => `${key} differs from F1`),
+  ];
 }

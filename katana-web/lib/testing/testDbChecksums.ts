@@ -14,7 +14,13 @@ import {
   MigrationChecksumError,
   type MigrationChecksumComparison,
 } from "./migrationChecksum.ts";
-import { dockerIdentityChanges, serverDockerMismatches, serverIdentityChanges, serverIdentityMismatches } from "./testDbIdentity.ts";
+import {
+  dockerIdentityChanges,
+  type PinnedServerExpectation,
+  serverDockerMismatches,
+  serverIdentityChanges,
+  serverIdentityMismatches,
+} from "./testDbIdentity.ts";
 import type { InspectDatabase, ReadDockerIdentity } from "./testDbMigrate.ts";
 import type { TestDatabaseInspection } from "./testDbState.ts";
 
@@ -36,12 +42,13 @@ import type { TestDatabaseInspection } from "./testDbState.ts";
  * - F1・F2：lib/testing/testDbState.ts の inspectTestDatabase（BEGIN READ ONLY・transaction_read_only=on・search_path=pg_catalog・
  *   本人確認4項目（DB名・current_user・session_user・DBのコメント）・権限・サーバーの識別情報・状態 A・B・C。SELECT・SHOW と ROLLBACK だけ）
  * - checksum：lib/testing/migrationChecksum.ts の inspectMigrationChecksums（同じ読み取り専用のトランザクション・本人確認の後に
- *   `_prisma_migrations` を SELECT し、ローカルの SHA-256 と完全一致で照合する）
+ *   `_prisma_migrations` を SELECT し、ローカルの SHA-256 と完全一致で照合する）。Step 3-12B-5C-2 から、D1・F1 の識別情報を渡し、
+ *   同じ接続・同じトランザクションの中で、履歴を読む前にサーバーの識別情報（IP・ポート・起動時刻）を照合する（pinnedServerMismatches）
  * - 照合：lib/testing/testDbIdentity.ts（PostgreSQL と Docker の識別情報の整合、前後の一致）
  *
  * どれか1つでも失敗したら、検証は失敗（例外）。F2・D3 の不一致・失敗は、checksum が一致していても成功と扱わない。
- * F1・checksum・F2 はそれぞれ別の接続（接続ごとに BEGIN READ ONLY → ROLLBACK → 接続の解放）。読んだ時点の照合なので、
- * 接続の間の入れ替わりは、防止ではなく F2・D3 で事後に検出する（TOCTOU）。
+ * F1・checksum・F2 はそれぞれ別の接続（接続ごとに BEGIN READ ONLY → ROLLBACK → 接続の解放）。checksum の接続は、履歴を読む前に
+ * D1・F1 と同じサーバーであることを確かめる。読んだ時点の照合なので、それ以外の入れ替わりは F2・D3 で事後に検出する（TOCTOU）。
  * 表示・例外のメッセージには、接続URL・パスワード・checksum の値を含めない（コード・migration の名前・件数だけ）。
  */
 
@@ -73,6 +80,7 @@ export type TestDbChecksumsErrorCode =
   | "DATABASE_STATE_NOT_C"
   | "MIGRATION_LIST_MISMATCH"
   | "CHECKSUM_CHECK_FAILED"
+  | "CHECKSUM_CONNECTION_IDENTITY_MISMATCH"
   | "CHECKSUM_MISMATCH"
   | "POST_CHECK_FAILED"
   | "POST_IDENTITY_MISMATCH"
@@ -112,8 +120,8 @@ export type TestDbChecksumsDeps = {
   readDockerIdentity: ReadDockerIdentity;
   /** F1・F2（同上） */
   inspectDatabase: InspectDatabase;
-  /** checksum の照合（inspectMigrationChecksums。同上） */
-  inspectChecksums: (input: CheckInput) => Promise<MigrationChecksumComparison>;
+  /** checksum の照合（inspectMigrationChecksums。同上）。expectedServer は D1・F1 の識別情報で、同じ接続の中で照合する */
+  inspectChecksums: (input: CheckInput & { expectedServer: PinnedServerExpectation }) => Promise<MigrationChecksumComparison>;
   log: (text: string) => void;
 };
 
@@ -245,11 +253,11 @@ export async function runTestDbChecksums(deps: TestDbChecksumsDeps): Promise<num
 
   // checksum の照合（失敗・不一致は記録し、F2・D3 の後で判定する）
   let comparison: MigrationChecksumComparison | undefined;
-  let checksumError: string | undefined;
+  let checksumError: unknown;
   try {
-    comparison = await deps.inspectChecksums(checkInput);
+    comparison = await deps.inspectChecksums({ ...checkInput, expectedServer: { docker: docker1, server: server1 } });
   } catch (error) {
-    checksumError = codeOf(error);
+    checksumError = error;
   }
 
   // F2（F1 と一致・状態 C）→ D3（D1 と一致）。どちらかが失敗したら、checksum の結果に関わらず失敗
@@ -266,7 +274,11 @@ export async function runTestDbChecksums(deps: TestDbChecksumsDeps): Promise<num
 
   // 最終結果
   if (comparison === undefined) {
-    throw new TestDbChecksumsError("CHECKSUM_CHECK_FAILED", `the checksum check failed (${checksumError ?? "unknown"}). Nothing was changed.`);
+    if (checksumError instanceof MigrationChecksumError && checksumError.code === "SERVER_IDENTITY_MISMATCH") {
+      // 項目名だけを含むメッセージ（値は含まない）
+      throw new TestDbChecksumsError("CHECKSUM_CONNECTION_IDENTITY_MISMATCH", `${checksumError.message.replace(/^\[migrationChecksum\] [A-Z_]+: /, "")} The migration history was not read. Nothing was changed.`);
+    }
+    throw new TestDbChecksumsError("CHECKSUM_CHECK_FAILED", `the checksum check failed (${codeOf(checksumError)}). Nothing was changed.`);
   }
   try {
     assertMigrationChecksums(comparison);

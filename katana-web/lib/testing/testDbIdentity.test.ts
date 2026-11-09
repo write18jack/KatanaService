@@ -5,6 +5,7 @@ import {
   EXPECTED_SERVER_PORT,
   isUtcTimestamp,
   parseUtcTimestamp,
+  pinnedServerMismatches,
   serverDockerMismatches,
   serverIdentityChanges,
   serverIdentityMismatches,
@@ -116,5 +117,26 @@ describe("serverDockerMismatches（DB の起動時刻とコンテナの起動時
     expect(serverDockerMismatches({ ...SERVER, serverAddress: "10.0.0.5" }, DOCKER)).toEqual([]);
     expect(addressMatchesContainer(SERVER, DOCKER)).toBe(true);
     expect(addressMatchesContainer({ ...SERVER, serverAddress: "10.0.0.5" }, DOCKER)).toBe(false);
+  });
+});
+
+describe("pinnedServerMismatches（checksum の接続。Step 3-12B-5C-2）", () => {
+  const PINNED = { docker: DOCKER, server: SERVER };
+
+  it("D1・F1 とすべて合えば空", () => {
+    expect(pinnedServerMismatches({ ...SERVER }, PINNED)).toEqual([]);
+  });
+
+  it("F1 では記録だけの IP の一致を、この接続では必須にする", () => {
+    const other = { ...SERVER, serverAddress: "10.0.0.5" };
+    expect(serverDockerMismatches(other, DOCKER)).toEqual([]);
+    expect(pinnedServerMismatches(other, { docker: DOCKER, server: other })).toEqual(["server address does not match the container network address"]);
+  });
+
+  it("ポート・起動時刻の範囲・F1 との違いを、既存の判定と同じ項目名で返す", () => {
+    expect(pinnedServerMismatches({ ...SERVER, serverPort: 5433 }, PINNED)).toEqual([`server port is not ${EXPECTED_SERVER_PORT}`, "serverPort differs from F1"]);
+    const late = { ...SERVER, postmasterStartTime: "2026-11-06T22:50:00.000000Z" };
+    expect(pinnedServerMismatches(late, { docker: DOCKER, server: late })).toEqual(["postmaster start time is outside the container start window"]);
+    expect(pinnedServerMismatches({ ...SERVER, postmasterStartTime: "2026-11-06T22:46:52.000000Z" }, PINNED)).toEqual(["postmasterStartTime differs from F1"]);
   });
 });
