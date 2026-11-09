@@ -18,7 +18,7 @@ import { pinSearchPath, readServerIdentity } from "./testDbState.ts";
  *
  * `_prisma_migrations.checksum` と、ローカルの `prisma/migrations/<name>/migration.sql` の SHA-256 を照合する。
  * このモジュールは DB ドライバを読み込まない。呼び出し元は checksum 専用の lib/testing/testDbChecksums.ts（scripts/testdb-checksums.mts）だけで、
- * 実DBへの接続は、その固定のゲート（CHECKSUM_DATABASE_DISABLED。Step 3-12B-5C-1 では無効）が有効なときだけ行う。
+ * 実DBへの接続は、その固定のゲート（checksumDatabase。スクリプトの値は固定の CHECKSUM_DATABASE_DISABLED で、今は無効）が有効なときだけ行う。
  *
  * Prisma の checksum の仕様（インストール済みの prisma 7.2.0、engines 0c8ef2ce45c83248ab3df073180d5eda9e8be7a3 で確認）:
  * - CLI（node_modules/prisma/build/index.js）は、prisma/migrations の直下のディレクトリ（Dirent.isDirectory()。シンボリックリンクは対象外）
@@ -302,7 +302,7 @@ export type InspectMigrationChecksumsInput = {
 };
 
 /**
- * ローカルの checksum を計算してから、読み取り専用の接続で DB の履歴と照合する（lib/testing/testDbChecksums.ts から、固定のゲートが有効なときだけ呼ぶ。Step 3-12B-5C-1 では無効）。
+ * ローカルの checksum を計算してから、読み取り専用の接続で DB の履歴と照合する（lib/testing/testDbChecksums.ts から、固定のゲートが有効なときだけ呼ぶ。スクリプトから渡してはあるが、ゲートが無効の今は呼ばれない）。
  * 順序：ローカルの読み取り（失敗なら接続しない）→ 接続先の検証（接続しない）→ 接続 → BEGIN READ ONLY → search_path の固定
  * → 本人確認（transaction_read_only・DB名・current_user・session_user・DBのコメント）→ サーバーの識別情報の読み取りと、
  * D1・F1 との照合（Step 3-12B-5C-2）→ 履歴の SELECT → ROLLBACK → 接続の解放（runReadOnlyCheck）。照合の結果を返すだけで、DB は変更しない。
