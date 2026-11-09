@@ -1,7 +1,7 @@
 # 計画：専用テストDBの構築とVitest統合テストの分離
 
 作成日: 2026-10-26
-更新日: 2026-11-04（Step 3-8Bのcommit `d56c8e4`、R12のDockerの読み取り調査、Step 3-9・3-9B（テストDBの構成ファイルとDockerのラッパー。`docker compose config` による照合まで）の実施結果と、そのcommit `61f8105`、Step 3-9C（R14のパスワード検証の共通化）の実施結果とcommit `4553f2f`、Step 3-9D（ラッパーの `up`・`down` の実装と、障害時の down のレビュー。実際の起動・停止は未実施）の実施結果とcommit `5fcc259`、Step 3-10の実施前レビュー、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）の結果とcommit `8471705`、Step 3-10B（migration の前後のDBの状態の判定の実装。単体テストのみ）の結果とcommit `daf5c8b`、Step 3-10C（`testdb-migrate` への状態の判定の組み込み。単体テストのみ。強制停止は維持）の結果とcommit `92ba359`、Step 3-11の実施前レビュー（初回の Docker 起動の前の安全性レビュー。Docker は読み取りだけで、デーモンは停止中）の結果、Step 3-11A（Docker Desktop の起動後の読み取り専用の確認と、初期化スクリプトのパスワード漏洩の対策）の結果を反映）
+更新日: 2026-11-09（Step 3-12B-2〜3-12B-5C-2 の記録を追加。Step 3-12B-2・3-12B-3 の詳細は、ユーザーの過去の報告に基づく記録で、記録の時点では Docker・DB に接続して再検証していない）。それ以前の更新: 2026-11-04（Step 3-8Bのcommit `d56c8e4`、R12のDockerの読み取り調査、Step 3-9・3-9B（テストDBの構成ファイルとDockerのラッパー。`docker compose config` による照合まで）の実施結果と、そのcommit `61f8105`、Step 3-9C（R14のパスワード検証の共通化）の実施結果とcommit `4553f2f`、Step 3-9D（ラッパーの `up`・`down` の実装と、障害時の down のレビュー。実際の起動・停止は未実施）の実施結果とcommit `5fcc259`、Step 3-10の実施前レビュー、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）の結果とcommit `8471705`、Step 3-10B（migration の前後のDBの状態の判定の実装。単体テストのみ）の結果とcommit `daf5c8b`、Step 3-10C（`testdb-migrate` への状態の判定の組み込み。単体テストのみ。強制停止は維持）の結果とcommit `92ba359`、Step 3-11の実施前レビュー（初回の Docker 起動の前の安全性レビュー。Docker は読み取りだけで、デーモンは停止中）の結果、Step 3-11A（Docker Desktop の起動後の読み取り専用の確認と、初期化スクリプトのパスワード漏洩の対策）の結果を反映）
 作業ブランチ: `chore/test-db-isolation`（`fix-dashboard` の `6168889` から作成）
 
 ## 状態
@@ -10,7 +10,7 @@
 |---|---|
 | Phase 1：読み取り専用の調査 | **実施済み**（結果は本ファイルの1章） |
 | Phase 2：安全設計 | **設計レビュー完了**（確定設計は本ファイルの2章） |
-| Phase 3：実装 | **実施中**（Step 3-0〜3-8B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712`、Step 3-8A（接続後の本人確認と空DB検査）は `4b788e7` でcommit。Step 3-8B（当初の3-8：`prisma.config.ts` のガードとmigration用スクリプト）は `d56c8e4` でcommit。Step 3-9（テストDBの構成ファイル）とStep 3-9B（Dockerのラッパー `scripts/testdb.mts` の `--check`・`--status`と、`docker compose config` による照合。架空の一時的な `.env.test` で、全項目が一致）は実施済みで、`61f8105` でcommit。Step 3-9C（R14のパスワード検証を共通の関数にまとめ、4つの経路に適用）は実施済みで、`4553f2f` でcommit。Step 3-9D（ラッパーの `--up`・`--down`。`--apply` があるときだけ変更操作を行う）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit。Step 3-10の実施前レビュー（Dockerの読み取り専用の調査を含む）と、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）を実施し、`8471705` でcommit。Step 3-10B（DBの状態 A・B・C の読み取り専用の判定と、`pg` の許可リストの追加。単体テストのみ）を実装し、`daf5c8b` でcommit。Step 3-10C（`testdb-migrate` への組み込み。実DBへの接続の許可は固定で無効のまま）を実装し、最終の安全性レビューの後に `92ba359` でcommit。Step 3-11の実施前レビュー（コードの変更なし。起動前の条件・R7 の検証手順・起動失敗時の対処・読み取り専用のDB検証の計画・TOCTOU の方針を記録）を実施。Step 3-11A（Docker Desktop の起動後の読み取り専用の確認と、`01-app-role.sh` のログ漏洩の対策・静的テスト）を実施し、`test: protect test database initialization secrets` でcommit。`reset` は未実装。**コンテナの起動・停止とDBへの接続は、一度も行っていない。** 結果は3章の「3-A. 実施結果」） |
+| Phase 3：実装 | **実施中**（Step 3-0〜3-8B 実施済み。Step 3-3〜3-6は `824d54b`、Step 3-7・3-7Bは `d087712`、Step 3-8A（接続後の本人確認と空DB検査）は `4b788e7` でcommit。Step 3-8B（当初の3-8：`prisma.config.ts` のガードとmigration用スクリプト）は `d56c8e4` でcommit。Step 3-9（テストDBの構成ファイル）とStep 3-9B（Dockerのラッパー `scripts/testdb.mts` の `--check`・`--status`と、`docker compose config` による照合。架空の一時的な `.env.test` で、全項目が一致）は実施済みで、`61f8105` でcommit。Step 3-9C（R14のパスワード検証を共通の関数にまとめ、4つの経路に適用）は実施済みで、`4553f2f` でcommit。Step 3-9D（ラッパーの `--up`・`--down`。`--apply` があるときだけ変更操作を行う）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit。Step 3-10の実施前レビュー（Dockerの読み取り専用の調査を含む）と、Step 3-10A（tmpfs の判定の修正と、migration の前後の検査の設計判断）を実施し、`8471705` でcommit。Step 3-10B（DBの状態 A・B・C の読み取り専用の判定と、`pg` の許可リストの追加。単体テストのみ）を実装し、`daf5c8b` でcommit。Step 3-10C（`testdb-migrate` への組み込み。実DBへの接続の許可は固定で無効のまま）を実装し、最終の安全性レビューの後に `92ba359` でcommit。Step 3-11の実施前レビュー（コードの変更なし。起動前の条件・R7 の検証手順・起動失敗時の対処・読み取り専用のDB検証の計画・TOCTOU の方針を記録）を実施。Step 3-11A（Docker Desktop の起動後の読み取り専用の確認と、`01-app-role.sh` のログ漏洩の対策・静的テスト）を実施し、`test: protect test database initialization secrets` でcommit。`reset` は未実装。**コンテナの起動・停止とDBへの接続は、一度も行っていない。** 結果は3章の「3-A. 実施結果」）。**2026-11-09 追記：** 上の記述は 2026-11-04 時点のもの。その後、Step 3-11 でテストDBを起動し、Step 3-12B-3 で migration を適用した（最後に確認した時点で状態 C）。Step 3-12B-4 で migration 用の固定ゲートを無効に戻し、Step 3-12B-5A〜5C-2 で checksum・schemaDiff の検証機能を実装した（実DBでの照合は未実施）。最新の状態は3-Aの表と「次のセッションで最初に行うこと」 |
 | Phase 4：検証 | **未着手** |
 
 F-01の判定は **CONDITIONAL PASS のまま**。実DB・Cookie・HTTPでの検証は、Phase 4のE2Eで行う。
@@ -377,6 +377,13 @@ npm run test:integration ─► 専用runner
 | 3-12A | migration runner への照合の接続：Docker の操作と検証を `lib/testing/testDbDocker.ts`（読み込みに副作用なし）へ移し、`scripts/testdb.mts` は `main()` と再exportだけに。`scripts/testdb-migrate.mts` は本物の `readTestDbDockerIdentity`・`createTestDatabaseInspector` を `migrationChecks` として渡す（D1・F1・D2・F2・D3）。`--apply` を追加（なしは予行）。migration 用の許可は固定の `LIVE_DATABASE_DISABLED` のままで、`--apply` でも Docker・DB に触れる前に止まる。通常テスト33ファイル・1328件成功、静的検査152件・違反0件。migration は未実施 | `45c0da9`（`test: connect guarded migration checks and require apply`。親は `441a5da`） |
 | 3-12A 実環境確認 | commit の後、`testdb:check`・`status`・`identity`・`verify`・`migrate:check`・`migrate`（予行。`--apply` なし）を各1回、最後に `status`。すべて終了コード0。Docker の識別情報は Step 3-11F と完全一致、**状態 A**・権限4項目 true、DB の識別情報も一致。固定ゲートは無効、Prisma CLI は起動せず、migration は未実施。Docker の前後差分なし | `c2cbb6a`（`docs: record Step 3-12A verification and 3-12B prerequisites`。PLAN だけ。親は `45c0da9`） |
 | 3-12B-1 | migration 用の固定ゲートの有効化：`scripts/testdb-migrate.mts` の `liveDatabase` を固定の `{ mode: "enabled" }` に（環境変数・引数では切り替えない）。`--apply` 必須、事前の検証、D1 → F1 → D2 → CLI → F2 → D3 は変更なし。予行の表示とコメントを修正。tsc・eslint 成功、通常テスト33ファイル・1351件成功（失敗・スキップ0件）、静的検査152件・違反0件。migration・Docker・DB の操作なし | `608c92a`（`test: enable guarded test database migration apply gate`。親は `c2cbb6a`） |
+| 3-12B-2 | 実環境の安全確認（ユーザーの過去の報告に基づく記録）：2026-11-07 にユーザーが `docker stop katana-test-db` を実行し、停止状態を検出して作業を中断。承認済みの down/up でコンテナを再構築し、状態 A・running/healthy・本人確認・権限の検査が成功。Docker と PostgreSQL の IP は `172.18.0.2` で一致。最終の migration の予行と前後比較が成功 | なし（Docker・DB の操作。コードの変更なし） |
+| 3-12B-3 | migration の適用（ユーザーの過去の報告に基づく記録）：`npm run testdb:migrate -- --apply` を承認に基づき1回実行し、終了コード0。8件を適用、D1・F1・D2・F2・D3 が成功、状態 A → 状態 C、履歴8件が期待どおり、DB の識別情報は前後で一致、開発用DBの保護条件は維持。**条件1は達成、条件2は未検証** | なし（migration の実行。コードの変更なし） |
+| 3-12B-4 | migration 用の固定ゲートを `LIVE_DATABASE_DISABLED` に戻した。通常テスト33ファイル・1,358件成功。DB の操作・migration の再実行なし | `d87bc9a`（`test: restore disabled migration gate after test DB setup`。親は `959044a`） |
+| 3-12B-5A | checksum の照合機能（`lib/testing/migrationChecksum.ts`。SHA-256 の厳密な一致。Prisma より厳しい）。実行経路には未接続。実DBでの照合は未実施 | `e08f7e1`（`test: add read-only migration checksum verification`。親は `d87bc9a`） |
+| 3-12B-5B | schemaDiff の検証機能（`lib/testing/schemaDiff.ts`。固定の `migrate diff` コマンド・終了コードの分類・専用ゲート `SCHEMA_DIFF_DISABLED`。読み取り専用を保証できない権限なら `READ_ONLY_NOT_ENFORCED` で停止）。通常テスト35ファイル・1,431件成功。実行経路には未接続。Prisma CLI の起動・実DBでの検証は未実施 | `c2103de`（`test: add guarded Prisma schema diff verification`。親は `e08f7e1`） |
+| 3-12B-5C-1 | checksum 専用コマンド（`npm run testdb:checksums`、`scripts/testdb-checksums.mts`、`lib/testing/testDbChecksums.ts`）。引数なしは予行、`--verify` は専用ゲート `CHECKSUM_DATABASE_DISABLED`（無効）で Docker・DB の前に停止。手順は事前検証 → D1 → F1（状態 C・8件）→ D2 → checksum → F2 → D3。通常テスト36ファイル・1,457件成功。実DBでの照合は未実施 | `3095887`（`test: add guarded test DB checksum verification command`。親は `c2103de`） |
+| 3-12B-5C-2 | checksum の接続でのサーバーの識別：同じ読み取り専用のトランザクションの中で、本人確認4項目の後に `inet_server_addr()`・`inet_server_port()`・`pg_postmaster_start_time()` を読み、D1（IP の一致は必須・ポート 5432・起動時刻の範囲）と F1（3項目の完全一致）と照合。不一致なら履歴を読まずに停止。F2・D3 は維持。通常テスト36ファイル・1,474件成功。3つの固定ゲートはすべて無効。実DBでの照合は未実施 | `58d1168`（`test: verify checksum connection server identity`。親は `3095887`） |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -2157,7 +2164,7 @@ npm run test:integration ─► 専用runner
 - **変えていないもの：** `--apply` 必須、引数・Node の起動オプション・`.env.test`・接続先・パスワード・親と子の環境変数・必要なファイルの検証、D1 → F1 → D2 → CLI → F2 → D3 の順序と停止条件、Prisma CLI の固定コマンド・`shell: false`、`--verify` 用の `readOnlyDatabase`、`prisma/`・`.env*`・Compose・globalSetup。
 - **検証（すべて静的・モックだけ）:** `npx tsc --noEmit` 成功、変更した4ファイルの `eslint` 成功、`git diff --check`・`git diff --cached --check` 成功、静的検査（`dbConnectionPaths.test.ts`）152件・違反0件、`npx vitest list --filesOnly` 33ファイル（`*.integration.test.*` 0件。統合テスト6ファイルは通常テストから除外）。
   - 通常テスト：最初の `npm test` は、Claude Code の権限の判定で拒否された（理由のラベルは「Irreversible Local Destruction」。根拠は表示されず、原因は特定していない）。関連4ファイル（529件）を明示して実行して成功した後、残り29ファイルの静的な安全性調査（DB・Docker・ファイルの書き込み・外部通信の経路なし、`@/lib/prisma` のモックはすべて factory 付き、`scripts/testdb-migrate.mts` を import するテストなし）を経て、ユーザーの1回限りの承認で `npm test` を1回実行：**33ファイル・1351件成功、失敗0件・スキップ0件、終了コード0**。ログに DB・Docker・migration の形跡なし。絞り込みなしのテストの禁止方針は、恒久的には解除していない（実行のたびに個別の承認が必要）。
-- **現在の状態:**
+- **現在の状態（Step 3-12B-1 の時点の記録。その後の状態は下の「Step 3-12B-2」以降）:**
   - 固定ゲートは**有効**（`608c92a`）。`npm run testdb:migrate -- --apply` を実行すると、テストDBに migration が走る。
   - migration は未実施。状態 C への移行も未実施。
   - DB の状態 A は、Step 3-12A で最後に確かめた結果で、この Step では Docker・DB を読んでいない（現時点の状態は未確認）。
@@ -2184,6 +2191,68 @@ npm run test:integration ─► 専用runner
 
   停止した場合は、原因を報告して指示を待つ。ガードを緩めて先へ進まない。
 - 各Stepで変更するのは、記載したファイルだけにする。commitはユーザーが指示したときだけ行う。
+
+#### Step 3-12B-2：実環境の安全確認（実施済み。コードの変更なし）
+
+- **記録の根拠:** この節と「Step 3-12B-3」は、ユーザーの過去の報告に基づく記録である。2026-11-09 にこの記録を追加したとき、Docker・DB には接続しておらず、再検証していない。
+- **経過:**
+  - 2026-11-07 に、ユーザーが `docker stop katana-test-db` を実行した。
+  - 作業の開始時の確認で停止状態を検出し、作業を中断した（停止を無視して進めていない）。
+  - 承認を得た down/up で、テストDBのコンテナを再構築した。
+  - 再構築の後に、状態 A・running/healthy・本人確認4項目・権限4項目の検査が成功した。
+  - Docker のコンテナの IP と PostgreSQL の `inet_server_addr()` は、どちらも `172.18.0.2` で一致した。
+  - 最終の migration の予行（`--apply` なし）と、Docker の前後比較が成功した。
+- **新しい識別情報:** 再構築でコンテナID・イメージID・`State.StartedAt`・ネットワークID・`pg_postmaster_start_time()` は新しい値になった。**値はユーザーの過去の報告にあるが、この記録の作成時に参照できなかったため、本ファイルには転記していない**（推測で補わない）。Step 3-11F・3-12A に記録した値（コンテナID `74f75c47d5d9…`、`StartedAt` 2026-11-06T22:46:49.619782389Z など）は、再構築の前のコンテナのものであり、現在のコンテナとは比べない。
+- **未記録の事項:** 新しい識別情報の値、起動時刻の差の実測値。
+
+#### Step 3-12B-3：migration の適用（実施済み。コードの変更なし）
+
+- **記録の根拠:** ユーザーの過去の報告に基づく（上の「Step 3-12B-2」と同じ）。
+- **実行:** `npm run testdb:migrate -- --apply` を、承認に基づき1回だけ実行した。終了コード0。
+- **結果:**
+  - 8件の migration を適用した。
+  - D1・F1・D2・F2・D3 の照合がすべて成功した。
+  - 状態 A から状態 C に移った。`_prisma_migrations` の履歴8件が期待どおり。
+  - DB の識別情報は、実行の前後で一致した。
+  - 開発用DBの保護条件（`katana-db` なし、開発用ボリュームの記録の一致、開発用 URL の拒否）は維持された。
+- **完了条件:** 条件1（migration の適用と状態 C）は達成。条件2（定義の一致と checksum の一致）は未検証。
+- **状態 C の扱い:** 状態 C は、最後に確認した時点（Step 3-12B-3 の F2）の結果である。それ以降、DB に接続して状態を確かめていない。
+
+#### Step 3-12B-4：migration 用の固定ゲートの無効化（実施済み。commit `d87bc9a`）
+
+- `scripts/testdb-migrate.mts` の `liveDatabase` を、固定の `LIVE_DATABASE_DISABLED` に戻した（`d87bc9a`。`test: restore disabled migration gate after test DB setup`。親は `959044a`）。
+- 通常テスト33ファイル・1,358件成功。DB の操作・migration の再実行は行っていない。
+- Step 3-12B-1 の「固定ゲートは有効」の記録は、その時点の事実として残す。
+
+#### Step 3-12B-5A・5B：checksum と schemaDiff の検証機能（実施済み。実DBでの検証は未実施）
+
+- **5A（`e08f7e1`。`test: add read-only migration checksum verification`）:** `lib/testing/migrationChecksum.ts`。ローカルの `migration.sql` のバイト列の SHA-256 と、`_prisma_migrations.checksum` の厳密な一致で判定する（Prisma の寛容な照合（改行の入れ替え・旧形式）は不一致として扱う）。読み取りは `BEGIN READ ONLY` の中の SELECT だけ。この commit の時点では実行経路に未接続。
+- **5B（`c2103de`。`test: add guarded Prisma schema diff verification`）:** `lib/testing/schemaDiff.ts`。固定のコマンド `migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code --config prisma.config.ts`（`shell: false`、`--script`・`--output`・migrations 系の入力なし）、終了コードの分類（0 差分なし・1 エラー・2 差分あり・その他は想定外。起動失敗・タイムアウト・シグナルは別扱い）、専用ゲート `SCHEMA_DIFF_DISABLED`。Prisma の schema engine は自分で別の接続を作り、`migrate diff` が書き込みをしないことはインストール済みのコードでは確認できない。そのため、接続するロールに CREATE・DB の所有権があれば `READ_ONLY_NOT_ENFORCED` で Prisma CLI を起動しない（今の `katana_test_user` では必ず停止する）。Prisma CLI の起動・実DBでの検証は未実施。通常テスト35ファイル・1,431件成功。
+- PostgreSQL 固有の定義（CHECK 制約・トリガー・関数・ビュー・RLS・拡張・enum の値の順序・部分インデックス）は `migrate diff` では比べられない。後続の工程で、読み取り専用のカタログの照会で補う案を報告済み（未実装）。
+
+#### Step 3-12B-5C-1・5C-2：checksum 専用コマンドと、checksum の接続のサーバーの識別（実施済み。実DBでの照合は未実施）
+
+- **5C-1（`3095887`。`test: add guarded test DB checksum verification command`）:** `npm run testdb:checksums`（`scripts/testdb-checksums.mts`・`lib/testing/testDbChecksums.ts`）。
+  - 引数なしは予行（事前の検証と、ローカルの8件の checksum の計算だけ。Docker・DB に触れない）。`--verify` は、専用の固定ゲート `CHECKSUM_DATABASE_DISABLED`（無効）で、Docker・DB の前に `CHECKSUM_LIVE_DISABLED` で止まる。それ以外の引数（`--apply` を含む）は拒否する。
+  - Prisma CLI・子プロセス・migration 用と schemaDiff 用のゲートを参照しない（migration を適用できない）。
+  - 手順：事前検証 → D1 → F1（本人確認・状態 C・適用済みの8件の一致）→ D2 → checksum の照合 → F2 → D3 → 最終判定。`EXPECTED_MIGRATION_COUNT = 8`。
+  - 通常テスト36ファイル・1,457件成功。
+- **5C-2（`58d1168`。`test: verify checksum connection server identity`）:** checksum を読む接続の、同じ読み取り専用のトランザクションの中で、`BEGIN READ ONLY` → `search_path` の固定 → `transaction_read_only = on` と本人確認4項目 → サーバーの識別情報（`readServerIdentity`）→ 照合（`pinnedServerMismatches`）→ `_prisma_migrations` の SELECT → ROLLBACK → 接続の解放。
+  - 照合：IP が D1 のコンテナの IP と一致（この接続では必須。F1・F2・migration では記録だけの方針は変えていない）、ポート 5432、起動時刻が D1 の `StartedAt` の範囲内、3項目が F1 と完全に一致。
+  - 不一致・読めない値（NULL・不正な型）・SQL の失敗では、履歴を読まずに停止する。checksum の接続で失敗しても F2・D3 は行い、F2・D3 の異常を先に報告する。F2・D3 が失敗したら、checksum が一致していても成功にしない。
+  - 通常テスト36ファイル・1,474件成功。
+- **固定ゲート（2026-11-09 時点）:** migration 用 `LIVE_DATABASE_DISABLED`、checksum 用 `CHECKSUM_DATABASE_DISABLED`、schemaDiff 用 `SCHEMA_DIFF_DISABLED`。3つとも無効。
+- **実DBでの checksum の照合・schemaDiff は未実施。** 条件2は未達成。
+
+#### 次工程（checksum の実DB照合）の開始条件
+
+1. checksum の実DBでの照合は、まだ承認されていない。checksum ゲートの有効化は、別の承認とする。
+2. 有効化の前に、現在の Docker・DB の識別情報と状態 C を、その時点で新たに確かめる（過去の記録で代えない）。
+3. checksum の接続の IP は、コンテナの IP との一致を必須とする。不一致なら、ガードを緩めずに停止して報告する。
+4. checksum の8件の完全な一致を確かめるまで、条件2は未達成とする。
+5. checksum の照合の後は、checksum ゲートを再び無効（`CHECKSUM_DATABASE_DISABLED`）に戻す（コードの変更と commit。個別の承認）。
+6. schemaDiff の専用ロール（読み取り専用）の設計と、実DBでの検証は、別の工程とする。
+7. TOCTOU のリスクは残る（F1・checksum・F2 は別の接続。checksum の接続は D1・F1 と同じサーバーであることを確かめるが、それ以外の入れ替わりは F2・D3 で事後に検出するだけ）。`katana_test_user` は CREATE 権限と DB の所有権を持ち、書き込みはトランザクションの `READ ONLY` だけで防いでいる。
 
 ### Step 3-0：読み取りだけの事前確認（実施済み。Dockerの記録は未記録）
 
@@ -2332,6 +2401,7 @@ npm run test:integration ─► 専用runner
 - **完了条件:** 8件が適用済みで、差分がない。
 - **承認が必要な操作:** migrationの実行、Prisma CLI（`migrate diff`）の実行。
 - **停止条件:** 適用に失敗する。差分がある。接続先の表示が `127.0.0.1:5434/katana_test` ではない。
+- **2026-11-09 追記:** 適用は Step 3-12B-3 で実施済み。差分（`migrate diff`）と checksum の照合は未実施。実施の記録は3-Aの「Step 3-12B-2」以降。
 
 ### Step 3-13：ドキュメント
 
@@ -2388,7 +2458,7 @@ npm run test:integration ─► 専用runner
 
 | ID | 内容 | 状態・対応 |
 |---|---|---|
-| R1 | migrationを空のDBに適用できるか、`schema.prisma` と一致するか | 未検証（Step 3-12） |
+| R1 | migrationを空のDBに適用できるか、`schema.prisma` と一致するか | 適用は確認済み（Step 3-12B-3。8件・状態 C。ユーザーの報告に基づく記録で、最後に確認した時点の状態）。`schema.prisma` との定義の一致（`migrate diff`）と checksum の実DB照合は未検証（Step 3-12B-5 以降） |
 | R2 | 開発用DBの `_prisma_migrations` と、手元のファイルのchecksumが一致するか | 解消（Step 3-0で一致を確認） |
 | R3 | `KATANA_DB_TARGET=test` を設定せずにPrisma CLIを直接実行すると、開発用DBに接続する | 残余リスク（2-7）。運用ルールとCLAUDE.mdで対処する。Step 3-8Bで、テストDBに見えるURLをテストモードなしで使う場合は拒否するようにした（ほかの経路は3-Aの3-8B） |
 | R4 | `prisma/seed.ts` と Prisma Studio はガードの外にある | 範囲外 |
@@ -2411,18 +2481,18 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：Step 3-12B-1 の PLAN の記録の commit（`docs: record Step 3-12B-1 gate enablement and verification`。親は `608c92a`（`test: enable guarded test database migration apply gate`。Step 3-12B-1））
+   - HEAD：PLAN の記録の commit（`docs: record test DB migration and checksum verification progress`。親は `58d1168`（`test: verify checksum connection server identity`。Step 3-12B-5C-2））
    - 変更済み（未commit）：なし
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
    - `.env.test` はユーザーが作成済み（`-rw-------`。中身は表示しない）
    - テストDBのコンテナ `katana-test-db` が起動している場合がある（Step 3-11。データは tmpfs）。`docker ps -a` で確かめる
 3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。Step 3-11 で、ユーザーがテストDBを初めて起動した（R7 は今回の起動で合格。3-Aの「Step 3-11」）。`down` はまだ実行していない。Step 3-11の実施前レビューの結果（3-Aの「Step 3-11の実施前レビュー」。前提条件の表 C、R7 の D、失敗時の E、DB検証の F、TOCTOU の G、`.env.test` の I）を先に読む。レビューの時点では Docker のデーモンが停止中だったが、Step 3-11A でユーザーが Docker Desktop を起動し、前提条件 C の2〜9 を満たすことを確かめた（3-Aの「Step 3-11A」）。初期化スクリプトのログ漏洩の対策も 3-11A で済んだ。初回の up の後に問題が起きたときは、自動で削除せず、読み取りで調べて報告し、個別の承認を待つ（3-11A で確定）。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
-   - Step 3-12B-2：migration の実行。**固定ゲートは `608c92a` で有効**なので、`--apply` は個別の承認の後に1回だけ。開始前条件は3-Aの「Step 3-12B-1」の「Step 3-12B-2 の開始前条件」（現在の状態を新たに確かめることから始める）
-   - 状態 C の後の、定義の一致（`migrate diff`）と checksum の検証の方法の決定と実装（別工程）
-   - 完了後に、固定ゲートを無効に戻すコード変更（個別の承認）
+   - （2026-11-09 更新）migration は Step 3-12B-3 で適用済み（最後に確認した時点で状態 C）。3つの固定ゲート（migration・checksum・schemaDiff）はすべて無効。
+   - checksum の実DB照合：開始条件は3-Aの「次工程（checksum の実DB照合）の開始条件」。現在の Docker・DB の状態を新たに確かめ、checksum ゲートの有効化・実行・無効化は、それぞれ個別の承認
+   - schemaDiff の読み取り専用ロールの設計（DB の変更を伴う。設計の提示と承認が先）と、PostgreSQL 固有の定義のカタログでの照合
    - `reset` の実装（本人確認の後）
 
-   接続後の本人確認と状態の判定は Step 3-10B で実装して commit し、Step 3-10C で migration 用スクリプトの流れに組み込んだ。Step 3-12B-1（`608c92a`）で、スクリプトの migration 用の許可を固定で有効にした。`--apply` を付けたときだけ migration に進み、予行・`--check`・`--verify` は Prisma CLI を起動しない。globalSetup には組み込んでおらず、強制停止のまま（初回の実DB接続で確かめることは、3-Aの3-10B・3-10Cの記録）。指示されたStep以外には着手しない。
+   接続後の本人確認と状態の判定は Step 3-10B で実装して commit し、Step 3-10C で migration 用スクリプトの流れに組み込んだ。Step 3-12B-1（`608c92a`）で、スクリプトの migration 用の許可を固定で有効にし、Step 3-12B-4（`d87bc9a`）で固定の `LIVE_DATABASE_DISABLED` に戻した（今は `--apply` でも Docker・DB の前に止まる）。許可が有効なときは、`--apply` を付けたときだけ migration に進み、予行・`--check`・`--verify` は Prisma CLI を起動しない。globalSetup には組み込んでおらず、強制停止のまま（初回の実DB接続で確かめることは、3-Aの3-10B・3-10Cの記録）。指示されたStep以外には着手しない。
 4. Stepが終わったら報告し、ユーザーの確認を得たうえで、次の2つを更新してからセッションを終える。
    - 3章の「3-A. 実施結果」（結果、設計との違い、未検証の事項、次のStepへの申し送り）
    - 本節の手順2の想定と、手順3の次のStep
