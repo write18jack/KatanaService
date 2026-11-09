@@ -344,7 +344,8 @@ const KNOWN_DB_INTEGRATION_TEST_FILES = [
 ];
 // Step 3-12B-5A で lib/testing/migrationChecksum.test.ts を追加（33 → 34）
 // Step 3-12B-5B で lib/testing/schemaDiff.test.ts を追加（34 → 35）
-const EXPECTED_UNIT_TEST_COUNT = 35;
+// Step 3-12B-5C-1 で lib/testing/testDbChecksums.test.ts を追加（35 → 36）
+const EXPECTED_UNIT_TEST_COUNT = 36;
 const INTEGRATION_TEST_GLOB = "**/*.integration.test.{ts,tsx}";
 const TEST_FILE = /\.test\.tsx?$/;
 const INTEGRATION_TEST_FILE = /\.integration\.test\.tsx?$/;

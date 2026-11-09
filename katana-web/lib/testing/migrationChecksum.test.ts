@@ -314,9 +314,11 @@ describe("migrationChecksum の静的な確認（ソース）", () => {
     expect(MIGRATION_CHECKSUM_SQL).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|CREATE|ALTER|GRANT)\b/i);
   });
 
-  it("まだどのスクリプトからも呼ばない（実DBでの実行経路は追加していない。Step 3-12B-5C で承認の後に組み込む）", () => {
-    for (const file of ["scripts/testdb-migrate.mts", "scripts/testdb.mts", "scripts/test-integration.mts", "lib/testing/testDbMigrate.ts", "lib/testing/integrationGlobalSetup.ts"]) {
+  it("migration の適用・統合テストの経路からは呼ばない（呼ぶのは、checksum 専用の scripts/testdb-checksums.mts と lib/testing/testDbChecksums.ts だけ。Step 3-12B-5C-1）", () => {
+    for (const file of ["scripts/testdb-migrate.mts", "scripts/testdb.mts", "scripts/test-integration.mts", "lib/testing/testDbMigrate.ts", "lib/testing/integrationGlobalSetup.ts", "lib/testing/schemaDiff.ts"]) {
       expect(readFileSync(path.join(REPO_ROOT, file), "utf8")).not.toContain("migrationChecksum");
     }
+    expect(readFileSync(path.join(REPO_ROOT, "scripts/testdb-checksums.mts"), "utf8")).toContain('from "../lib/testing/migrationChecksum.ts"');
+    expect(readFileSync(path.join(REPO_ROOT, "lib/testing/testDbChecksums.ts"), "utf8")).toContain('from "./migrationChecksum.ts"');
   });
 });

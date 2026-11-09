@@ -14,6 +14,7 @@
     "testdb:migrate": "node scripts/testdb-migrate.mts",
     "testdb:migrate:check": "node scripts/testdb-migrate.mts --check",
     "testdb:verify": "node scripts/testdb-migrate.mts --verify",
+    "testdb:checksums": "node scripts/testdb-checksums.mts",
     "testdb:check": "node scripts/testdb.mts --check",
     "testdb:status": "node scripts/testdb.mts --status",
     "testdb:identity": "node scripts/testdb.mts --identity-check",
