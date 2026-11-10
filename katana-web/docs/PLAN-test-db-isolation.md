@@ -384,6 +384,10 @@ npm run test:integration ─► 専用runner
 | 3-12B-5B | schemaDiff の検証機能（`lib/testing/schemaDiff.ts`。固定の `migrate diff` コマンド・終了コードの分類・専用ゲート `SCHEMA_DIFF_DISABLED`。読み取り専用を保証できない権限なら `READ_ONLY_NOT_ENFORCED` で停止）。通常テスト35ファイル・1,431件成功。実行経路には未接続。Prisma CLI の起動・実DBでの検証は未実施 | `c2103de`（`test: add guarded Prisma schema diff verification`。親は `e08f7e1`） |
 | 3-12B-5C-1 | checksum 専用コマンド（`npm run testdb:checksums`、`scripts/testdb-checksums.mts`、`lib/testing/testDbChecksums.ts`）。引数なしは予行、`--verify` は専用ゲート `CHECKSUM_DATABASE_DISABLED`（無効）で Docker・DB の前に停止。手順は事前検証 → D1 → F1（状態 C・8件）→ D2 → checksum → F2 → D3。通常テスト36ファイル・1,457件成功。実DBでの照合は未実施 | `3095887`（`test: add guarded test DB checksum verification command`。親は `c2103de`） |
 | 3-12B-5C-2 | checksum の接続でのサーバーの識別：同じ読み取り専用のトランザクションの中で、本人確認4項目の後に `inet_server_addr()`・`inet_server_port()`・`pg_postmaster_start_time()` を読み、D1（IP の一致は必須・ポート 5432・起動時刻の範囲）と F1（3項目の完全一致）と照合。不一致なら履歴を読まずに停止。F2・D3 は維持。通常テスト36ファイル・1,474件成功。3つの固定ゲートはすべて無効。実DBでの照合は未実施 | `58d1168`（`test: verify checksum connection server identity`。親は `3095887`） |
+| 3-12B-5C-3A | 実DBの事前再確認（2026-11-09。当該工程の報告に基づく記録）：`testdb:status`・`testdb:identity`・`testdb:verify` による読み取り専用の確認が成功。Docker・PostgreSQL の識別情報は 2026-11-08 の再構築後の記録と一致（コンテナID `591ffba8e050…`、`172.18.0.2:5432`）。状態 C・適用済み8件・テーブルは空。前後の識別情報が一致。Docker・DB の変更操作なし | なし（読み取りだけ。コードの変更なし） |
+| 3-12B-5C-3B | checksum 専用ゲートの一時有効化：`scripts/testdb-checksums.mts` の `checksumDatabase` を固定の `{ mode: "enabled-read-only" }` に（静的テストの期待値も合わせて変更）。migration・schemaDiff のゲートは無効のまま。通常テスト36ファイル・1,474件成功。この時点では実DBでの照合は未実施。push・merge なし | `242be9b`（`test: temporarily enable read-only checksum verification`。親は `1f06c7c`） |
+| 3-12B-5C-3C | checksum の実DB照合：`npm run testdb:checksums -- --verify` を1回だけ実行し、終了コード0。ローカル8件・DB 8件、名前と SHA-256 が8件すべて完全一致。不足・余分・重複・未完了・ロールバック済み・不正な行は0件。D1・F1・D2・F2・D3 が成功、照合の前後とも状態 C。Docker・DB の変更操作なし。**条件2-A は達成**（条件2-B は未検証） | なし（読み取り専用の照合。コードの変更なし） |
+| 3-12B-5C-4 | checksum 専用ゲートを固定の `CHECKSUM_DATABASE_DISABLED` に戻した（静的テストは `1f06c7c` の内容に戻した。コメントの整合も修正）。migration・schemaDiff のゲートは無効のまま。checksum の計算・照合のロジックは変更なし。通常テスト36ファイル・1,474件成功、tsc・ESLint・静的検査が成功。Docker・DB の操作なし。push・merge なし | `fc45fc0`（`test: disable live checksum verification after successful audit`。親は `242be9b`） |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -2274,6 +2278,92 @@ npm run test:integration ─► 専用runner
 6. schemaDiff の専用ロール（読み取り専用）の設計と、実DBでの検証は、別の工程とする。
 7. TOCTOU のリスクは残る（F1・checksum・F2 は別の接続。checksum の接続は D1・F1 と同じサーバーであることを確かめるが、それ以外の入れ替わりは F2・D3 で事後に検出するだけ）。`katana_test_user` は CREATE 権限と DB の所有権を持ち、書き込みはトランザクションの `READ ONLY` だけで防いでいる。
 
+（2026-11-10 追記）上の開始条件は、Step 3-12B-5C-3A〜5C-4 で満たした（2・3 は 5C-3A と 5C-3C の直前の確認、4 は 5C-3C、5 は 5C-4）。6・7 は未解決のまま、下の「条件2の整理」に引き継ぐ。
+
+#### Step 3-12B-5C-3A：実DBの事前再確認（実施済み。2026-11-09。コードの変更なし）
+
+- **記録の根拠:** 当該工程（5C-3B の前）で取得した結果である。この記録を追加した 2026-11-10 の時点で、新たに確認したものではない（Docker・DB に接続していない）。
+- `npm run testdb:status`・`npm run testdb:identity`・`npm run testdb:verify` による読み取り専用の確認が成功した。
+- Docker と PostgreSQL の識別情報は、2026-11-08 の再構築後の記録（「Step 3-12B-2」の表）と一致した。
+  - コンテナID：`591ffba8e050d526fe5449d2a6c768cac2bc0105fd66c5520abe72bf84b06e3f`
+  - PostgreSQL の IP：`172.18.0.2`（コンテナの IP と一致）
+  - PostgreSQL のポート：`5432`
+- 状態 C、適用済みの migration 8件、テーブルは空。
+- 検証の前後で、識別情報が一致した。
+- Docker・DB への変更操作はなかった。
+
+#### Step 3-12B-5C-3B：checksum ゲートの一時有効化（実施済み。2026-11-09。commit `242be9b`）
+
+- commit：`242be9b`（`test: temporarily enable read-only checksum verification`。親は `1f06c7c`）。
+- `scripts/testdb-checksums.mts` の `checksumDatabase` を、既存の型 `ChecksumDatabaseAccess` で定義済みの `{ mode: "enabled-read-only" }` に一時的に変更した。ソースの固定値のままで、環境変数・CLI 引数による切り替えは追加していない。未使用になった `CHECKSUM_DATABASE_DISABLED` の import を削除した。
+- ゲートの行を固定文字列で確かめる静的テスト（`lib/testing/testDbChecksums.test.ts`）の期待値だけを変更した。ほかの静的検査（argv・env を各1回だけ使う、`--apply`・`child_process`・migration・schemaDiff を参照しない）は変更していない。
+- migration 用（`LIVE_DATABASE_DISABLED`）・schemaDiff 用（`SCHEMA_DIFF_DISABLED`）のゲートは無効のまま。
+- 通常テスト36ファイル・1,474件成功（失敗・スキップ0件）。tsc・ESLint・`git diff --check` が成功。
+- この時点では、checksum の実DB照合は未実施。push・merge なし。
+
+#### Step 3-12B-5C-3C：checksum の実DB照合（実施済み。2026-11-09。コードの変更なし）
+
+- **実行の直前の確認（同じ工程で、新たに読み取った）:** `testdb:status`・`testdb:identity`・`testdb:verify` を各1回（すべて終了コード0）。
+  - Docker：context `desktop-linux`、`katana-test-db` は running・healthy、`RestartCount` 0、コンテナID・`StartedAt`・ネットワークID・IP `172.18.0.2` が「Step 3-12B-2」の表と一致、`127.0.0.1:5434 -> 5432`、データ領域は tmpfs、開発用コンテナ `katana-db` なし、開発用ボリュームを使うコンテナなし。
+  - DB：`katana_test`、`current_user = session_user = katana_test_user`、DB のコメント `katana-test-db`、`search_path` は `pg_catalog` に固定。状態 C（8件適用済み・テーブルは空）。`inet_server_addr()` `172.18.0.2`、`inet_server_port()` `5432`、`pg_postmaster_start_time()` `2026-11-08T00:41:30.798895Z`（`StartedAt` との差は約 +0.64秒で範囲内）。
+- **実行:** `npm run testdb:checksums -- --verify` を1回だけ実行した。`NODE_TLS_REJECT_UNAUTHORIZED` は、実行したシェルの中だけで unset した（永続的な設定の変更なし）。終了コード0。
+- **成功時の出力（そのまま）:**
+  - `all 8 migration checksums match exactly (read-only; nothing was changed).`
+  - `identity checks D1/F1/D2/F2/D3 passed; state C before and after.`
+- **検証の結果:**
+  - ローカルの migration SQL：8件。DB の migration の履歴：8件。migration の名前：完全一致。
+  - SHA-256 checksum：8件すべて完全一致。
+  - 不足0件・余分0件・重複0件・未完了0件・ロールバック済み0件・不正な履歴の行0件。
+  - D1・F1・D2・F2・D3：成功。照合の前後とも状態 C。
+  - checksum を読む接続の本人確認・サーバーの識別（IP がコンテナの IP と一致・ポート 5432・起動時刻が D1 の範囲内・F1 と完全に一致）：成功。
+  - 読み取り専用のトランザクション（`BEGIN READ ONLY`・`transaction_read_only = on`）・ROLLBACK・接続の解放：成功の条件を満たした。
+  - Docker・DB への変更操作はなかった。
+- **確認の方法についての注記:** スクリプトの成功時の出力は上の2行の要約だけである。checksum の接続の本人確認・サーバーの識別、不足・余分・重複・未完了・ロールバック済み・不正な行の各件数、ROLLBACK・接続の解放は、個別の出力がない。これらは、終了コード0と、コード上の成功の条件（どれか1つでも失敗・不一致・1件以上なら例外になり、終了コード0にならない。`lib/testing/testDbChecksums.ts`・`lib/testing/migrationChecksum.ts`・`lib/testing/integrationDatabaseCheck.ts` の `runReadOnlyCheck`）から確認した。
+- checksum の実際の値・接続URL・パスワードは、表示も記録もしていない。
+- **完了条件:** **条件2-A（migration の履歴とローカルの SQL の checksum の整合）は達成した。** 条件2-B（定義の一致）は未検証（下の「条件2の整理」）。
+- この結果は、照合を実行した時点の整合を示すもので、それ以降の DB の状態を保証しない。
+
+#### Step 3-12B-5C-4：checksum ゲートの再無効化（実施済み。2026-11-09。commit `fc45fc0`）
+
+- commit：`fc45fc0`（`test: disable live checksum verification after successful audit`。親は `242be9b`）。
+- `scripts/testdb-checksums.mts` の `checksumDatabase` を、固定の `CHECKSUM_DATABASE_DISABLED` に戻した（import も復元）。スクリプトのコードの部分は `1f06c7c` と同じで、違いはコメント（経緯の1行など）だけ。
+- 静的テスト（`lib/testing/testDbChecksums.test.ts`）は `1f06c7c` の内容に戻した（無効のゲートの固定文字列を確かめる）。
+- `lib/testing/migrationChecksum.ts` のコメント2か所を修正した（ゲート `checksumDatabase` と無効の値の定数名の混同、「Step 3-12B-5C-1 では無効」という古い記述）。処理は変更していない。
+- migration・schemaDiff のゲートは無効のまま。checksum の計算・照合のロジックは変更なし。
+- 通常テスト36ファイル・1,474件成功（失敗・スキップ0件）。tsc・ESLint・`git diff --check`・静的検査が成功。
+- Docker・DB の操作なし。push・merge なし。
+- **コードの基準の HEAD は `fc45fc0`**（この節を追記した PLAN の commit は、その子）。
+- **固定ゲート（2026-11-09 の 5C-4 の後）:** migration 用 `LIVE_DATABASE_DISABLED`、checksum 用 `CHECKSUM_DATABASE_DISABLED`、schemaDiff 用 `SCHEMA_DIFF_DISABLED`。3つとも無効。
+
+#### 条件2の整理（2026-11-10）
+
+これまでの記録の「条件2（定義の一致と checksum の一致）」を、次の2つに分ける。以前の記録の「条件2は未検証・未達成」は、その時点の事実として残す。
+
+- **条件2-A：完了。** ローカルの migration SQL と、DB に記録された migration の履歴の checksum が、8件すべて一致した（Step 3-12B-5C-3C）。
+- **条件2-B：未完了。** `prisma/schema.prisma` と実DBの定義の一致。今後の検証の対象：
+  - 列名・データ型
+  - NULL の可否
+  - 既定値
+  - 主キー・UNIQUE
+  - インデックス
+  - 外部キー
+  - enum の値・並び順
+  - CHECK など、Prisma の `migrate diff` の比較の対象外の DB 固有の定義
+
+**残余リスク（2026-11-10 時点）:**
+
+- schemaDiff 用の DB ロール（読み取り専用）は未作成。
+- `katana_test_user` は DB の所有者で、CREATE 権限を持つ（schemaDiff は今のロールでは `READ_ONLY_NOT_ENFORCED` で必ず停止する）。
+- Prisma CLI（schema engine）が自分で作る接続を、読み取り専用に制限する方法は未確定。
+- TOCTOU のリスクは残る（上の開始条件の7）。
+- checksum の結果は、実行した時点の整合を示すもので、将来の DB の状態を保証しない。
+- 統合テストは未実施。
+
+#### 次工程（Step 3-12B-5C-5）の方針
+
+- Step 3-12B-5C-5 として、schemaDiff 用の読み取り専用ロールと、実行経路の安全設計を行う（設計の提示が先）。
+- 次工程のコードの変更・DB の変更（ロールの作成・権限の変更を含む）・Prisma CLI の起動は、いずれも別途の承認が必要。
+
 ### Step 3-0：読み取りだけの事前確認（実施済み。Dockerの記録は未記録）
 
 - **作業内容:**
@@ -2422,6 +2512,7 @@ npm run test:integration ─► 専用runner
 - **承認が必要な操作:** migrationの実行、Prisma CLI（`migrate diff`）の実行。
 - **停止条件:** 適用に失敗する。差分がある。接続先の表示が `127.0.0.1:5434/katana_test` ではない。
 - **2026-11-09 追記:** 適用は Step 3-12B-3 で実施済み。差分（`migrate diff`）と checksum の照合は未実施。実施の記録は3-Aの「Step 3-12B-2」以降。
+- **2026-11-10 追記:** checksum の実DB照合は Step 3-12B-5C-3C で実施済み（8件すべて完全一致。条件2-A は達成）。差分（`migrate diff`。条件2-B）は未実施。3-Aの「条件2の整理」。
 
 ### Step 3-13：ドキュメント
 
@@ -2478,7 +2569,7 @@ npm run test:integration ─► 専用runner
 
 | ID | 内容 | 状態・対応 |
 |---|---|---|
-| R1 | migrationを空のDBに適用できるか、`schema.prisma` と一致するか | 適用は確認済み（Step 3-12B-3。8件・状態 C。ユーザーの報告に基づく記録で、最後に確認した時点の状態）。`schema.prisma` との定義の一致（`migrate diff`）と checksum の実DB照合は未検証（Step 3-12B-5 以降） |
+| R1 | migrationを空のDBに適用できるか、`schema.prisma` と一致するか | 適用は確認済み（Step 3-12B-3。8件・状態 C。ユーザーの報告に基づく記録で、最後に確認した時点の状態）。`schema.prisma` との定義の一致（`migrate diff`）と checksum の実DB照合は未検証（Step 3-12B-5 以降）。（2026-11-10 追記）checksum の実DB照合は Step 3-12B-5C-3C で8件すべて完全一致（条件2-A 達成。実行した時点の結果）。`schema.prisma` との定義の一致（条件2-B）は未検証 |
 | R2 | 開発用DBの `_prisma_migrations` と、手元のファイルのchecksumが一致するか | 解消（Step 3-0で一致を確認） |
 | R3 | `KATANA_DB_TARGET=test` を設定せずにPrisma CLIを直接実行すると、開発用DBに接続する | 残余リスク（2-7）。運用ルールとCLAUDE.mdで対処する。Step 3-8Bで、テストDBに見えるURLをテストモードなしで使う場合は拒否するようにした（ほかの経路は3-Aの3-8B） |
 | R4 | `prisma/seed.ts` と Prisma Studio はガードの外にある | 範囲外 |
@@ -2501,15 +2592,15 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：PLAN の記録の commit（`docs: record test DB migration and checksum verification progress`。親は `58d1168`（`test: verify checksum connection server identity`。Step 3-12B-5C-2））
+   - HEAD：PLAN の記録の commit（`docs: record successful test DB checksum verification`。親は `fc45fc0`（`test: disable live checksum verification after successful audit`。Step 3-12B-5C-4））
    - 変更済み（未commit）：なし
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
    - `.env.test` はユーザーが作成済み（`-rw-------`。中身は表示しない）
    - テストDBのコンテナ `katana-test-db` が起動している場合がある（Step 3-11。データは tmpfs）。`docker ps -a` で確かめる
 3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。Step 3-11 で、ユーザーがテストDBを初めて起動した（R7 は今回の起動で合格。3-Aの「Step 3-11」）。`down` はまだ実行していない。Step 3-11の実施前レビューの結果（3-Aの「Step 3-11の実施前レビュー」。前提条件の表 C、R7 の D、失敗時の E、DB検証の F、TOCTOU の G、`.env.test` の I）を先に読む。レビューの時点では Docker のデーモンが停止中だったが、Step 3-11A でユーザーが Docker Desktop を起動し、前提条件 C の2〜9 を満たすことを確かめた（3-Aの「Step 3-11A」）。初期化スクリプトのログ漏洩の対策も 3-11A で済んだ。初回の up の後に問題が起きたときは、自動で削除せず、読み取りで調べて報告し、個別の承認を待つ（3-11A で確定）。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
    - （2026-11-09 更新）migration は Step 3-12B-3 で適用済み（最後に確認した時点で状態 C）。3つの固定ゲート（migration・checksum・schemaDiff）はすべて無効。
-   - checksum の実DB照合：開始条件は3-Aの「次工程（checksum の実DB照合）の開始条件」。現在の Docker・DB の状態を新たに確かめ、checksum ゲートの有効化・実行・無効化は、それぞれ個別の承認
-   - schemaDiff の読み取り専用ロールの設計（DB の変更を伴う。設計の提示と承認が先）と、PostgreSQL 固有の定義のカタログでの照合
+   - （2026-11-10 更新）checksum の実DB照合は Step 3-12B-5C-3C で完了（8件すべて完全一致。条件2-A 達成）。ゲートは 5C-4（`fc45fc0`）で無効に戻した。3つの固定ゲートはすべて無効。条件2-B（定義の一致）は未完了。3-Aの「条件2の整理」
+   - Step 3-12B-5C-5：schemaDiff の読み取り専用ロールの設計と実行経路の安全設計（DB の変更を伴う。設計の提示と承認が先。コードの変更・DB の変更・Prisma CLI の起動は、それぞれ別途の承認）と、PostgreSQL 固有の定義のカタログでの照合
    - `reset` の実装（本人確認の後）
 
    接続後の本人確認と状態の判定は Step 3-10B で実装して commit し、Step 3-10C で migration 用スクリプトの流れに組み込んだ。Step 3-12B-1（`608c92a`）で、スクリプトの migration 用の許可を固定で有効にし、Step 3-12B-4（`d87bc9a`）で固定の `LIVE_DATABASE_DISABLED` に戻した（今は `--apply` でも Docker・DB の前に止まる）。許可が有効なときは、`--apply` を付けたときだけ migration に進み、予行・`--check`・`--verify` は Prisma CLI を起動しない。globalSetup には組み込んでおらず、強制停止のまま（初回の実DB接続で確かめることは、3-Aの3-10B・3-10Cの記録）。指示されたStep以外には着手しない。
