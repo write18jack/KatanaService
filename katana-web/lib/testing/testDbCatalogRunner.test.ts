@@ -356,9 +356,9 @@ describe("静的な確認（ソース）", () => {
       .replace(/^\s*\/\/.*$/gm, "")
       .replace(/\s\/\/ .*$/gm, "");
 
-  it("スクリプトのゲートは固定の読み取り専用の有効値（Step 3-12B-5D-2 で一時的に有効化）で、引数・環境変数から決めない", () => {
+  it("スクリプトのゲートは固定の CATALOG_AUDIT_DATABASE_DISABLED（Step 3-12B-5D-4 で戻した）で、引数・環境変数から決めない", () => {
     const source = code("scripts/testdb-catalog.mts");
-    expect(source.split("\n").filter((line) => line.includes("catalogDatabase"))).toEqual(['  catalogDatabase: { mode: "enabled-read-only" },']);
+    expect(source.split("\n").filter((line) => line.includes("catalogDatabase"))).toEqual(["  catalogDatabase: CATALOG_AUDIT_DATABASE_DISABLED,"]);
     expect(source.match(/process\.argv/g)).toHaveLength(1);
     expect(source).toMatch(/^ {2}argv: process\.argv\.slice\(2\),$/m);
     expect(source.match(/process\.env/g)).toHaveLength(1);
