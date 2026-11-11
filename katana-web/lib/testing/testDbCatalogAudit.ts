@@ -26,7 +26,8 @@ import {
 /**
  * テストDBの PostgreSQL カタログの読み取り専用の検査（Step 3-12B-5C-5B。条件2-B の補助）。
  *
- * **このモジュールは、どのスクリプトからも呼ばない。** 実DBでの実行は、承認を得た後続の工程で組み込む。
+ * 呼び出し元は、カタログの監査専用の経路（lib/testing/testDbCatalogRunner.ts・scripts/testdb-catalog.mts）だけ（Step 3-12B-5C-5C）。
+ * その経路の固定のゲート（CATALOG_AUDIT_DATABASE_DISABLED）が無効の間は、実DBでは実行されない。schemaDiff・checksum・migration の経路からは呼ばない。
  * DB への接続は呼び出し側が `connect` として渡す（このファイルは DB ドライバ・Docker・子プロセスを読み込まない）。
  *
  * 目的は3つ。Prisma の `migrate diff` の代わり（Prisma schema との完全な比較）ではない:
@@ -1008,7 +1009,7 @@ export function assertCatalogFingerprintUnchanged(before: CatalogFingerprint, af
   throw new CatalogAuditError("FINGERPRINT_MISMATCH", `the catalog definition changed between the two observations: ${detail || "hash differs"}.`);
 }
 
-// ---- 実行（スクリプトには未接続） ----
+// ---- 実行（lib/testing/testDbCatalogRunner.ts から、固定のゲートが有効なときだけ呼ぶ） ----
 
 export type CatalogDefinitionAuditInput = {
   /** `.env.test` の検証済みの接続URL */
