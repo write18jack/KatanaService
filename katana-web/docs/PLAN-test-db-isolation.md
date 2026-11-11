@@ -388,6 +388,12 @@ npm run test:integration ─► 専用runner
 | 3-12B-5C-3B | checksum 専用ゲートの一時有効化：`scripts/testdb-checksums.mts` の `checksumDatabase` を固定の `{ mode: "enabled-read-only" }` に（静的テストの期待値も合わせて変更）。migration・schemaDiff のゲートは無効のまま。通常テスト36ファイル・1,474件成功。この時点では実DBでの照合は未実施。push・merge なし | `242be9b`（`test: temporarily enable read-only checksum verification`。親は `1f06c7c`） |
 | 3-12B-5C-3C | checksum の実DB照合：`npm run testdb:checksums -- --verify` を1回だけ実行し、終了コード0。ローカル8件・DB 8件、名前と SHA-256 が8件すべて完全一致。不足・余分・重複・未完了・ロールバック済み・不正な行は0件。D1・F1・D2・F2・D3 が成功、照合の前後とも状態 C。Docker・DB の変更操作なし。**条件2-A は達成**（条件2-B は未検証） | なし（読み取り専用の照合。コードの変更なし） |
 | 3-12B-5C-4 | checksum 専用ゲートを固定の `CHECKSUM_DATABASE_DISABLED` に戻した（静的テストは `1f06c7c` の内容に戻した。コメントの整合も修正）。migration・schemaDiff のゲートは無効のまま。checksum の計算・照合のロジックは変更なし。通常テスト36ファイル・1,474件成功、tsc・ESLint・静的検査が成功。Docker・DB の操作なし。push・merge なし | `fc45fc0`（`test: disable live checksum verification after successful audit`。親は `242be9b`） |
+| 3-12B-5C-5B | PostgreSQL のカタログの読み取り専用の監査の補助関数（`lib/testing/testDbCatalogAudit.ts`。DB 固有の定義・enum の値と順序の監査と、18区分のカタログの fingerprint）。この commit の時点では、どのスクリプトからも呼ばない。通常テスト37ファイル・1,533件成功。実DBでの実行は未実施 | `1a241ce`（`test: add guarded PostgreSQL catalog audit helpers`。親は `9b1f9ed`） |
+| 3-12B-5C-5C | カタログ監査の専用コマンド（`npm run testdb:catalog`、`scripts/testdb-catalog.mts`、`lib/testing/testDbCatalogRunner.ts`）。引数なしは予行、`--verify` は専用の固定ゲート `CATALOG_AUDIT_DATABASE_DISABLED`（無効）で Docker・DB の前に `CATALOG_AUDIT_LIVE_DISABLED` で止まる。`--apply`・未知の引数・重複は拒否。手順は D1 → F1 → D2 → 監査 → F2 → D3。通常テスト38ファイル・1,554件成功。実DBでの実行は未実施 | `b3ac3f7`（`test: add guarded PostgreSQL catalog audit command`。親は `1a241ce`） |
+| 3-12B-5D-1 | カタログ監査の予行と、Docker・状態 C の再検証（2026-11-11。HEAD `b3ac3f7`）：`npm run testdb:catalog`（引数なし）を1回、終了コード0。期待値はテーブル15件・enum 5件・migration 8件・DB 固有の定義「なし」（Docker・DB に接続せず、Prisma CLI も起動しない）。続けて `testdb:status`・`testdb:identity`・`testdb:verify` ×2・`testdb:identity` で、識別情報が「Step 3-12B-2」の表と一致、状態 C、前後で一致 | なし（コードの変更なし） |
+| 3-12B-5D-2 | catalog 専用ゲートの一時有効化：`scripts/testdb-catalog.mts` の `catalogDatabase` を固定の `{ mode: "enabled-read-only" }` に（静的テストの期待値も合わせて変更）。migration・checksum・schemaDiff のゲートは無効のまま。通常テスト38ファイル・1,554件成功。この時点では実DBでの監査は未実施。push・merge なし | `21de539`（`test: temporarily enable read-only catalog audit`。親は `b3ac3f7`） |
+| 3-12B-5D-3 | 実DBでのカタログ監査：`npm run testdb:catalog -- --verify` を1回だけ実行し、終了コード0・`passed`（failed・unverified なし）。D1・F1・D2・F2・D3 が成功、前後とも状態 C。DB 固有の定義は期待値と一致、enum 5件の値と順序が一致、fingerprint 18区分を取得。Docker・DB の変更操作なし。**条件2-B は一部だけ達成**（全体は未完了） | なし（読み取り専用の監査。コードの変更なし） |
+| 3-12B-5D-4 | catalog 専用ゲートを固定の `CATALOG_AUDIT_DATABASE_DISABLED` に戻した（コメントを除くコードは `b3ac3f7` と同じ。静的テストも戻した）。4つのゲートはすべて無効。通常テスト38ファイル・1,554件成功、tsc・ESLint・構文・静的検査が成功。Docker・DB の操作なし。push・merge なし | `f390846`（`test: disable live catalog audit after successful verification`。親は `21de539`） |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -2364,6 +2370,112 @@ npm run test:integration ─► 専用runner
 - Step 3-12B-5C-5 として、schemaDiff 用の読み取り専用ロールと、実行経路の安全設計を行う（設計の提示が先）。
 - 次工程のコードの変更・DB の変更（ロールの作成・権限の変更を含む）・Prisma CLI の起動は、いずれも別途の承認が必要。
 
+（2026-11-11 追記）Step 3-12B-5C-5 では、schemaDiff 用のロールより先に、PostgreSQL 固有の定義のカタログでの監査を実装した（5C-5B `1a241ce`・5C-5C `b3ac3f7`。3-A の表）。読み取り専用ロールと schemaDiff の実行経路は、まだ実装していない。
+
+#### Step 3-12B-5D-1：カタログ監査の予行と、Docker・状態 C の再検証（実施済み。2026-11-11。コードの変更なし）
+
+- **記録の根拠:** 当該工程（HEAD `b3ac3f7`。5D-2 の前）で取得した結果である。この記録を追加した Step 3-12B-5D-5 の時点で、新たに取得した値ではない（5D-5 では Docker・DB に接続していない）。
+- **予行:** `npm run testdb:catalog`（引数なし）を1回だけ実行し、終了コード0。
+  - リポジトリのファイルからの期待値の構築が成功した（`unsupported` なし）：テーブル15件、enum 5件（値と順序は migration SQL から）、migration SQL 8件、DB 固有の定義は「なし」。
+  - Docker・DB に接続していない。Prisma CLI を起動していない。接続URL・パスワードは表示されない（`password hidden`）。
+- **Docker（`testdb:status`・`testdb:identity`。読み取り専用）:** context `desktop-linux`、`katana-test-db` は running・healthy、`RestartCount` 0、コンテナID `591ffba8e050d526fe5449d2a6c768cac2bc0105fd66c5520abe72bf84b06e3f`、`StartedAt` `2026-11-08T00:41:30.157808382Z`、IP `172.18.0.2`。ほかの値（イメージID・ネットワークID・`127.0.0.1:5434 -> 5432`・tmpfs・テスト用のボリュームなし・`katana-db` なし・開発用ボリュームを使うコンテナなし）も「Step 3-12B-2」の表と一致した。
+- **DB（`testdb:verify` を2回。どちらも終了コード0で、出力は完全に一致）:** 本人確認4項目が一致、`search_path` は `pg_catalog` に固定。`inet_server_addr()` `172.18.0.2`、`inet_server_port()` `5432`、`pg_postmaster_start_time()` `2026-11-08T00:41:30.798895Z`（`StartedAt` との差は約 +0.64秒で整合）。状態 C（8件適用済み・テーブルは空）。
+- **前後の比較:** 最初と最後の `testdb:identity` の識別情報（JSON）が完全に一致した。
+- Docker・DB への変更操作はなかった。
+
+#### Step 3-12B-5D-2：catalog ゲートの一時有効化（実施済み。2026-11-11。commit `21de539`）
+
+- commit：`21de539`（`test: temporarily enable read-only catalog audit`。親は `b3ac3f7`）。
+- `scripts/testdb-catalog.mts` の `catalogDatabase` を、既存の型 `CatalogAuditDatabaseAccess` で定義済みの `{ mode: "enabled-read-only" }` に一時的に変更した。ソースの固定値のままで、環境変数・CLI 引数による切り替えは追加していない。未使用になった `CATALOG_AUDIT_DATABASE_DISABLED` の import を削除した。コメントに、一時的な有効化であることと、監査の後に無効に戻すことを書いた。
+- ゲートの行を固定文字列で確かめる静的テスト（`lib/testing/testDbCatalogRunner.test.ts`）の期待値だけを変更した。ほかの静的検査（argv・env を各1回だけ使う、`--apply`・`child_process`・Prisma CLI・migration・checksum・schemaDiff・読み取り専用ロールの検査を参照しない、定数 `CATALOG_AUDIT_DATABASE_DISABLED` が凍結された無効値である、ほかの3つのゲートが無効）は変更していない。
+- migration 用（`LIVE_DATABASE_DISABLED`）・checksum 用（`CHECKSUM_DATABASE_DISABLED`）・schemaDiff 用（`SCHEMA_DIFF_DISABLED`）のゲートは無効のまま。
+- 通常テスト38ファイル・1,554件成功（失敗・スキップ0件）。tsc・ESLint・`node --check`・`git diff --check`・静的検査が成功。
+- この時点では、カタログ監査の実DBでの実行は未実施。push・merge なし。
+
+#### Step 3-12B-5D-3：実DBでのカタログ監査（実施済み。2026-11-11。コードの変更なし）
+
+- **実行の直前の確認（同じ工程で、新たに読み取った）:** `testdb:status`・`testdb:identity`・`testdb:verify` を各1回（すべて終了コード0）。Docker の識別情報は「Step 3-12B-2」の表・5D-1 と完全に一致し、DB は本人確認4項目が一致、状態 C（8件適用済み・テーブルは空）、サーバーの識別情報は 5D-1 と同じ（`verify` の出力は 5D-1 と完全に一致）。
+- **実行:** `npm run testdb:catalog -- --verify` を1回だけ実行した。`NODE_TLS_REJECT_UNAUTHORIZED` は、実行したシェルの中だけで unset した（永続的な設定の変更なし）。直接の SQL は発行していない。終了コード0。
+- **成功時の出力（そのまま）:**
+  - `the catalog definition audit passed (read-only; nothing was changed).`
+  - `identity checks D1/F1/D2/F2/D3 passed; state C before and after.`
+  - `catalog fingerprint: 18 sections captured (hash and values not shown).`
+- **検証の結果:**
+  - カタログ監査：`passed`（`failed`・`unverified` なし）。
+  - D1・F1・D2・F2・D3：成功。F1・F2 とも状態 C（migration 8件適用済み・テーブルは空）。
+  - 監査の接続の本人確認・サーバーの識別：成功。
+  - PostgreSQL 固有の定義：期待値（「なし」）と一致。
+  - enum 5件の値と順序：期待値と一致。
+  - fingerprint：18区分すべてを取得。
+  - 読み取り専用のトランザクション（`BEGIN READ ONLY`・`search_path` の固定・`transaction_read_only = on`）・ROLLBACK・接続の解放：成功の条件を満たした。
+  - Docker・DB への変更操作はなかった。Prisma CLI・migration・checksum の照合は実行していない。
+- **確認の方法についての注記:** 出力に直接表れているのは、`passed`、D1〜D3 の成功と前後の状態 C、fingerprint 18区分の取得だけである。監査の接続の本人確認・サーバーの識別、DB 固有の定義と enum の一致（`failed`・`unverified` がないこと）、ROLLBACK・接続の解放は、個別の出力がない。これらは、終了コード0と、コード上の成功の条件（どれか1つでも失敗・不一致なら例外になり、終了コード0にならない。`lib/testing/testDbCatalogRunner.ts`・`lib/testing/testDbCatalogAudit.ts` の `runCatalogDefinitionAudit`・`lib/testing/integrationDatabaseCheck.ts` の `runReadOnlyCheck`）から確認した。
+- fingerprint のハッシュ・値、ロールの設定値、接続URL・パスワードは、表示も記録もしていない。
+- **確認できたこと:**
+  - 今の PostgreSQL 15 で、カタログ監査の SQL が正常に実行された。
+  - カタログの結果を、監査モジュールが解析できた（ドライバの返す型を含む）。
+  - 今回の監査の対象の DB 固有の定義に、期待値との不一致がなかった。
+  - enum の値と順序が一致した。
+  - fingerprint 18区分を取得できた。
+- **確認していないこと:**
+  - fingerprint の実行の前後の比較（今回は1回だけの取得で、比較ではない）。
+  - Prisma schema と実DBの列・型・制約などの完全な一致。
+  - `katana_test_ro` の実効権限（ロールは未作成で、この経路では検査しない）。
+- この結果は、監査を実行した時点のものであり、それ以降の DB の状態を保証しない。
+
+#### Step 3-12B-5D-4：catalog ゲートの再無効化（実施済み。2026-11-11。commit `f390846`）
+
+- commit：`f390846`（`test: disable live catalog audit after successful verification`。親は `21de539`）。
+- `scripts/testdb-catalog.mts` の `catalogDatabase` を、固定の `CATALOG_AUDIT_DATABASE_DISABLED` に戻した（import も復元）。コメントを除くコードは、有効化の前の `b3ac3f7` と同じ。コメントには、5D-2 の一時的な有効化、5D-3 の監査（終了コード0・`passed`）、5D-4 の無効化の経緯と、監査の経路は残っているがゲートで実DBでの実行が禁止されていることを書いた。
+- 静的テスト（`lib/testing/testDbCatalogRunner.test.ts`）のゲートの行の期待値を、無効の固定文字列に戻した（`b3ac3f7` との違いはテストの名前だけ）。
+- migration・checksum・schemaDiff のゲートは無効のまま。カタログ監査のロジック・fingerprint 18区分の処理は変更なし。
+- 通常テスト38ファイル・1,554件成功（失敗・スキップ0件）。tsc・ESLint・`node --check`・`git diff --check`・静的検査が成功。
+- Docker・DB の操作なし。push・merge なし。
+- **コードの基準の HEAD は `f390846`**（この節を追記した PLAN の commit は、その子）。
+- **固定ゲート（2026-11-11 の 5D-4 の後）:** migration 用 `LIVE_DATABASE_DISABLED`、checksum 用 `CHECKSUM_DATABASE_DISABLED`、schemaDiff 用 `SCHEMA_DIFF_DISABLED`、catalog 用 `CATALOG_AUDIT_DATABASE_DISABLED`。4つとも無効。
+
+#### 条件2の整理（2026-11-11）
+
+2026-11-10 の「条件2の整理」は、その時点の記録として残す。5D-3 の結果を受けて、次のように更新する。
+
+- **条件2-A：達成済み。** migration の履歴とローカルの migration SQL の SHA-256 checksum が、8件すべて完全一致した（Step 3-12B-5C-3C）。
+- **条件2-B：一部達成。全体は未完了。**
+  - 達成済みの範囲（Step 3-12B-5D-3）：
+    - PostgreSQL 固有の定義の監査（期待値と一致）
+    - enum 5件の値と順序の一致
+    - fingerprint 18区分の取得
+    - 状態 C の確認（F1・F2）と組み合わせた監査の成功
+  - 未検証の範囲：
+    - Prisma schema と実DBの列・データ型
+    - NULL の可否
+    - 既定値
+    - 主キー・UNIQUE
+    - インデックス
+    - 外部キー
+    - Prisma（`migrate diff`）が比べる定義の全体
+    - 専用の読み取り専用ロールの実効権限
+    - Prisma CLI の実行の前後の fingerprint の一致
+  - fingerprint を取得できたことは、前後の一致の証明ではない。
+
+**残余リスク（2026-11-11 時点）:**
+
+1. `katana_test_ro` は、まだ作成していない。
+2. `katana_test_user` は DB の所有者で、CREATE 権限を持つ。
+3. カタログ監査の書き込みの防止は、`BEGIN READ ONLY` などのコードの側の仕組みに依存している。
+4. Prisma CLI が自分で開く DB の接続の権限の分離は、未実装。
+5. CLI の実行の前後の fingerprint の比較は、未実装。
+6. TOCTOU のリスクは残る（F1・監査・F2 は別の接続。監査の接続は D1・F1 と同じサーバーであることを確かめるが、それ以外の入れ替わりは F2・D3 で事後に検出するだけ）。
+7. fingerprint には対象外がある（コメント、統計情報、データの行、sequence の現在値、認証情報、セッションの状態など）。
+8. 統合テストは未実施。
+9. これまでの実DBでの照合の結果は、実行した時点のスナップショットである。
+
+#### 次工程の方針（2026-11-11）
+
+- 次の工程では、`katana_test_ro` の導入の方式を検討する（比較と設計の提示が先。比較そのもの・コードの変更・DB のロールの作成は、それぞれ別途の承認）。
+  - A：今の状態 C を保ったまま、既存のコンテナにロールを追加する方式。
+  - B：初期化スクリプトにロールの作成を組み込み、テストDBを再構築する方式。
+- 検討の観点：状態 C を保てるか、再現性、DB の権限の変更の範囲、これまでの検証の結果への影響、migration と checksum の再実施の必要性、安全な実行経路の有無、ロールの実効権限の検証の方法、ロールの作成の後の復旧の方法。
+
 ### Step 3-0：読み取りだけの事前確認（実施済み。Dockerの記録は未記録）
 
 - **作業内容:**
@@ -2513,6 +2625,7 @@ npm run test:integration ─► 専用runner
 - **停止条件:** 適用に失敗する。差分がある。接続先の表示が `127.0.0.1:5434/katana_test` ではない。
 - **2026-11-09 追記:** 適用は Step 3-12B-3 で実施済み。差分（`migrate diff`）と checksum の照合は未実施。実施の記録は3-Aの「Step 3-12B-2」以降。
 - **2026-11-10 追記:** checksum の実DB照合は Step 3-12B-5C-3C で実施済み（8件すべて完全一致。条件2-A は達成）。差分（`migrate diff`。条件2-B）は未実施。3-Aの「条件2の整理」。
+- **2026-11-11 追記:** PostgreSQL 固有の定義と enum の値・順序のカタログ監査は、Step 3-12B-5D-3 で実施済み（`passed`。条件2-B の一部）。`migrate diff` による定義の一致（条件2-B の残り）は未実施。3-Aの「条件2の整理（2026-11-11）」。
 
 ### Step 3-13：ドキュメント
 
@@ -2569,7 +2682,7 @@ npm run test:integration ─► 専用runner
 
 | ID | 内容 | 状態・対応 |
 |---|---|---|
-| R1 | migrationを空のDBに適用できるか、`schema.prisma` と一致するか | 適用は確認済み（Step 3-12B-3。8件・状態 C。ユーザーの報告に基づく記録で、最後に確認した時点の状態）。`schema.prisma` との定義の一致（`migrate diff`）と checksum の実DB照合は未検証（Step 3-12B-5 以降）。（2026-11-10 追記）checksum の実DB照合は Step 3-12B-5C-3C で8件すべて完全一致（条件2-A 達成。実行した時点の結果）。`schema.prisma` との定義の一致（条件2-B）は未検証 |
+| R1 | migrationを空のDBに適用できるか、`schema.prisma` と一致するか | 適用は確認済み（Step 3-12B-3。8件・状態 C。ユーザーの報告に基づく記録で、最後に確認した時点の状態）。`schema.prisma` との定義の一致（`migrate diff`）と checksum の実DB照合は未検証（Step 3-12B-5 以降）。（2026-11-10 追記）checksum の実DB照合は Step 3-12B-5C-3C で8件すべて完全一致（条件2-A 達成。実行した時点の結果）。`schema.prisma` との定義の一致（条件2-B）は未検証。（2026-11-11 追記）Step 3-12B-5D-3 のカタログ監査で、PostgreSQL 固有の定義と enum 5件の値・順序が期待値と一致（`passed`。実行した時点の結果）。列・型・NULL・既定値・キー・インデックス・外部キーの一致（`migrate diff`）は未検証で、条件2-B の全体は未完了 |
 | R2 | 開発用DBの `_prisma_migrations` と、手元のファイルのchecksumが一致するか | 解消（Step 3-0で一致を確認） |
 | R3 | `KATANA_DB_TARGET=test` を設定せずにPrisma CLIを直接実行すると、開発用DBに接続する | 残余リスク（2-7）。運用ルールとCLAUDE.mdで対処する。Step 3-8Bで、テストDBに見えるURLをテストモードなしで使う場合は拒否するようにした（ほかの経路は3-Aの3-8B） |
 | R4 | `prisma/seed.ts` と Prisma Studio はガードの外にある | 範囲外 |
@@ -2592,7 +2705,7 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：PLAN の記録の commit（`docs: record successful test DB checksum verification`。親は `fc45fc0`（`test: disable live checksum verification after successful audit`。Step 3-12B-5C-4））
+   - HEAD：PLAN の記録の commit（`docs: record successful PostgreSQL catalog audit`。親は `f390846`（`test: disable live catalog audit after successful verification`。Step 3-12B-5D-4））
    - 変更済み（未commit）：なし
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
    - `.env.test` はユーザーが作成済み（`-rw-------`。中身は表示しない）
@@ -2600,7 +2713,8 @@ npm run test:integration ─► 専用runner
 3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。Step 3-11 で、ユーザーがテストDBを初めて起動した（R7 は今回の起動で合格。3-Aの「Step 3-11」）。`down` はまだ実行していない。Step 3-11の実施前レビューの結果（3-Aの「Step 3-11の実施前レビュー」。前提条件の表 C、R7 の D、失敗時の E、DB検証の F、TOCTOU の G、`.env.test` の I）を先に読む。レビューの時点では Docker のデーモンが停止中だったが、Step 3-11A でユーザーが Docker Desktop を起動し、前提条件 C の2〜9 を満たすことを確かめた（3-Aの「Step 3-11A」）。初期化スクリプトのログ漏洩の対策も 3-11A で済んだ。初回の up の後に問題が起きたときは、自動で削除せず、読み取りで調べて報告し、個別の承認を待つ（3-11A で確定）。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
    - （2026-11-09 更新）migration は Step 3-12B-3 で適用済み（最後に確認した時点で状態 C）。3つの固定ゲート（migration・checksum・schemaDiff）はすべて無効。
    - （2026-11-10 更新）checksum の実DB照合は Step 3-12B-5C-3C で完了（8件すべて完全一致。条件2-A 達成）。ゲートは 5C-4（`fc45fc0`）で無効に戻した。3つの固定ゲートはすべて無効。条件2-B（定義の一致）は未完了。3-Aの「条件2の整理」
-   - Step 3-12B-5C-5：schemaDiff の読み取り専用ロールの設計と実行経路の安全設計（DB の変更を伴う。設計の提示と承認が先。コードの変更・DB の変更・Prisma CLI の起動は、それぞれ別途の承認）と、PostgreSQL 固有の定義のカタログでの照合
+   - （2026-11-11 更新）PostgreSQL 固有の定義のカタログ監査は Step 3-12B-5D-3 で完了（`passed`。条件2-B の一部）。catalog ゲートは 5D-4（`f390846`）で無効に戻した。4つの固定ゲート（migration・checksum・schemaDiff・catalog）はすべて無効。条件2-B の全体は未完了。3-Aの「条件2の整理（2026-11-11）」
+   - `katana_test_ro`（schemaDiff 用の読み取り専用ロール）の導入方式の比較（A：既存のコンテナに追加、B：初期化スクリプトに組み込んで再構築。3-Aの「次工程の方針（2026-11-11）」）と、schemaDiff の実行経路の安全設計（DB の変更を伴う。比較・設計の提示と承認が先。コードの変更・DB の変更・Prisma CLI の起動は、それぞれ別途の承認）
    - `reset` の実装（本人確認の後）
 
    接続後の本人確認と状態の判定は Step 3-10B で実装して commit し、Step 3-10C で migration 用スクリプトの流れに組み込んだ。Step 3-12B-1（`608c92a`）で、スクリプトの migration 用の許可を固定で有効にし、Step 3-12B-4（`d87bc9a`）で固定の `LIVE_DATABASE_DISABLED` に戻した（今は `--apply` でも Docker・DB の前に止まる）。許可が有効なときは、`--apply` を付けたときだけ migration に進み、予行・`--check`・`--verify` は Prisma CLI を起動しない。globalSetup には組み込んでおらず、強制停止のまま（初回の実DB接続で確かめることは、3-Aの3-10B・3-10Cの記録）。指示されたStep以外には着手しない。
