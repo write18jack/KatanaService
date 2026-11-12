@@ -701,18 +701,23 @@ describe("補完（grant-sync。ゲートを有効にした偽の実行）", () 
 describe("スクリプトの配線と、ほかの経路への影響（静的な検査）", () => {
   const script = code("scripts/testdb-ro-role.mts");
 
-  // Step 3-12B-5E-5：作成用のゲートだけを、承認済みの固定値で有効にした。後続の工程（工程8）で RO_ROLE_CREATE_DISABLED に戻し、この期待値も戻す
-  it("スクリプトのゲートは2行だけ：作成用は固定の有効値、補完用は固定の無効値（引数・環境変数から決めない）", () => {
+  // Step 3-12B-5E-5 で作成用のゲートを一時的に有効にし、5E-6 の初回作成の後、5E-8 で固定の無効値に戻した（この期待値も戻した）
+  it("スクリプトのゲートは、固定の無効値の2行だけ（引数・環境変数から決めない）", () => {
     const gateLines = script.split("\n").filter((l) => /Gate\s*:/.test(l));
-    expect(gateLines).toEqual(['  createGate: { mode: "enabled-create" },', "  grantSyncGate: RO_ROLE_GRANT_SYNC_DISABLED,"]);
-    // 有効の値は、作成用のゲートの1行にだけ現れる。補完用の有効値・ほかの有効値はない
-    expect(script.match(/enabled-create/g)).toHaveLength(1);
-    expect(script).not.toMatch(/enabled-grant-sync|enabled-read-only|mode: "enabled"/);
-    expect(script.match(/mode:/g)).toHaveLength(1);
-    // 補完用の無効値は、ライブラリの固定値を import して渡す。作成用の無効値はもう使わない
-    expect(script).toMatch(/^ {2}RO_ROLE_GRANT_SYNC_DISABLED,$/m);
-    expect(script.match(/RO_ROLE_GRANT_SYNC_DISABLED/g)).toHaveLength(4);
-    expect(script.split("\n").filter((l) => !/^\s*(\*|\/\/)/.test(l)).some((l) => l.includes("RO_ROLE_CREATE_DISABLED"))).toBe(false);
+    expect(gateLines).toEqual(["  createGate: RO_ROLE_CREATE_DISABLED,", "  grantSyncGate: RO_ROLE_GRANT_SYNC_DISABLED,"]);
+    // 有効の値は、どこにも現れない（コメントを含む）。ゲートの値をその場で組み立てない
+    expect(script).not.toMatch(/enabled-create|enabled-grant-sync|enabled-read-only|mode: "enabled"/);
+    expect(script).not.toMatch(/mode:/);
+    // 2つの無効値は、ライブラリの固定値を import して渡す（コメント以外では、import とゲートの行の2か所ずつだけ）
+    const codeLines = script.split("\n").filter((l) => !/^\s*(\*|\/\/)/.test(l));
+    for (const name of ["RO_ROLE_CREATE_DISABLED", "RO_ROLE_GRANT_SYNC_DISABLED"]) {
+      expect(script).toMatch(new RegExp(`^ {2}${name},$`, "m"));
+      expect(codeLines.filter((l) => l.includes(name)), name).toHaveLength(2);
+    }
+    // スクリプトが渡す無効値は、上のモックのテストで --create --apply・--grant-sync --apply を Docker・DB の前に止めると確かめた値と同じ
+    expect(RO_ROLE_CREATE_DISABLED).toEqual({ mode: "disabled" });
+    expect(Object.isFrozen(RO_ROLE_CREATE_DISABLED)).toBe(true);
+    expect(RO_ROLE_CREATE_DISABLED).not.toBe(RO_ROLE_GRANT_SYNC_DISABLED);
     // ゲートの値は引数・環境変数から決めない（process.argv・process.env は、ランナーへ渡す1か所ずつだけ）
     expect(script.match(/process\.argv/g)).toHaveLength(1);
     expect(script.match(/process\.env/g)).toHaveLength(1);

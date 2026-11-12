@@ -7,13 +7,13 @@
  *                                        … 読み取り専用の事前検証（--preflight-create）。D1・F1・FP0・A0・D2 だけ。
  *                                          DB への接続は読み取り専用のトランザクションだけで、docker exec・DB の変更はしない
  *   node scripts/testdb-ro-role.mts --create --apply / --grant-sync --apply
- *                                        … 実行の意思表示。--create の固定のゲートは有効（Step 3-12B-5E-5）なので、--create --apply は
- *                                          ランナーの検証を通れば docker exec まで進む（実行は別の承認を得てから）。
- *                                          --grant-sync の固定のゲートは無効なので、Docker・DB に触れる前に RO_ROLE_GRANT_SYNC_DISABLED で止まる
+ *                                        … 実行の意思表示。操作ごとの固定のゲートが無効なので、今は Docker・DB に触れる前に
+ *                                          RO_ROLE_CREATE_DISABLED・RO_ROLE_GRANT_SYNC_DISABLED で止まる
  *
  * 手順と検証の内容は lib/testing/testDbReadOnlyRoleRunner.ts・lib/testing/testDbReadOnlyRole.ts。このファイルは、実際の入出力をつなぐだけ。
- * ゲートは固定の値（環境変数・引数では変えられない）。作成用は有効の固定値（Step 3-12B-5E-5。後続の工程で RO_ROLE_CREATE_DISABLED に戻す）、
- * 補完用は RO_ROLE_GRANT_SYNC_DISABLED。変えるのは、承認を得た工程で、このファイルを変えたときだけ。ゲートの有効化と実行（--apply）は、別々に承認を得る。
+ * ゲートは固定の RO_ROLE_CREATE_DISABLED・RO_ROLE_GRANT_SYNC_DISABLED（環境変数・引数では変えられない）。
+ * 作成用は Step 3-12B-5E-5 で一時的に有効にし、5E-6 の初回作成（1回）の後、5E-8 で無効に戻した。
+ * 有効にするのは、承認を得た後続の工程で、このファイルを変えたときだけ。ゲートの有効化と実行（--apply）は、別々に承認を得る。
  *
  * docker exec の起動（execWithInput）は、shell なし（shell: false）・固定のコマンド "docker" だけ。引数はランナーが固定の配列と照合した後に渡す。
  * 標準入力には、SHA-256 を照合した固定の SQL ファイルの中身だけを渡す。出力は呼び出し側が伏せてから表示する。
@@ -29,6 +29,7 @@ import { readTestDbDockerIdentity, runDockerCommand } from "../lib/testing/testD
 import { createTestDatabaseInspector } from "../lib/testing/testDbMigrate.ts";
 import {
   ReadOnlyRoleError,
+  RO_ROLE_CREATE_DISABLED,
   RO_ROLE_GRANT_SYNC_DISABLED,
   runPreChangeAclCheck,
   runReadOnlyRoleCheck,
@@ -90,8 +91,8 @@ runTestDbReadOnlyRole({
   pathExists: existsSync,
   readFile: (absolutePath) => readFileSync(absolutePath, "utf8"),
   loadExpectation: () => loadCatalogAuditExpectation(ROOT),
-  // 読み取り専用ロールの作成の許可は有効（固定。Step 3-12B-5E-5）。補完の許可は無効（固定）で、--grant-sync --apply は Docker の読み取り・DBへの接続の前に止まる
-  createGate: { mode: "enabled-create" },
+  // 読み取り専用ロールの作成・補完の許可は無効（固定。作成用は Step 3-12B-5E-8 で戻した）。--apply でも、Docker の読み取り・DBへの接続の前に止まる
+  createGate: RO_ROLE_CREATE_DISABLED,
   grantSyncGate: RO_ROLE_GRANT_SYNC_DISABLED,
   readDockerIdentity: (input) => readTestDbDockerIdentity({ ...input, run: runDockerCommand }),
   inspectDatabase: (input) => createTestDatabaseInspector({ root: ROOT, connect: connectTestDatabase })(input),
