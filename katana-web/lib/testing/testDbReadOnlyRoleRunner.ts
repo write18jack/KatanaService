@@ -28,6 +28,9 @@ import {
   buildReadOnlyRoleExecEnv,
   classifyReadOnlyRoleBase,
   classifyReadOnlyRoleFull,
+  createdAclViolations,
+  createdCatalogViolations,
+  CREATED_FINGERPRINT_COVERAGE,
   createScramVerifier,
   encodeTableList,
   EXPECTED_INITIAL_TABLE_COUNT,
@@ -43,6 +46,7 @@ import {
   type ReadOnlyRoleGrantSyncAccess,
   type ReadOnlyRoleObservation,
   type ReadOnlyRoleOperation,
+  readOnlyRoleExistsIn,
   sha256Hex,
   tablesWithoutAcl,
 } from "./testDbReadOnlyRole.ts";
@@ -56,6 +60,10 @@ import type { TestDatabaseInspection } from "./testDbState.ts";
  *   npm run testdb:ro-role:preflight-create
  *                                        … 読み取り専用の事前検証（--preflight-create。Step 3-12B-5E-5B）。create の変更の前と同じ
  *                                          D1 → F1 → FP0 → FP0 の前提 → A0 → D2 だけを行い、docker exec・DB の変更はしない。ゲートに依存しない
+ *   npm run testdb:ro-role:verify-created
+ *                                        … 作成後の独立した検証（--verify-created。Step 3-12B-5E-7A）。D1 → F1 → FP-created（作成後の期待値と照合）
+ *                                          → A1（作成後の ACL）→ R-full（katana_test_ro 本人）→ FP-recheck（FP-created から変化なし）→ D2 だけ。
+ *                                          docker exec・DB の変更・検証子の作成はしない。ゲートに依存しない
  *   node scripts/testdb-ro-role.mts --create --apply / --grant-sync --apply
  *                                        … 実行の意思表示。操作ごとの固定のゲートが無効なので、今は Docker・DB に触れる前に止まる
  *
@@ -112,7 +120,12 @@ export type TestDbReadOnlyRoleErrorCode =
   | "POST_IDENTITY_MISMATCH"
   | "POST_STATE_MISMATCH"
   | "POST_FINGERPRINT_MISMATCH"
-  | "READ_ONLY_ROLE_FULL_FAILED";
+  | "READ_ONLY_ROLE_FULL_FAILED"
+  | "ROLE_NOT_CREATED"
+  | "CREATED_STATE_MISMATCH"
+  | "CREATED_ACL_CHECK_FAILED"
+  | "CREATED_ACL_MISMATCH"
+  | "CREATED_STATE_CHANGED_DURING_CHECK";
 
 export class TestDbReadOnlyRoleError extends Error {
   readonly code: TestDbReadOnlyRoleErrorCode;
@@ -178,12 +191,16 @@ export type TestDbReadOnlyRoleDeps = {
   log: (text: string) => void;
 };
 
-/** preflight は --preflight-create のときだけ true（読み取り専用の事前検証。apply とは併用できない） */
-export type TestDbReadOnlyRoleCommand = { operation: ReadOnlyRoleOperation; apply: boolean; preflight?: true };
+/**
+ * preflight は --preflight-create のときだけ true（読み取り専用の事前検証。apply とは併用できない）。
+ * verifyCreated は --verify-created のときだけ true（作成後の読み取り専用の検証。ほかの引数とは併用できない）
+ */
+export type TestDbReadOnlyRoleCommand = { operation: ReadOnlyRoleOperation; apply: boolean; preflight?: true; verifyCreated?: true };
 
 export type TestDbReadOnlyRoleOutcome =
   | { readonly mode: "dry-run"; readonly operation: ReadOnlyRoleOperation }
   | { readonly mode: "preflight"; readonly operation: "create" }
+  | { readonly mode: "verified-created"; readonly operation: "create" }
   | { readonly mode: "applied"; readonly operation: ReadOnlyRoleOperation; readonly grantedTables: readonly string[] }
   | { readonly mode: "nothing-to-do"; readonly operation: "grant-sync" };
 
@@ -193,13 +210,20 @@ const COMMANDS: readonly [readonly string[], TestDbReadOnlyRoleCommand][] = [
   [["--grant-sync"], { operation: "grant-sync", apply: false }],
   [["--grant-sync", "--apply"], { operation: "grant-sync", apply: true }],
   [["--preflight-create"], { operation: "create", apply: false, preflight: true }],
+  [["--verify-created"], { operation: "create", apply: false, verifyCreated: true }],
 ];
 
-/** 引数は固定の5通りだけ。それ以外（引数なし・未知の引数・順序の違い・--preflight-create と --apply などの併用）は、何にも触れる前に止める */
+/**
+ * 引数は固定の6通りだけ。それ以外（引数なし・未知の引数・順序の違い・--preflight-create や --verify-created と --apply などの併用）は、
+ * 何にも触れる前に止める
+ */
 export function parseTestDbReadOnlyRoleArgs(args: readonly string[]): TestDbReadOnlyRoleCommand {
   const match = COMMANDS.find(([expected]) => expected.length === args.length && expected.every((arg, i) => arg === args[i]));
   if (!match) {
-    throw new TestDbReadOnlyRoleError("ARGUMENTS_INVALID", "use --create or --grant-sync (dry run), optionally followed by --apply, or --preflight-create alone.");
+    throw new TestDbReadOnlyRoleError(
+      "ARGUMENTS_INVALID",
+      "use --create or --grant-sync (dry run), optionally followed by --apply, or --preflight-create or --verify-created alone.",
+    );
   }
   return { ...match[1] };
 }
@@ -241,7 +265,7 @@ const AFTER_NOTE = "docker exec was already attempted, so this is detection afte
 /** 手順どおりに検証し、実行する。成功なら結果を返し、どれか1つでも失敗したら TestDbReadOnlyRoleError を投げる */
 export async function runTestDbReadOnlyRole(deps: TestDbReadOnlyRoleDeps): Promise<TestDbReadOnlyRoleOutcome> {
   const { root } = deps;
-  const { operation, apply, preflight = false } = parseTestDbReadOnlyRoleArgs(deps.argv);
+  const { operation, apply, preflight = false, verifyCreated = false } = parseTestDbReadOnlyRoleArgs(deps.argv);
   if (deps.execArgv.length > 0) throw new TestDbReadOnlyRoleError("NODE_EXEC_ARGV_PRESENT", "Node.js options for this script are not allowed.");
   if (deps.parentEnv.NODE_OPTIONS !== undefined && deps.parentEnv.NODE_OPTIONS !== "") {
     throw new TestDbReadOnlyRoleError("NODE_OPTIONS_PRESENT", "NODE_OPTIONS is set; unset it before running this script.");
@@ -325,7 +349,7 @@ export async function runTestDbReadOnlyRole(deps: TestDbReadOnlyRoleDeps): Promi
 
   const where = `${appTarget.host}:${appTarget.port}/${appTarget.database}`;
   const gateEnabled = operation === "create" ? deps.createGate.mode === "enabled-create" : deps.grantSyncGate.mode === "enabled-grant-sync";
-  if (!apply && !preflight) {
+  if (!apply && !preflight && !verifyCreated) {
     const preview = buildReadOnlyRoleExecArgs(operation, "0".repeat(64)).map((arg) => (arg === "0".repeat(64) ? "<container id from D1>" : arg));
     deps.log(
       [
@@ -340,13 +364,13 @@ export async function runTestDbReadOnlyRole(deps: TestDbReadOnlyRoleDeps): Promi
     return { mode: "dry-run", operation };
   }
 
-  // ---- ここからは --apply と --preflight-create だけ ----
+  // ---- ここからは --apply・--preflight-create・--verify-created だけ ----
   // --apply：操作ごとの固定のゲートが無効なら、Docker・DB に触れずに止まる。
-  // --preflight-create：ゲートを確かめない（変更の文・docker exec に進まず、D2 の後で必ず戻る。読み取り専用の接続だけ）
-  if (!preflight && operation === "create" && deps.createGate.mode !== "enabled-create") {
+  // --preflight-create・--verify-created：ゲートを確かめない（変更の文・docker exec に進まず、D2 の後で必ず戻る。読み取り専用の接続だけ）
+  if (apply && operation === "create" && deps.createGate.mode !== "enabled-create") {
     throw new TestDbReadOnlyRoleError("RO_ROLE_CREATE_DISABLED", "creating the read-only role is disabled in this build; refusing to read Docker or connect to the test database.");
   }
-  if (!preflight && operation === "grant-sync" && deps.grantSyncGate.mode !== "enabled-grant-sync") {
+  if (apply && operation === "grant-sync" && deps.grantSyncGate.mode !== "enabled-grant-sync") {
     throw new TestDbReadOnlyRoleError("RO_ROLE_GRANT_SYNC_DISABLED", "granting missing privileges to the read-only role is disabled in this build; refusing to read Docker or connect to the test database.");
   }
 
@@ -364,8 +388,8 @@ export async function runTestDbReadOnlyRole(deps: TestDbReadOnlyRoleDeps): Promi
       throw new TestDbReadOnlyRoleError(label === "F1" ? "STATE_CHECK_FAILED" : "POST_CHECK_FAILED", `the database check ${label} failed (${codeOf(error)}).${label === "F2" ? ` ${AFTER_NOTE}` : ""}`);
     }
   };
-  const fingerprint = async (label: "FP0" | "FP1", expectedServer: PinnedServerExpectation): Promise<CatalogFingerprint> => {
-    const code = label === "FP0" ? "CATALOG_CHECK_FAILED" : "POST_CHECK_FAILED";
+  const fingerprint = async (label: "FP0" | "FP1" | "FP-created" | "FP-recheck", expectedServer: PinnedServerExpectation): Promise<CatalogFingerprint> => {
+    const code = label === "FP1" ? "POST_CHECK_FAILED" : "CATALOG_CHECK_FAILED";
     let result: CatalogDefinitionAuditResult;
     try {
       result = await deps.runAudit({ ...appCheck, expectation, expectedServer });
@@ -395,6 +419,59 @@ export async function runTestDbReadOnlyRole(deps: TestDbReadOnlyRoleDeps): Promi
   const sameNames = (a: readonly string[], b: readonly string[]) => [...a].sort().join("\n") === [...b].sort().join("\n");
   if (!sameNames(state.migrations, expectation.inventory.migrations)) throw new TestDbReadOnlyRoleError("MIGRATION_LIST_MISMATCH", "the applied migrations do not match the local migrations.");
   const expectedServer: PinnedServerExpectation = { docker: docker1, server: server1 };
+
+  // --verify-created は、ここで分かれて、D2 の後で必ず戻る（FP0・作成の前提・A0・exec の準備・exec・事後の検査には進まない）
+  if (verifyCreated) {
+    // FP-created（カタログの監査が passed・18区分。作成後の期待値と照合する。今回読んだ値を期待値にはしない）
+    const created = await fingerprint("FP-created", expectedServer);
+    if (!readOnlyRoleExistsIn(created)) throw new TestDbReadOnlyRoleError("ROLE_NOT_CREATED", `${readOnlyTarget.user} does not exist; nothing was changed.`);
+    const catalogViolations = createdCatalogViolations(created, expectation, tables);
+    if (catalogViolations.length > 0) {
+      throw new TestDbReadOnlyRoleError("CREATED_STATE_MISMATCH", `the catalog is not in the expected state after creation (${catalogViolations.join("; ")}). Nothing was changed.`);
+    }
+    // A1（A0 と同じ固定の SELECT。katana_test だけ作成後の期待値）
+    let a1: PreChangeAclObservation;
+    try {
+      a1 = await deps.checkPreChangeAcl({ ...appCheck, expectedServer });
+    } catch (error) {
+      throw new TestDbReadOnlyRoleError("CREATED_ACL_CHECK_FAILED", `the ACL check A1 failed (${codeOf(error)}). Nothing was changed.`);
+    }
+    const createdAcl = createdAclViolations(a1);
+    if (createdAcl.length > 0) throw new TestDbReadOnlyRoleError("CREATED_ACL_MISMATCH", `the ACLs are not the expected ones after creation (${createdAcl.join(", ")}). Nothing was changed.`);
+    // R-full（katana_test_ro 本人の読み取り専用の接続。接続・認証・本人確認の失敗は成功にしない）
+    let full: ReturnType<typeof classifyReadOnlyRoleFull>;
+    try {
+      full = classifyReadOnlyRoleFull(await deps.checkReadOnlyRole({ ...roCheck, expectedServer }), tables);
+    } catch (error) {
+      throw new TestDbReadOnlyRoleError("READ_ONLY_ROLE_CHECK_FAILED", `the read-only role check R-full failed (${codeOf(error)}). Nothing was changed.`);
+    }
+    if (!full.passed) throw new TestDbReadOnlyRoleError("READ_ONLY_ROLE_FULL_FAILED", `the read-only role check did not pass (${full.findings.join("; ")}). Nothing was changed.`);
+    // FP-recheck（検査の間に変わっていないこと。成功の根拠ではなく、変化の検出）
+    const recheck = await fingerprint("FP-recheck", expectedServer);
+    try {
+      assertCatalogFingerprintUnchanged(created, recheck);
+    } catch (error) {
+      throw new TestDbReadOnlyRoleError("CREATED_STATE_CHANGED_DURING_CHECK", `the catalog changed during the check (${codeOf(error)}). Nothing was changed by this check.`);
+    }
+    // D2（D1 と一致）
+    const docker2 = await readDocker("D2");
+    const changed = dockerIdentityChanges(docker1, docker2);
+    if (changed.length > 0) throw new TestDbReadOnlyRoleError("DOCKER_IDENTITY_MISMATCH", `the test database container changed during the check (${changed.join(", ")}).`);
+
+    const sections = Object.entries(CREATED_FINGERPRINT_COVERAGE).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const exact = sections.filter(([, c]) => c.coverage === "exact").map(([name]) => name);
+    const limited = sections.filter(([, c]) => c.coverage !== "exact").map(([name, c]) => `${name} (${c.coverage}; not verified: ${c.notVerified})`);
+    deps.log(
+      [
+        `[testdb-ro-role] verify-created passed for ${where} (read-only; nothing was changed and docker exec was not run).`,
+        `checks D1/F1/FP-created/A1/R-full/FP-recheck/D2 passed: same container, state C, catalog audit passed, ${readOnlyTarget.user} exists with the expected attributes, setting, ACLs and effective privileges (${tables.length} tables, SELECT only).`,
+        `fingerprint compared with expectations built from the repository and fixed constants (not with itself): exact for ${exact.length} sections (${exact.join(", ")}).`,
+        `limited checks only: ${limited.join("; ")}.`,
+        "not covered: the stored password beyond a successful login as the read-only role; definitions compared by schemaDiff; this result is a snapshot of this run.",
+      ].join("\n"),
+    );
+    return { mode: "verified-created", operation: "create" };
+  }
 
   // FP0（定義の監査が passed・fingerprint 18区分）
   const fp0 = await fingerprint("FP0", expectedServer);

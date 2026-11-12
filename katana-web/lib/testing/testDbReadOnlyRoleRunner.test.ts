@@ -25,6 +25,7 @@ import {
   type PreChangeAclObservation,
   type ReadOnlyRoleObservation,
   type ReadOnlyRoleOperation,
+  ReadOnlyRoleError,
   RO_ROLE_CREATE_DISABLED,
   RO_ROLE_GRANT_SYNC_DISABLED,
   sha256Hex,
@@ -698,6 +699,192 @@ describe("補完（grant-sync。ゲートを有効にした偽の実行）", () 
   });
 });
 
+// ---- 作成後の独立した検証（--verify-created。Step 3-12B-5E-7A） ----
+
+/** fingerprint と同じ形の項目（キーは区分の key、行は区分のすべての項目を名前の順に） */
+function entry(section: string, fields: Record<string, unknown>): readonly [string, string] {
+  const spec = CATALOG_FINGERPRINT_SECTIONS[section];
+  return [JSON.stringify(spec.key.map((k) => fields[k])), JSON.stringify(Object.keys(spec.fields).sort().map((f) => [f, fields[f] ?? null]))] as const;
+}
+
+/** 作成後の期待状態の fingerprint（実装の定数を使わず、リテラルで組み立てる）。mutate で1行だけ変えて、検出を確かめる */
+function createdFp(mutate?: (s: Record<string, (readonly [string, string])[]>) => void): CatalogFingerprint {
+  const flags = { schema: "public", persistence: "p", rowSecurity: false, forceRowSecurity: false, owner: "katana_test_user" };
+  const roleFlags = { superuser: false, inherit: true, createRole: false, createDb: false, login: true, replication: false, bypassRls: false, connectionLimit: -1, config: null };
+  const enumValues = EXPECTATION.enums.status === "supported" ? EXPECTATION.enums.enums : {};
+  const typeEntry = (name: string, kind: string) => entry("types", { schema: "public", name, kind, owner: "katana_test_user", acl: null });
+  const s: Record<string, (readonly [string, string])[]> = Object.fromEntries(Object.keys(CATALOG_FINGERPRINT_SECTIONS).map((n) => [n, []]));
+  s.database = [entry("database", { name: "katana_test", owner: "katana_test_user", acl: DB_ACL, comment: "katana-test-db" })];
+  s.schemas = [entry("schemas", { name: "public", owner: "pg_database_owner", acl: "{pg_database_owner=UC/pg_database_owner,=U/pg_database_owner}" })];
+  s.extensions = [entry("extensions", { name: "plpgsql", version: "1.0", schema: "pg_catalog" })];
+  s.relations = TABLES.flatMap((t) => [entry("relations", { ...flags, name: t, kind: "r", acl: TABLE_ACL }), entry("relations", { ...flags, name: `${t}_pkey`, kind: "i", acl: null })]);
+  s.indexes = TABLES.map((t) => entry("indexes", { schema: "public", name: `${t}_pkey`, table: t, definition: "x", primary: true, unique: true, valid: true }));
+  s.constraints = TABLES.map((t) => entry("constraints", { schema: "public", table: t, name: `${t}_pkey`, type: "p", definition: "PRIMARY KEY (id)", deferrable: false, deferred: false, validated: true }));
+  s.columns = TABLES.map((t) => entry("columns", { schema: "public", table: t, name: "id", position: 1, type: "text", notNull: true, identity: "", generated: "", collation: "default", acl: null }));
+  s.types = [...TABLES.flatMap((t) => [typeEntry(t, "c"), typeEntry(`_${t}`, "b")]), ...EXPECTATION.inventory.enums.flatMap((e) => [typeEntry(e, "e"), typeEntry(`_${e}`, "b")])];
+  s.enumValues = Object.entries(enumValues).flatMap(([e, values]) => values.map((value, i) => entry("enumValues", { schema: "public", enum: e, value, position: i + 1 })));
+  s.roles = [
+    entry("roles", { name: "postgres", superuser: true, inherit: true, createRole: true, createDb: true, login: true, replication: true, bypassRls: true, connectionLimit: -1, config: null }),
+    entry("roles", { ...roleFlags, name: "katana_test_user" }),
+    entry("roles", { ...roleFlags, name: "katana_test_ro", inherit: false, config: EXPECTED_ROLE_CONFIG_MD5 }),
+  ];
+  s.dbRoleSettings = [entry("dbRoleSettings", { databaseScope: "all", database: "", roleScope: "one", role: "katana_test_ro", configHash: EXPECTED_ROLE_CONFIG_MD5 })];
+  s.roleMemberships = ["pg_read_all_settings", "pg_read_all_stats", "pg_stat_scan_tables"].map((role) => entry("roleMemberships", { role, member: "pg_monitor", admin: false }));
+  mutate?.(s);
+  for (const [name, entries] of Object.entries(s)) s[name] = [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return { meaning: "observed-catalog-definition", sha256: sha256Hex(JSON.stringify(s)), sections: s };
+}
+
+describe("作成後の独立した検証（--verify-created。偽の Docker・DB）", () => {
+  const verify = (o: Parameters<typeof fake>[0] = {}) => {
+    const f = fake({ gates: "disabled", fingerprints: [createdFp(), createdFp()], acl: aclObservation("grant-sync"), ...o, argv: ["--verify-created"] });
+    f.deps.createVerifier = vi.fn(() => VERIFIER);
+    return f;
+  };
+  const neverChanged = (f: Fake) => {
+    expect(f.exec).not.toHaveBeenCalled();
+    expect(f.deps.createVerifier).not.toHaveBeenCalled();
+  };
+
+  it("引数は --verify-created の単独だけ。--apply・create・grant-sync・preflight との併用・順序違い・重複は、何にも触れる前に ARGUMENTS_INVALID", async () => {
+    expect(parseTestDbReadOnlyRoleArgs(["--verify-created"])).toEqual({ operation: "create", apply: false, verifyCreated: true });
+    for (const argv of [
+      ["--verify-created", "--apply"],
+      ["--apply", "--verify-created"],
+      ["--verify-created", "--create"],
+      ["--create", "--verify-created"],
+      ["--verify-created", "--grant-sync"],
+      ["--grant-sync", "--verify-created"],
+      ["--verify-created", "--preflight-create"],
+      ["--verify-created", "--verify-created"],
+      ["--verify-created=1"],
+      ["--VERIFY-CREATED"],
+    ]) {
+      const f = fake({ argv });
+      await expectError(f, "ARGUMENTS_INVALID");
+      touchedNothing(f);
+    }
+  });
+
+  it.each<["disabled" | "both"]>([["disabled"], ["both"]])(
+    "成功：ゲート（%s）に依存せず、D1 → F1 → FP-created → A1 → R-full → FP-recheck → D2 だけ。exec・検証子の作成はしない",
+    async (gates) => {
+      const f = verify({ gates });
+      expect(await runTestDbReadOnlyRole(f.deps)).toEqual({ mode: "verified-created", operation: "create" });
+      // fake の名前：FP0 = FP-created、A0 = A1、R1 = R-full、FP1 = FP-recheck
+      expect(f.calls).toEqual(["D1", "F1", "FP0", "A0", "R1", "FP1", "D2"]);
+      neverChanged(f);
+      noSecrets(f);
+    },
+  );
+
+  it("接続は、F1・FP・A1 が katana_test_user、R-full が katana_test_ro。どれも読み取り専用の部品（inspect・audit・ACL・role check）だけで、exec は渡さない", async () => {
+    const f = verify();
+    await runTestDbReadOnlyRole(f.deps);
+    for (const call of [...f.inspectDb.mock.calls, ...f.audit.mock.calls, ...f.acl.mock.calls]) expect(call[0].databaseUrl).toBe(APP_URL);
+    expect(f.role.mock.calls.map((c) => c[0].databaseUrl)).toEqual([RO_URL]);
+    for (const call of [...f.audit.mock.calls, ...f.acl.mock.calls, ...f.role.mock.calls]) expect(call[0].expectedServer).toEqual({ docker: DOCKER, server: SERVER });
+    neverChanged(f);
+  });
+
+  it("成功の表示：比べた相手は期待値（自分自身ではない）、exact の区分の数、照合を限った4区分と照合していない内容を明示する", async () => {
+    const f = verify();
+    await runTestDbReadOnlyRole(f.deps);
+    const log = f.logs.join("\n");
+    expect(log).toContain("verify-created passed for 127.0.0.1:5434/katana_test (read-only; nothing was changed and docker exec was not run)");
+    expect(log).toContain("checks D1/F1/FP-created/A1/R-full/FP-recheck/D2 passed");
+    expect(log).toContain("not with itself");
+    expect(log).toContain("exact for 14 sections");
+    for (const text of ["relations (partial; not verified: index names and counts)", "columns (invariants; not verified: column names", "constraints (invariants; not verified: constraint names, counts and definitions)", "indexes (invariants; not verified: index names, counts and definitions)"]) {
+      expect(log).toContain(text);
+    }
+    expect(log).not.toMatch(/fingerprint[^\n]*(matched|identical) for all 18/);
+  });
+
+  it.each<[string, Parameters<typeof fake>[0], TestDbReadOnlyRoleErrorCode, string[]]>([
+    ["F1 で状態 C でない", { states: [{ state: "B", reasons: ["x"] }] }, "DATABASE_STATE_NOT_C", ["D1", "F1"]],
+    ["D1 と F1 のサーバーが合わない（起動時刻）", { dockers: [{ ...DOCKER, startedAt: "2026-11-01T00:00:00.000000000Z" }] }, "SERVER_IDENTITY_MISMATCH", ["D1", "F1"]],
+    ["ロールがない（作成前の fingerprint）", { fingerprints: [fp()] }, "ROLE_NOT_CREATED", ["D1", "F1", "FP0"]],
+    ["ロールの行だけがない", { fingerprints: [createdFp((s) => (s.roles = s.roles.filter(([k]) => k !== key("katana_test_ro"))))] }, "ROLE_NOT_CREATED", ["D1", "F1", "FP0"]],
+    [
+      "テーブルの ACL が GRANTABLE",
+      { fingerprints: [createdFp((s) => (s.relations = s.relations.map((e) => (e[0] === key("public", TABLES[0]) ? entry("relations", { schema: "public", name: TABLES[0], kind: "r", persistence: "p", rowSecurity: false, forceRowSecurity: false, owner: "katana_test_user", acl: TABLE_ACL.replace("katana_test_ro=r/", "katana_test_ro=r*/") }) : e))))] },
+      "CREATED_STATE_MISMATCH",
+      ["D1", "F1", "FP0"],
+    ],
+    ["既定の権限の設定", { fingerprints: [createdFp((s) => s.defaultPrivileges.push(entry("defaultPrivileges", { role: "katana_test_user", schema: "public", objectType: "r", acl: "{katana_test_ro=r/katana_test_user}" })))] }, "CREATED_STATE_MISMATCH", ["D1", "F1", "FP0"]],
+    ["ro の所属", { fingerprints: [createdFp((s) => s.roleMemberships.push(entry("roleMemberships", { role: "pg_write_all_data", member: "katana_test_ro", admin: false })))] }, "CREATED_STATE_MISMATCH", ["D1", "F1", "FP0"]],
+    ["A1 の接続の失敗", { acl: new Error("connect failed") }, "CREATED_ACL_CHECK_FAILED", ["D1", "F1", "FP0", "A0"]],
+    ["A1 で katana_test が作成前の ACL", { acl: aclObservation("create") }, "CREATED_ACL_MISMATCH", ["D1", "F1", "FP0", "A0"]],
+    [
+      "A1 で template1 に TEMPORARY",
+      { acl: (() => { const o = aclObservation("grant-sync"); Object.assign(o.databases.find((d) => d.name === "template1") ?? {}, { publicTemporary: true }); return o; })() },
+      "CREATED_ACL_MISMATCH",
+      ["D1", "F1", "FP0", "A0"],
+    ],
+    ["R-full で INSERT", { observations: [(() => { const o = observation(); o.snapshot.tables[0].insert = true; return o; })()] }, "READ_ONLY_ROLE_FULL_FAILED", ["D1", "F1", "FP0", "A0", "R1"]],
+    ["R-full で余分な依存", { observations: [(() => { const o = observation(); o.dependencies.push({ database: "", catalog: "other", subId: 0, type: "o", objectName: null }); return o; })()] }, "READ_ONLY_ROLE_FULL_FAILED", ["D1", "F1", "FP0", "A0", "R1"]],
+    ["R-full で postgres に CONNECT", { observations: [(() => { const o = observation(); Object.assign(o.databases.find((d) => d.name === "postgres") ?? {}, { connect: true }); return o; })()] }, "READ_ONLY_ROLE_FULL_FAILED", ["D1", "F1", "FP0", "A0", "R1"]],
+    ["R-full で別のロールとして接続", { observations: [(() => { const o = observation(); o.snapshot.role.currentUser = "katana_test_user"; return o; })()] }, "READ_ONLY_ROLE_CHECK_FAILED", ["D1", "F1", "FP0", "A0", "R1"]],
+    ["FP-created と FP-recheck が違う", { fingerprints: [createdFp(), createdFp((s) => s.largeObjects.push(entry("largeObjects", { owner: "katana_test_user", count: 1 })))] }, "CREATED_STATE_CHANGED_DURING_CHECK", ["D1", "F1", "FP0", "A0", "R1", "FP1"]],
+    ["D1 と D2 が違う", { dockers: [DOCKER, { ...DOCKER, restartCount: 1 }] }, "DOCKER_IDENTITY_MISMATCH", ["D1", "F1", "FP0", "A0", "R1", "FP1", "D2"]],
+  ])("%s → %s で止まる（exec・検証子の作成はしない）", async (_, o, expected, calls) => {
+    const f = verify(o);
+    await expectError(f, expected);
+    expect(f.calls).toEqual(calls);
+    neverChanged(f);
+  });
+
+  it("カタログの監査が passed でなければ、照合に進まず CATALOG_CHECK_FAILED で止まる（検査できない状態を成功にしない）", async () => {
+    const f = verify();
+    f.audit.mockResolvedValueOnce({ report: { verdict: "unverified", findings: [] }, fingerprint: createdFp() });
+    await expectError(f, "CATALOG_CHECK_FAILED");
+    expect(f.audit).toHaveBeenCalledTimes(1);
+    expect(f.acl).not.toHaveBeenCalled();
+    expect(f.role).not.toHaveBeenCalled();
+    neverChanged(f);
+  });
+
+  it("R-full の接続・認証の失敗（runReadOnlyRoleCheck が CHECK_QUERY_FAILED にする）は成功にせず、READ_ONLY_ROLE_CHECK_FAILED で止まる", async () => {
+    const f = verify();
+    f.role.mockRejectedValueOnce(new ReadOnlyRoleError("CHECK_QUERY_FAILED", "the read-only role check failed (CONNECT_FAILED)."));
+    const error = await expectError(f, "READ_ONLY_ROLE_CHECK_FAILED");
+    expect(error.message).toContain("CHECK_QUERY_FAILED");
+    expect(f.audit).toHaveBeenCalledTimes(1);
+    expect(f.docker).toHaveBeenCalledTimes(1);
+    neverChanged(f);
+  });
+
+  it("R-full の接続で、ドライバのエラー（パスワードを含むメッセージ）が来ても、メッセージを表示しない", async () => {
+    const f = verify();
+    f.role.mockRejectedValueOnce(Object.assign(new Error(`password authentication failed for ${RO_URL}`), { code: "28P01" }));
+    const error = await expectError(f, "READ_ONLY_ROLE_CHECK_FAILED");
+    expect(error.message).not.toContain(RO_PASSWORD);
+    neverChanged(f);
+  });
+
+  it("実装の分岐は exec の準備より前で必ず戻り、exec・検証子・exec の引数と環境変数・ゲートを参照しない（静的な検査）", () => {
+    const runner = code("lib/testing/testDbReadOnlyRoleRunner.ts");
+    const start = runner.indexOf("  if (verifyCreated) {");
+    const end = runner.indexOf('return { mode: "verified-created", operation: "create" };', start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    expect(start).toBeLessThan(runner.indexOf("const fp0 = await fingerprint(\"FP0\""));
+    const branch = runner.slice(start, end);
+    for (const forbidden of ["deps.exec", "createVerifier", "createScramVerifier", "buildReadOnlyRoleExecArgs", "buildReadOnlyRoleExecEnv", "createGate", "grantSyncGate", "sql"]) {
+      expect(branch, forbidden).not.toContain(forbidden);
+    }
+    // ゲートの確認は --apply のときだけ（--preflight-create・--verify-created はゲートを見ない）
+    expect(runner).toContain('if (apply && operation === "create" && deps.createGate.mode !== "enabled-create") {');
+    expect(runner).toContain('if (apply && operation === "grant-sync" && deps.grantSyncGate.mode !== "enabled-grant-sync") {');
+    // スクリプトは、読み取り専用の部品（BEGIN READ ONLY を使う既存の関数）だけを配線している
+    const script = code("scripts/testdb-ro-role.mts");
+    expect(script).toContain("checkReadOnlyRole: (input) => runReadOnlyRoleCheck({ ...input, connect: connectTestDatabase }),");
+    expect(script).toContain("checkPreChangeAcl: (input) => runPreChangeAclCheck({ ...input, connect: connectTestDatabase }),");
+    expect(script).toContain("runAudit: (input) => runCatalogDefinitionAudit({ ...input, connect: connectTestDatabase }),");
+  });
+});
+
 describe("スクリプトの配線と、ほかの経路への影響（静的な検査）", () => {
   const script = code("scripts/testdb-ro-role.mts");
 
@@ -752,12 +939,13 @@ describe("スクリプトの配線と、ほかの経路への影響（静的な�
     }
   });
 
-  it("npm のスクリプトは予行の2つだけ。--apply 付きの npm スクリプトはない", () => {
+  it("npm のスクリプトは、予行の2つと読み取り専用の2つ（preflight・verify-created）だけ。--apply 付きの npm スクリプトはない", () => {
     const pkg = JSON.parse(code("package.json")) as { scripts: Record<string, string> };
     expect(pkg.scripts["testdb:ro-role:create"]).toBe("node scripts/testdb-ro-role.mts --create");
     expect(pkg.scripts["testdb:ro-role:grant-sync"]).toBe("node scripts/testdb-ro-role.mts --grant-sync");
     expect(pkg.scripts["testdb:ro-role:preflight-create"]).toBe("node scripts/testdb-ro-role.mts --preflight-create");
-    expect(Object.values(pkg.scripts).filter((s) => s.includes("testdb-ro-role.mts"))).toHaveLength(3);
+    expect(pkg.scripts["testdb:ro-role:verify-created"]).toBe("node scripts/testdb-ro-role.mts --verify-created");
+    expect(Object.values(pkg.scripts).filter((s) => s.includes("testdb-ro-role.mts"))).toHaveLength(4);
     expect(Object.values(pkg.scripts).some((s) => s.includes("--apply"))).toBe(false);
   });
 

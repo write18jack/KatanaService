@@ -1,5 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -9,8 +9,8 @@ import {
   ReadOnlyTestDatabaseCredentialsError,
   TestDatabaseGuardError,
 } from "../db/testDatabaseGuard";
-import { type IntegrationDbClient } from "./integrationDatabaseCheck";
-import { type CatalogFingerprint, loadCatalogAuditExpectation, type ReadOnlyRoleSnapshot } from "./testDbCatalogAudit";
+import { type IntegrationDbClient, TEST_DATABASE_MARKER } from "./integrationDatabaseCheck";
+import { CATALOG_FINGERPRINT_SECTIONS, type CatalogFingerprint, loadCatalogAuditExpectation, type ReadOnlyRoleSnapshot } from "./testDbCatalogAudit";
 import { EXPECTED_DOCKER_CONTEXT, TEST_CONTAINER } from "./testDbDocker";
 import type { TestDatabaseServerIdentity, TestDbDockerIdentity } from "./testDbIdentity";
 import {
@@ -21,16 +21,24 @@ import {
   canonicalAcl,
   classifyReadOnlyRoleBase,
   classifyReadOnlyRoleFull,
+  createdAclViolations,
+  createdCatalogViolations,
+  CREATED_FINGERPRINT_COVERAGE,
   createScramVerifier,
   deriveScramKeys,
   encodeTableList,
   EXEC_ENV,
   EXEC_ENV_KEYS,
+  EXPECTED_APP_ROLE_ROW,
+  EXPECTED_CREATED_RO_ROLE_ROW,
+  EXPECTED_CREATED_ROLE_SETTING_ROW,
+  EXPECTED_CREATED_TEST_DATABASE,
   EXPECTED_INITIAL_TABLE_COUNT,
   EXPECTED_PRE_CHANGE_SCHEMAS,
   EXPECTED_PRE_CHANGE_SYSTEM_DATABASES,
   EXPECTED_PRE_CHANGE_TEST_DATABASE,
   EXPECTED_ROLE_CONFIG_MD5,
+  EXPECTED_SEQUENCE_COUNT,
   expectedReadOnlyRoleTables,
   initialCreationPreconditionViolations,
   loadReadOnlyRoleSql,
@@ -38,11 +46,15 @@ import {
   preChangeAclViolations,
   PRE_CHANGE_DATABASES_SQL,
   PRE_CHANGE_SCHEMAS_SQL,
+  PG15_BOOTSTRAP_SUPERUSER_ROW,
+  PG15_DEFAULT_ROLE_MEMBERSHIPS,
+  PG15_PLPGSQL_EXTENSION_ROW,
   PSQL_ARGS,
   READ_ONLY_ROLE_SQL_FILES,
   READ_ONLY_ROLE_SQL_SHA256,
   ReadOnlyRoleError,
   type ReadOnlyRoleObservation,
+  readOnlyRoleExistsIn,
   RO_DOCKER_CONTEXT,
   RO_ROLE_CREATE_DISABLED,
   RO_ROLE_GRANT_SYNC_DISABLED,
@@ -898,5 +910,285 @@ describe("固定のゲートと、読み取り専用ロールの接続先・認�
       return;
     }
     throw new Error(`expected ${expected}`);
+  });
+});
+
+// ---- 作成後の独立した検証（--verify-created。Step 3-12B-5E-7A） ----
+//
+// 「作成後の正しい状態」の fingerprint は、実装の定数を使わずに、ここでリテラルで組み立てる（実装と独立させる）。
+// columns・constraints・indexes・relations のインデックスの行は、名前・定義を仮の値にしている（実装はそれらを照合しない）。
+
+type Sections = Record<string, (readonly [string, string])[]>;
+type Fields = Record<string, unknown>;
+
+/** fingerprint と同じ形の項目（キーは区分の key、行は区分のすべての項目を名前の順に） */
+function entry(section: string, fields: Fields): readonly [string, string] {
+  const spec = CATALOG_FINGERPRINT_SECTIONS[section];
+  return [JSON.stringify(spec.key.map((k) => fields[k])), JSON.stringify(Object.keys(spec.fields).sort().map((f) => [f, fields[f] ?? null]))] as const;
+}
+
+const ENUM_VALUES: Record<string, readonly string[]> = EXPECTATION.enums.status === "supported" ? EXPECTATION.enums.enums : {};
+const RELATION_FLAGS = { schema: "public", persistence: "p", rowSecurity: false, forceRowSecurity: false, owner: "katana_test_user" };
+const DB_ROW = { name: "katana_test", owner: "katana_test_user", acl: DB_ACL, comment: "katana-test-db" };
+const PUBLIC_ROW = { name: "public", owner: "pg_database_owner", acl: "{pg_database_owner=UC/pg_database_owner,=U/pg_database_owner}" };
+const ROLE_FLAGS = { superuser: false, inherit: true, createRole: false, createDb: false, login: true, replication: false, bypassRls: false, connectionLimit: -1, config: null };
+const ROLES_AFTER = [
+  { name: "postgres", superuser: true, inherit: true, createRole: true, createDb: true, login: true, replication: true, bypassRls: true, connectionLimit: -1, config: null },
+  { ...ROLE_FLAGS, name: "katana_test_user" },
+  { ...ROLE_FLAGS, name: "katana_test_ro", inherit: false, config: EXPECTED_ROLE_CONFIG_MD5 },
+];
+const SETTING_AFTER = { databaseScope: "all", database: "", roleScope: "one", role: "katana_test_ro", configHash: EXPECTED_ROLE_CONFIG_MD5 };
+const MEMBERSHIPS = ["pg_read_all_settings", "pg_read_all_stats", "pg_stat_scan_tables"].map((role) => ({ role, member: "pg_monitor", admin: false }));
+const typeEntry = (name: string, kind: string) => entry("types", { schema: "public", name, kind, owner: "katana_test_user", acl: null });
+
+function createdSections(): Sections {
+  const s: Sections = Object.fromEntries(Object.keys(CATALOG_FINGERPRINT_SECTIONS).map((name) => [name, []]));
+  s.database = [entry("database", DB_ROW)];
+  s.schemas = [entry("schemas", PUBLIC_ROW)];
+  s.extensions = [entry("extensions", { name: "plpgsql", version: "1.0", schema: "pg_catalog" })];
+  s.relations = TABLES.flatMap((t) => [
+    entry("relations", { ...RELATION_FLAGS, name: t, kind: "r", acl: TABLE_ACL }),
+    entry("relations", { ...RELATION_FLAGS, name: `${t}_pkey`, kind: "i", acl: null }),
+  ]);
+  s.indexes = TABLES.map((t) => entry("indexes", { schema: "public", name: `${t}_pkey`, table: t, definition: `CREATE UNIQUE INDEX ${t}_pkey ON public.${t} USING btree (id)`, primary: true, unique: true, valid: true }));
+  s.constraints = TABLES.map((t) => entry("constraints", { schema: "public", table: t, name: `${t}_pkey`, type: "p", definition: "PRIMARY KEY (id)", deferrable: false, deferred: false, validated: true }));
+  s.columns = TABLES.map((t) => entry("columns", { schema: "public", table: t, name: "id", position: 1, type: "text", notNull: true, default: null, identity: "", generated: "", collation: "default", acl: null }));
+  s.types = [...TABLES.flatMap((t) => [typeEntry(t, "c"), typeEntry(`_${t}`, "b")]), ...EXPECTATION.inventory.enums.flatMap((e) => [typeEntry(e, "e"), typeEntry(`_${e}`, "b")])];
+  s.enumValues = Object.entries(ENUM_VALUES).flatMap(([e, values]) => values.map((value, i) => entry("enumValues", { schema: "public", enum: e, value, position: i + 1 })));
+  s.roles = ROLES_AFTER.map((r) => entry("roles", r));
+  s.dbRoleSettings = [entry("dbRoleSettings", SETTING_AFTER)];
+  s.roleMemberships = MEMBERSHIPS.map((m) => entry("roleMemberships", m));
+  return s;
+}
+
+function createdFp(mutate?: (s: Sections) => void): CatalogFingerprint {
+  const sections = createdSections();
+  mutate?.(sections);
+  for (const [name, entries] of Object.entries(sections)) sections[name] = [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return { meaning: "observed-catalog-definition", sha256: sha256Hex(JSON.stringify(sections)), sections };
+}
+
+/** 区分の中の1行を置き換える（キーが同じ行）か、足す */
+const put = (s: Sections, section: string, fields: Fields) => {
+  const e = entry(section, fields);
+  s[section] = [...s[section].filter(([k]) => k !== e[0]), e];
+};
+const drop = (s: Sections, section: string, ...keyParts: unknown[]) => {
+  const k = JSON.stringify(keyParts);
+  s[section] = s[section].filter(([x]) => x !== k);
+};
+const firstTable = TABLES[0];
+const firstEnum = EXPECTATION.inventory.enums[0];
+
+describe("作成後の独立した検証：fingerprint（createdCatalogViolations）", () => {
+  it("前提：テスト用の期待状態は、18区分・16テーブル・enum の期待値が確定している", () => {
+    expect(Object.keys(createdSections()).sort()).toEqual(Object.keys(CATALOG_FINGERPRINT_SECTIONS).sort());
+    expect(Object.keys(CATALOG_FINGERPRINT_SECTIONS)).toHaveLength(18);
+    expect(TABLES).toHaveLength(EXPECTED_INITIAL_TABLE_COUNT);
+    expect(EXPECTATION.enums.status).toBe("supported");
+    expect(firstEnum).toBeDefined();
+  });
+
+  it("作成後の期待状態なら違反は0件。ロールの存在も判定できる", () => {
+    expect(createdCatalogViolations(createdFp(), EXPECTATION, TABLES)).toEqual([]);
+    expect(readOnlyRoleExistsIn(createdFp())).toBe(true);
+    expect(readOnlyRoleExistsIn(createdFp((s) => drop(s, "roles", "katana_test_ro")))).toBe(false);
+  });
+
+  it("作成の前の fingerprint（ロールなし・ACL が未設定）は通らない", () => {
+    const before = fp();
+    expect(createdCatalogViolations(createdFp((s) => Object.assign(s, before.sections)), EXPECTATION, TABLES).length).toBeGreaterThan(0);
+  });
+
+  // exact と partial（テーブル・sequence など）の区分：行の追加・欠け・値の違いを検出する
+  it.each<[string, (s: Sections) => void, RegExp]>([
+    ["database：ACL が未設定（作成前）", (s) => put(s, "database", { ...DB_ROW, acl: null }), /^database:/],
+    ["database：PUBLIC の TEMPORARY が残る", (s) => put(s, "database", { ...DB_ROW, acl: "{=Tc/katana_test_user,katana_test_user=CTc/katana_test_user}" }), /^database:/],
+    ["database：ro に CONNECT の明示的な付与", (s) => put(s, "database", { ...DB_ROW, acl: "{=c/katana_test_user,katana_test_user=CTc/katana_test_user,katana_test_ro=c/katana_test_user}" }), /^database:/],
+    ["database：GRANTABLE", (s) => put(s, "database", { ...DB_ROW, acl: "{=c*/katana_test_user,katana_test_user=CTc/katana_test_user}" }), /^database:/],
+    ["database：コメントが違う", (s) => put(s, "database", { ...DB_ROW, comment: "other" }), /^database:/],
+    ["database：所有者が違う", (s) => put(s, "database", { ...DB_ROW, owner: "postgres" }), /^database:/],
+    ["schemas：ro に USAGE", (s) => put(s, "schemas", { ...PUBLIC_ROW, acl: "{pg_database_owner=UC/pg_database_owner,=U/pg_database_owner,katana_test_ro=U/pg_database_owner}" }), /^schemas:/],
+    ["schemas：PUBLIC に CREATE", (s) => put(s, "schemas", { ...PUBLIC_ROW, acl: "{pg_database_owner=UC/pg_database_owner,=UC/pg_database_owner}" }), /^schemas:/],
+    ["schemas：ほかのスキーマ", (s) => put(s, "schemas", { ...PUBLIC_ROW, name: "extra" }), /^schemas:/],
+    ["extensions：ほかの拡張", (s) => put(s, "extensions", { name: "pgcrypto", version: "1.3", schema: "public" }), /^extensions:/],
+    ["extensions：plpgsql の版が違う", (s) => put(s, "extensions", { name: "plpgsql", version: "1.1", schema: "pg_catalog" }), /^extensions:/],
+    ["relations：テーブルの ACL が GRANTABLE（r*）", (s) => put(s, "relations", { ...RELATION_FLAGS, name: firstTable, kind: "r", acl: "{katana_test_user=arwdDxt/katana_test_user,katana_test_ro=r*/katana_test_user}" }), /^relations: 1 table/],
+    ["relations：ro に INSERT", (s) => put(s, "relations", { ...RELATION_FLAGS, name: firstTable, kind: "r", acl: "{katana_test_user=arwdDxt/katana_test_user,katana_test_ro=ar/katana_test_user}" }), /^relations: 1 table/],
+    ["relations：テーブルの ACL が未設定", (s) => put(s, "relations", { ...RELATION_FLAGS, name: firstTable, kind: "r", acl: null }), /^relations: 1 table/],
+    ["relations：PUBLIC に SELECT", (s) => put(s, "relations", { ...RELATION_FLAGS, name: firstTable, kind: "r", acl: "{katana_test_user=arwdDxt/katana_test_user,katana_test_ro=r/katana_test_user,=r/katana_test_user}" }), /^relations: 1 table/],
+    ["relations：テーブルの所有者が違う", (s) => put(s, "relations", { ...RELATION_FLAGS, owner: "postgres", name: firstTable, kind: "r", acl: TABLE_ACL }), /^relations: 1 table/],
+    ["relations：RLS が有効", (s) => put(s, "relations", { ...RELATION_FLAGS, rowSecurity: true, name: firstTable, kind: "r", acl: TABLE_ACL }), /^relations: 1 table/],
+    ["relations：テーブルが欠ける", (s) => drop(s, "relations", "public", firstTable), /^relations: the tables/],
+    ["relations：想定外のテーブル", (s) => put(s, "relations", { ...RELATION_FLAGS, name: "extra", kind: "r", acl: TABLE_ACL }), /^relations: the tables/],
+    ["relations：sequence", (s) => put(s, "relations", { ...RELATION_FLAGS, name: "extra_seq", kind: "S", acl: null }), /^relations: 1 sequence/],
+    ["relations：ビュー", (s) => put(s, "relations", { ...RELATION_FLAGS, name: "extra_view", kind: "v", acl: null }), /^relations: 1 relation\(s\) of other kinds/],
+    ["types：配列型が欠ける", (s) => drop(s, "types", "public", `_${firstTable}`), /^types:/],
+    ["types：enum の所有者が違う", (s) => put(s, "types", { schema: "public", name: firstEnum, kind: "e", owner: "postgres", acl: null }), /^types:/],
+    ["types：型に ACL", (s) => put(s, "types", { schema: "public", name: firstEnum, kind: "e", owner: "katana_test_user", acl: "{=U/katana_test_user}" }), /^types:/],
+    ["types：ほかの型", (s) => put(s, "types", { schema: "public", name: "extra", kind: "d", owner: "katana_test_user", acl: null }), /^types:/],
+    ["enumValues：順序が違う", (s) => {
+      const [a, b] = ENUM_VALUES[firstEnum];
+      put(s, "enumValues", { schema: "public", enum: firstEnum, value: a, position: 2 });
+      put(s, "enumValues", { schema: "public", enum: firstEnum, value: b, position: 1 });
+    }, /^enumValues:/],
+    ["enumValues：値が増える", (s) => put(s, "enumValues", { schema: "public", enum: firstEnum, value: "EXTRA", position: 99 }), /^enumValues:/],
+    ["sequences：1行", (s) => put(s, "sequences", { schema: "public", name: "x", type: "bigint", start: "1", increment: "1", min: "1", max: "9", cache: "1", cycle: false }), /^sequences:/],
+    ["routines：1行", (s) => put(s, "routines", { schema: "public", name: "f", arguments: "", kind: "f", securityDefiner: false, sourceHash: "0", owner: "katana_test_user", acl: null }), /^routines:/],
+    ["triggers：1行", (s) => put(s, "triggers", { schema: "public", table: firstTable, name: "t", definition: "x", enabled: "O" }), /^triggers:/],
+    ["policies：1行", (s) => put(s, "policies", { schema: "public", table: firstTable, name: "p", command: "*", permissive: true, roles: "", using: null, withCheck: null }), /^policies:/],
+    ["defaultPrivileges：1行", (s) => put(s, "defaultPrivileges", { role: "katana_test_user", schema: "public", objectType: "r", acl: "{katana_test_ro=r/katana_test_user}" }), /^defaultPrivileges:/],
+    ["largeObjects：1行", (s) => put(s, "largeObjects", { owner: "katana_test_ro", count: 1 }), /^largeObjects:/],
+    ["roles：ro が INHERIT", (s) => put(s, "roles", { ...ROLES_AFTER[2], inherit: true }), /^roles:/],
+    ["roles：ro が CREATEDB", (s) => put(s, "roles", { ...ROLES_AFTER[2], createDb: true }), /^roles:/],
+    ["roles：ro が LOGIN でない", (s) => put(s, "roles", { ...ROLES_AFTER[2], login: false }), /^roles:/],
+    ["roles：ro の接続の上限", (s) => put(s, "roles", { ...ROLES_AFTER[2], connectionLimit: 5 }), /^roles:/],
+    ["roles：ro の設定が違う", (s) => put(s, "roles", { ...ROLES_AFTER[2], config: "0".repeat(32) }), /^roles:/],
+    ["roles：アプリ用のロールの属性が違う", (s) => put(s, "roles", { ...ROLES_AFTER[1], createRole: true }), /^roles:/],
+    ["roles：postgres の属性が違う", (s) => put(s, "roles", { ...ROLES_AFTER[0], bypassRls: false }), /^roles:/],
+    ["roles：想定外のロール", (s) => put(s, "roles", { ...ROLE_FLAGS, name: "extra" }), /^roles:/],
+    ["dbRoleSettings：設定がない", (s) => drop(s, "dbRoleSettings", "all", "", "one", "katana_test_ro"), /^dbRoleSettings:/],
+    ["dbRoleSettings：DB 単位の設定が増える", (s) => put(s, "dbRoleSettings", { databaseScope: "one", database: "katana_test", roleScope: "all", role: "", configHash: "0".repeat(32) }), /^dbRoleSettings:/],
+    ["roleMemberships：ro がロールに所属", (s) => put(s, "roleMemberships", { role: "pg_read_all_data", member: "katana_test_ro", admin: false }), /^roleMemberships:/],
+    ["roleMemberships：既定の所属に ADMIN", (s) => put(s, "roleMemberships", { ...MEMBERSHIPS[0], admin: true }), /^roleMemberships:/],
+    ["roleMemberships：既定の所属が欠ける", (s) => drop(s, "roleMemberships", MEMBERSHIPS[1].role, "pg_monitor"), /^roleMemberships:/],
+  ])("%s を検出する（区分と件数だけを返す）", (_, mutate, expected) => {
+    const violations = createdCatalogViolations(createdFp(mutate), EXPECTATION, TABLES);
+    expect(violations.some((v) => expected.test(v)), violations.join(" | ")).toBe(true);
+    for (const v of violations) expect(v).not.toMatch(/=|katana_test_ro=|SCRAM|postgres(ql)?:\/\//);
+  });
+
+  // invariants の区分（columns・constraints・indexes と relations のインデックスの行）：決めた不変条件だけを検出する
+  it.each<[string, (s: Sections) => void, RegExp]>([
+    ["columns：列単位の ACL", (s) => put(s, "columns", { schema: "public", table: firstTable, name: "id", position: 1, type: "text", notNull: true, identity: "", generated: "", collation: "default", acl: "{katana_test_ro=r/katana_test_user}" }), /^columns: 1 column/],
+    ["columns：想定外のテーブルの列", (s) => put(s, "columns", { schema: "public", table: "extra", name: "id", position: 1, type: "text", notNull: true, identity: "", generated: "", collation: "default", acl: null }), /^columns: 1 column/],
+    ["columns：列のないテーブル", (s) => drop(s, "columns", "public", firstTable, "id"), /^columns: 1 expected table/],
+    ["constraints：CHECK 制約", (s) => put(s, "constraints", { schema: "public", table: firstTable, name: "c", type: "c", definition: "CHECK (true)", deferrable: false, deferred: false, validated: true }), /^constraints: 1 constraint/],
+    ["constraints：想定外のテーブルの制約", (s) => put(s, "constraints", { schema: "public", table: "extra", name: "extra_pkey", type: "p", definition: "PRIMARY KEY (id)", deferrable: false, deferred: false, validated: true }), /^constraints: 1 constraint/],
+    ["indexes：無効なインデックス", (s) => put(s, "indexes", { schema: "public", name: `${firstTable}_pkey`, table: firstTable, definition: "x", primary: true, unique: true, valid: false }), /^indexes: 1 index/],
+    ["indexes：想定外のテーブルのインデックス", (s) => put(s, "indexes", { schema: "public", name: `${firstTable}_pkey`, table: "extra", definition: "x", primary: true, unique: true, valid: true }), /^indexes: 1 index/],
+    ["relations のインデックスの行：ACL がある", (s) => put(s, "relations", { ...RELATION_FLAGS, name: `${firstTable}_pkey`, kind: "i", acl: "{katana_test_ro=r/katana_test_user}" }), /^relations: 1 index row/],
+    ["relations のインデックスの行：所有者が違う", (s) => put(s, "relations", { ...RELATION_FLAGS, owner: "postgres", name: `${firstTable}_pkey`, kind: "i", acl: null }), /^relations: 1 index row/],
+    ["relations のインデックスの行：indexes の区分にない", (s) => put(s, "relations", { ...RELATION_FLAGS, name: "orphan_idx", kind: "i", acl: null }), /^relations: the index rows do not match/],
+  ])("%s を検出する", (_, mutate, expected) => {
+    const violations = createdCatalogViolations(createdFp(mutate), EXPECTATION, TABLES);
+    expect(violations.some((v) => expected.test(v)), violations.join(" | ")).toBe(true);
+  });
+
+  // 名前・件数・定義は照合しない：変えても通る（完全一致を確かめたとは扱わない）。ここで通ることが、照合の範囲の記録になる
+  it.each<[string, (s: Sections) => void]>([
+    ["インデックスの名前を変える（両方の区分で同じに）", (s) => {
+      drop(s, "relations", "public", `${firstTable}_pkey`);
+      drop(s, "indexes", "public", `${firstTable}_pkey`);
+      put(s, "relations", { ...RELATION_FLAGS, name: "renamed_idx", kind: "i", acl: null });
+      put(s, "indexes", { schema: "public", name: "renamed_idx", table: firstTable, definition: "x", primary: true, unique: true, valid: true });
+    }],
+    ["インデックスを1件増やす", (s) => {
+      put(s, "relations", { ...RELATION_FLAGS, name: "extra_idx", kind: "i", acl: null });
+      put(s, "indexes", { schema: "public", name: "extra_idx", table: firstTable, definition: "CREATE INDEX extra_idx ON x", primary: false, unique: false, valid: true });
+    }],
+    ["インデックスの定義を変える", (s) => put(s, "indexes", { schema: "public", name: `${firstTable}_pkey`, table: firstTable, definition: "CREATE INDEX other", primary: false, unique: false, valid: true })],
+    ["列の型・NULL・既定値を変える", (s) => put(s, "columns", { schema: "public", table: firstTable, name: "id", position: 1, type: "integer", notNull: false, default: "0", identity: "", generated: "", collation: null, acl: null })],
+    ["列を1件増やす", (s) => put(s, "columns", { schema: "public", table: firstTable, name: "extra", position: 2, type: "text", notNull: false, identity: "", generated: "", collation: "default", acl: null })],
+    ["制約の名前・定義を変える", (s) => {
+      drop(s, "constraints", "public", firstTable, `${firstTable}_pkey`);
+      put(s, "constraints", { schema: "public", table: firstTable, name: "other_name", type: "u", definition: "UNIQUE (x)", deferrable: false, deferred: false, validated: true });
+    }],
+  ])("%s：照合の範囲外なので検出しない（invariants）", (_, mutate) => {
+    expect(createdCatalogViolations(createdFp(mutate), EXPECTATION, TABLES)).toEqual([]);
+  });
+
+  it("区分が欠ける・テーブルの一覧が16件でないときは、照合せずに違反にする", () => {
+    const missing = createdFp();
+    const rest = Object.fromEntries(Object.entries(missing.sections).filter(([name]) => name !== "largeObjects"));
+    expect(createdCatalogViolations({ ...missing, sections: rest }, EXPECTATION, TABLES)).toEqual(["the fingerprint sections are not the expected ones"]);
+    expect(createdCatalogViolations(createdFp(), EXPECTATION, TABLES.slice(1))).toEqual(["the expected table list is not the initial one"]);
+  });
+
+  it("enum の期待値が確定できないときは、成功にしない", () => {
+    const unsupported = { ...EXPECTATION, enums: { status: "unsupported" as const, reasons: ["x"] } };
+    expect(createdCatalogViolations(createdFp(), unsupported, TABLES)).toContain("enumValues: the enum expectation could not be built");
+  });
+
+  it("照合の範囲は18区分すべてに定義され、14区分が exact、relations が partial、columns・constraints・indexes が invariants", () => {
+    expect(Object.keys(CREATED_FINGERPRINT_COVERAGE).sort()).toEqual(Object.keys(CATALOG_FINGERPRINT_SECTIONS).sort());
+    const by = (c: string) => Object.entries(CREATED_FINGERPRINT_COVERAGE).filter(([, v]) => v.coverage === c).map(([k]) => k).sort();
+    expect(by("exact")).toHaveLength(14);
+    expect(by("partial")).toEqual(["relations"]);
+    expect(by("invariants")).toEqual(["columns", "constraints", "indexes"]);
+    for (const name of [...by("partial"), ...by("invariants")]) expect(CREATED_FINGERPRINT_COVERAGE[name].notVerified, name).toMatch(/names|definitions|types/);
+    for (const name of by("exact")) expect(CREATED_FINGERPRINT_COVERAGE[name].notVerified, name).toBeUndefined();
+    expect(Object.isFrozen(CREATED_FINGERPRINT_COVERAGE)).toBe(true);
+  });
+});
+
+describe("作成後の独立した検証：期待値の根拠（静的な検査）", () => {
+  const initScript = read("docker/test-db/init/01-app-role.sh");
+  const marker = read("docker/test-db/init/02-marker.sql");
+
+  it("PostgreSQL 15 の既定の値（pg_authid.dat・system_functions.sql・plpgsql）", () => {
+    expect(PG15_BOOTSTRAP_SUPERUSER_ROW).toEqual(ROLES_AFTER[0]);
+    expect(PG15_DEFAULT_ROLE_MEMBERSHIPS).toEqual(MEMBERSHIPS);
+    expect(PG15_PLPGSQL_EXTENSION_ROW).toEqual({ name: "plpgsql", version: "1.0", schema: "pg_catalog" });
+    for (const value of [PG15_BOOTSTRAP_SUPERUSER_ROW, PG15_DEFAULT_ROLE_MEMBERSHIPS, PG15_PLPGSQL_EXTENSION_ROW, EXPECTED_APP_ROLE_ROW, EXPECTED_CREATED_RO_ROLE_ROW, EXPECTED_CREATED_ROLE_SETTING_ROW]) {
+      expect(Object.isFrozen(value)).toBe(true);
+    }
+  });
+
+  it("アプリ用のロールの期待値は、初期化スクリプトの CREATE ROLE と一致する（INHERIT・接続の上限・設定は既定のまま）", () => {
+    const create = initScript.split("\n").filter((l) => /CREATE ROLE/.test(l));
+    expect(create).toEqual(["CREATE ROLE katana_test_user LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD :'app_password';"]);
+    expect(EXPECTED_APP_ROLE_ROW).toEqual(ROLES_AFTER[1]);
+    expect(initScript).not.toMatch(/NOINHERIT|CONNECTION LIMIT|ALTER ROLE|ALTER DATABASE [^\n]* SET|ALTER USER/);
+    expect(marker).not.toMatch(/ALTER ROLE|ALTER DATABASE [^\n]* SET/);
+  });
+
+  it("ro の期待値は、01-create.sql の CREATE ROLE・ALTER ROLE と一致する", () => {
+    expect(CREATE_SQL).toContain("CREATE ROLE katana_test_ro LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT CONNECTION LIMIT -1 PASSWORD :'ro_verifier';");
+    expect(CREATE_SQL).toContain("ALTER ROLE katana_test_ro SET default_transaction_read_only = on;");
+    expect(EXPECTED_CREATED_RO_ROLE_ROW).toEqual(ROLES_AFTER[2]);
+    expect(EXPECTED_CREATED_ROLE_SETTING_ROW).toEqual(SETTING_AFTER);
+  });
+
+  it("DB のコメントは、初期化スクリプトのマーカーと一致する", () => {
+    expect(marker).toContain(`COMMENT ON DATABASE katana_test IS '${TEST_DATABASE_MARKER}';`);
+    expect(DB_ROW.comment).toBe(TEST_DATABASE_MARKER);
+  });
+
+  it("sequence の期待件数0は、migration に SERIAL・IDENTITY・CREATE SEQUENCE がないことに基づく", () => {
+    const dir = path.join(REPO_ROOT, "prisma", "migrations");
+    const sqls = readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => readFileSync(path.join(dir, d.name, "migration.sql"), "utf8"));
+    expect(sqls.length).toBeGreaterThan(0);
+    for (const sql of sqls) expect(sql).not.toMatch(/\bSERIAL\b|\bBIGSERIAL\b|\bSMALLSERIAL\b|\bIDENTITY\b|CREATE SEQUENCE/i);
+    expect(EXPECTED_SEQUENCE_COUNT).toBe(0);
+  });
+});
+
+describe("作成後の独立した検証：A1（createdAclViolations）", () => {
+  const obs = (database = EXPECTED_CREATED_TEST_DATABASE): PreChangeAclObservation => ({
+    databases: [...EXPECTED_PRE_CHANGE_SYSTEM_DATABASES, database].map((d) => ({ ...d })),
+    schemas: EXPECTED_PRE_CHANGE_SCHEMAS.map((n) => ({ ...n })),
+  });
+
+  it("作成後の katana_test の期待値は、PUBLIC の CONNECT だけで ACL が設定済み（grant-sync の前と同じ値）", () => {
+    expect(EXPECTED_CREATED_TEST_DATABASE).toEqual(EXPECTED_PRE_CHANGE_TEST_DATABASE["grant-sync"]);
+    expect(EXPECTED_CREATED_TEST_DATABASE).toMatchObject({ aclNull: false, publicConnect: true, publicTemporary: false, publicCreate: false });
+    expect(createdAclViolations(obs())).toEqual([]);
+  });
+
+  it.each<[string, (o: PreChangeAclObservation) => void]>([
+    ["katana_test が作成前（ACL が未設定・PUBLIC の TEMPORARY）", (o) => Object.assign(o.databases[3], EXPECTED_PRE_CHANGE_TEST_DATABASE.create)],
+    ["katana_test に GRANTABLE", (o) => Object.assign(o.databases[3], { acl: `${o.databases[3].acl}:GRANTABLE` })],
+    ["template1 の PUBLIC に TEMPORARY", (o) => Object.assign(o.databases.find((d) => d.name === "template1") ?? {}, { publicTemporary: true })],
+    ["template0 が接続を受け付ける", (o) => Object.assign(o.databases.find((d) => d.name === "template0") ?? {}, { allowConnections: true })],
+    ["postgres に PUBLIC の CONNECT", (o) => Object.assign(o.databases.find((d) => d.name === "postgres") ?? {}, { publicConnect: true })],
+    ["postgres の ACL に ro", (o) => Object.assign(o.databases.find((d) => d.name === "postgres") ?? {}, { acl: "katana_test_ro:CONNECT:postgres" })],
+    ["想定外の DB", (o) => o.databases.push({ ...o.databases[0], name: "extra" })],
+    ["public の PUBLIC に CREATE", (o) => Object.assign(o.schemas[0], { publicCreate: true })],
+    ["想定外のスキーマ", (o) => o.schemas.push({ ...o.schemas[0], name: "extra" })],
+  ])("%s を検出する", (_, mutate) => {
+    const o = obs();
+    mutate(o);
+    expect(createdAclViolations(o).length).toBeGreaterThan(0);
   });
 });

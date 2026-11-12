@@ -6,6 +6,9 @@
  *   npm run testdb:ro-role:preflight-create
  *                                        … 読み取り専用の事前検証（--preflight-create）。D1・F1・FP0・A0・D2 だけ。
  *                                          DB への接続は読み取り専用のトランザクションだけで、docker exec・DB の変更はしない
+ *   npm run testdb:ro-role:verify-created
+ *                                        … 作成後の独立した検証（--verify-created。Step 3-12B-5E-7A）。D1・F1・FP-created・A1・R-full・
+ *                                          FP-recheck・D2 だけ。接続はすべて読み取り専用のトランザクションで、docker exec・DB の変更はしない
  *   node scripts/testdb-ro-role.mts --create --apply / --grant-sync --apply
  *                                        … 実行の意思表示。操作ごとの固定のゲートが無効なので、今は Docker・DB に触れる前に
  *                                          RO_ROLE_CREATE_DISABLED・RO_ROLE_GRANT_SYNC_DISABLED で止まる

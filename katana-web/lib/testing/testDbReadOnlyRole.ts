@@ -9,9 +9,11 @@ import {
   IntegrationDatabaseCheckError,
   runReadOnlyCheck,
   select,
+  TEST_DATABASE_MARKER,
 } from "./integrationDatabaseCheck.ts";
 import { inheritAllowedEnv } from "./integrationEnv.ts";
 import {
+  CATALOG_FINGERPRINT_SECTIONS,
   type CatalogAuditExpectation,
   type CatalogFingerprint,
   classifyReadOnlyRoleSnapshot,
@@ -869,4 +871,275 @@ export function initialCreationPreconditionViolations(before: CatalogFingerprint
 /** FP0 の時点で ACL が未設定の、期待するテーブル（R-base の補完の対象と一致することを確かめる） */
 export function tablesWithoutAcl(before: CatalogFingerprint, tables: readonly string[]): string[] {
   return tables.filter((t) => rowOf(before, "relations", keyOf("public", t))?.acl === null).sort(compareCodePoints);
+}
+
+// ---- 作成後の独立した検証（--verify-created。Step 3-12B-5E-7A） ----
+//
+// 作成済みの katana_test_ro について、変更の操作から独立した読み取り専用の経路で、今のカタログが「作成後の期待状態」であることを確かめる。
+// 期待値は、DB から独立した情報だけから作る（schema.prisma・migration〔loadCatalogAuditExpectation〕、初期化スクリプト、
+// 01-create.sql と同じ定数、PostgreSQL 15 の既定）。**今回読んだ fingerprint を期待値にはしない**（自己比較で成功にしない）。
+// 工程6の FP1 は保存していないので、基準にしない。
+//
+// 18区分の扱い（CREATED_FINGERPRINT_COVERAGE）:
+// - exact：区分のすべての行が、組み立てた期待値と一致する（行の追加・欠け・値の違いを検出する）。
+// - partial（relations）：テーブル・sequence・その他の種類の行は exact。インデックスの行は不変条件だけ。
+// - invariants：決めた不変条件だけを確かめる。名前・件数・定義の完全な一致は確かめない（schemaDiff の範囲）。
+
+/** PostgreSQL 15 の bootstrap のスーパーユーザー（src/include/catalog/pg_authid.dat の oid 10。initdb が名前を postgres にする） */
+export const PG15_BOOTSTRAP_SUPERUSER_ROW = Object.freeze({
+  name: "postgres",
+  superuser: true,
+  inherit: true,
+  createRole: true,
+  createDb: true,
+  login: true,
+  replication: true,
+  bypassRls: true,
+  connectionLimit: -1,
+  config: null,
+});
+
+/** アプリ用のロール（docker/test-db/init/01-app-role.sh の CREATE ROLE。INHERIT と接続の上限は既定値、設定はなし） */
+export const EXPECTED_APP_ROLE_ROW = Object.freeze({
+  name: EXPECTED_USER,
+  superuser: false,
+  inherit: true,
+  createRole: false,
+  createDb: false,
+  login: true,
+  replication: false,
+  bypassRls: false,
+  connectionLimit: -1,
+  config: null,
+});
+
+/** 作成後の katana_test_ro（01-create.sql の CREATE ROLE・ALTER ROLE。assertReadOnlyRoleFingerprintChange の期待値と同じ） */
+export const EXPECTED_CREATED_RO_ROLE_ROW = Object.freeze({
+  name: READ_ONLY_ROLE,
+  superuser: false,
+  inherit: false,
+  createRole: false,
+  createDb: false,
+  login: true,
+  replication: false,
+  bypassRls: false,
+  connectionLimit: -1,
+  config: EXPECTED_ROLE_CONFIG_MD5,
+});
+
+/** 作成後の pg_db_role_setting（ALTER ROLE katana_test_ro SET default_transaction_read_only = on の1行だけ） */
+export const EXPECTED_CREATED_ROLE_SETTING_ROW = Object.freeze({
+  databaseScope: "all",
+  database: "",
+  roleScope: "one",
+  role: READ_ONLY_ROLE,
+  configHash: EXPECTED_ROLE_CONFIG_MD5,
+});
+
+/**
+ * PostgreSQL 15 の既定のロールの所属（src/backend/catalog/system_functions.sql の
+ * `GRANT pg_read_all_settings TO pg_monitor;`・`GRANT pg_read_all_stats TO pg_monitor;`・`GRANT pg_stat_scan_tables TO pg_monitor;`。
+ * WITH ADMIN OPTION はないので admin_option = false）。pg_auth_members の列は roleid・member・grantor・admin_option で、
+ * fingerprint は roleid・member を名前にし、admin_option と一緒に読む（grantor は読まない）。
+ */
+export const PG15_DEFAULT_ROLE_MEMBERSHIPS = Object.freeze([
+  Object.freeze({ role: "pg_read_all_settings", member: "pg_monitor", admin: false }),
+  Object.freeze({ role: "pg_read_all_stats", member: "pg_monitor", admin: false }),
+  Object.freeze({ role: "pg_stat_scan_tables", member: "pg_monitor", admin: false }),
+]);
+
+/** PostgreSQL 15 の既定の拡張（initdb が作る plpgsql だけ。状態 C の判定でも、ほかの拡張は許さない） */
+export const PG15_PLPGSQL_EXTENSION_ROW = Object.freeze({ name: "plpgsql", version: "1.0", schema: "pg_catalog" });
+
+/** public スキーマの ACL（PostgreSQL 15 の既定。EXPECTED_PRE_CHANGE_SCHEMAS と同じ内容を aclitem の形で表したもの） */
+export const EXPECTED_PUBLIC_SCHEMA_ACL = canonicalAcl("{pg_database_owner=UC/pg_database_owner,=U/pg_database_owner}");
+
+/** sequence の件数（migration に SERIAL・IDENTITY・CREATE SEQUENCE がない。静的テストで migration を走査して確かめる） */
+export const EXPECTED_SEQUENCE_COUNT = 0;
+
+/** 作成後の katana_test の行（A1）。grant-sync の前の期待値と同じ（ACL は設定済み・PUBLIC は CONNECT だけ） */
+export const EXPECTED_CREATED_TEST_DATABASE: PreChangeDatabase = EXPECTED_PRE_CHANGE_TEST_DATABASE["grant-sync"];
+
+export type CreatedFingerprintCoverage = {
+  readonly coverage: "exact" | "partial" | "invariants";
+  /** 確かめる内容 */
+  readonly checked: string;
+  /** 確かめない内容（invariants・partial だけ。成功の表示にもそのまま出す） */
+  readonly notVerified?: string;
+};
+
+/** 18区分の扱い（区分の名前は CATALOG_FINGERPRINT_SECTIONS と同じ。テストで一致を確かめる） */
+export const CREATED_FINGERPRINT_COVERAGE: Readonly<Record<string, CreatedFingerprintCoverage>> = Object.freeze({
+  columns: {
+    coverage: "invariants",
+    checked: "every column belongs to an expected public table, every expected table has columns, and no column has its own ACL",
+    notVerified: "column names, positions, types, NOT NULL, defaults, identity, generation and collation",
+  },
+  constraints: {
+    coverage: "invariants",
+    checked: "every constraint belongs to an expected public table and is a primary key, foreign key or unique constraint",
+    notVerified: "constraint names, counts and definitions",
+  },
+  database: { coverage: "exact", checked: "name, owner, marker comment and the ACL after creation" },
+  dbRoleSettings: { coverage: "exact", checked: "only the default_transaction_read_only setting of katana_test_ro" },
+  defaultPrivileges: { coverage: "exact", checked: "no rows" },
+  enumValues: { coverage: "exact", checked: "values and order replayed from the migrations" },
+  extensions: { coverage: "exact", checked: "only plpgsql 1.0 in pg_catalog (PostgreSQL 15)" },
+  indexes: {
+    coverage: "invariants",
+    checked: "every index belongs to an expected public table and is valid",
+    notVerified: "index names, counts and definitions",
+  },
+  largeObjects: { coverage: "exact", checked: "no rows" },
+  policies: { coverage: "exact", checked: "no rows" },
+  relations: {
+    coverage: "partial",
+    checked: "exactly the expected tables with the owner, flags and ACL after creation, no sequences, no other relation kinds; index rows: owner, flags, no ACL, and the same names as the indexes section",
+    notVerified: "index names and counts",
+  },
+  roleMemberships: { coverage: "exact", checked: "only the PostgreSQL 15 default memberships of pg_monitor" },
+  roles: { coverage: "exact", checked: "exactly postgres, katana_test_user and katana_test_ro with their attributes and settings" },
+  routines: { coverage: "exact", checked: "no rows" },
+  schemas: { coverage: "exact", checked: "only public with the PostgreSQL 15 owner and ACL" },
+  sequences: { coverage: "exact", checked: "no rows" },
+  triggers: { coverage: "exact", checked: "no rows" },
+  types: { coverage: "exact", checked: "the row and array types of the expected tables and the enum and array types of the expected enums" },
+});
+
+type CreatedRow = Record<string, unknown>;
+
+function sectionRows(fingerprint: CatalogFingerprint, section: string): CreatedRow[] {
+  return (fingerprint.sections[section] ?? []).map(([, row]) => Object.fromEntries(JSON.parse(row) as [string, unknown][]) as CreatedRow);
+}
+
+/** 期待する行を、fingerprint と同じ形の文字列にする（項目の名前の順に並べる。欠けた項目は null） */
+function normalizedRow(section: string, row: Readonly<CreatedRow>): string {
+  const fields = Object.keys(CATALOG_FINGERPRINT_SECTIONS[section].fields).sort();
+  return JSON.stringify(fields.map((f) => [f, row[f] ?? null]));
+}
+
+/** exact の区分：行の集合が期待値と完全に一致する。違いは件数だけを返す（値は返さない） */
+function exactSectionViolations(fingerprint: CatalogFingerprint, section: string, expected: readonly Readonly<CreatedRow>[]): string[] {
+  const actual = new Set((fingerprint.sections[section] ?? []).map(([, row]) => row));
+  const wanted = new Set(expected.map((row) => normalizedRow(section, row)));
+  const unexpected = [...actual].filter((row) => !wanted.has(row)).length;
+  const missing = [...wanted].filter((row) => !actual.has(row)).length;
+  return unexpected + missing === 0 ? [] : [`${section}: ${unexpected} unexpected or different, ${missing} missing`];
+}
+
+function sameCanonicalAcl(text: unknown, expected: readonly string[] | null): boolean {
+  if (text !== null && typeof text !== "string") return false;
+  try {
+    return sameList(canonicalAcl(text), expected);
+  } catch {
+    return false;
+  }
+}
+
+/** fingerprint に katana_test_ro の行があるか（ROLE_NOT_CREATED の判定） */
+export function readOnlyRoleExistsIn(fingerprint: CatalogFingerprint): boolean {
+  return rowOf(fingerprint, "roles", keyOf(READ_ONLY_ROLE)) !== undefined;
+}
+
+/**
+ * FP-created：今のカタログの fingerprint が、作成後の期待状態であることを確かめる（純粋関数）。違反の一覧を返す（空なら一致）。
+ * 違反の文字列は、区分・種類・件数だけ（ACL・ロールの設定・定義の値は含めない）。
+ * invariants の区分（columns・constraints・indexes と relations のインデックスの行）では、名前・件数・定義の完全な一致は確かめない。
+ */
+export function createdCatalogViolations(fingerprint: CatalogFingerprint, expectation: CatalogAuditExpectation, tables: readonly string[]): string[] {
+  const violations: string[] = [];
+  const sections = Object.keys(CATALOG_FINGERPRINT_SECTIONS).sort();
+  if (Object.keys(fingerprint.sections).sort().join(",") !== sections.join(",")) return ["the fingerprint sections are not the expected ones"];
+  const tableSet = new Set(tables);
+  if (tableSet.size !== EXPECTED_INITIAL_TABLE_COUNT || tableSet.size !== tables.length) return ["the expected table list is not the initial one"];
+
+  // database（exact）
+  const database = sectionRows(fingerprint, "database");
+  const db = database[0];
+  if (
+    database.length !== 1 || db.name !== EXPECTED_DATABASE || db.owner !== EXPECTED_USER || db.comment !== TEST_DATABASE_MARKER ||
+    !sameCanonicalAcl(db.acl, EXPECTED_DATABASE_ACL_AFTER_CREATE)
+  ) {
+    violations.push("database: not the expected row after creation");
+  }
+
+  // schemas（exact）
+  const schemas = sectionRows(fingerprint, "schemas");
+  if (schemas.length !== 1 || schemas[0].name !== "public" || schemas[0].owner !== "pg_database_owner" || !sameCanonicalAcl(schemas[0].acl, EXPECTED_PUBLIC_SCHEMA_ACL)) {
+    violations.push("schemas: not only public with the PostgreSQL 15 owner and ACL");
+  }
+
+  // extensions・roles・dbRoleSettings・roleMemberships（exact）
+  violations.push(...exactSectionViolations(fingerprint, "extensions", [PG15_PLPGSQL_EXTENSION_ROW]));
+  violations.push(...exactSectionViolations(fingerprint, "roles", [PG15_BOOTSTRAP_SUPERUSER_ROW, EXPECTED_APP_ROLE_ROW, EXPECTED_CREATED_RO_ROLE_ROW]));
+  violations.push(...exactSectionViolations(fingerprint, "dbRoleSettings", [EXPECTED_CREATED_ROLE_SETTING_ROW]));
+  violations.push(...exactSectionViolations(fingerprint, "roleMemberships", PG15_DEFAULT_ROLE_MEMBERSHIPS));
+
+  // 0行の区分（exact）
+  for (const section of ["defaultPrivileges", "largeObjects", "policies", "routines", "sequences", "triggers"]) {
+    violations.push(...exactSectionViolations(fingerprint, section, []));
+  }
+
+  // enumValues（exact。migration から再現した値と順序）
+  if (expectation.enums.status !== "supported") {
+    violations.push("enumValues: the enum expectation could not be built");
+  } else {
+    const expectedValues = Object.entries(expectation.enums.enums).flatMap(([name, values]) => values.map((value, i) => ({ schema: "public", enum: name, value, position: i + 1 })));
+    violations.push(...exactSectionViolations(fingerprint, "enumValues", expectedValues));
+  }
+
+  // types（exact。テーブルの行型と配列型、enum とその配列型。所有者は katana_test_user、ACL は未設定）
+  const typeRow = (name: string, kind: string) => ({ schema: "public", name, kind, owner: EXPECTED_USER, acl: null });
+  const enums = [...expectation.inventory.enums];
+  violations.push(
+    ...exactSectionViolations(fingerprint, "types", [
+      ...tables.flatMap((t) => [typeRow(t, "c"), typeRow(`_${t}`, "b")]),
+      ...enums.flatMap((e) => [typeRow(e, "e"), typeRow(`_${e}`, "b")]),
+    ]),
+  );
+
+  // relations（partial）
+  const relations = sectionRows(fingerprint, "relations");
+  const tableRows = relations.filter((r) => r.kind === "r");
+  const indexRows = relations.filter((r) => r.kind === "i");
+  const sequenceRows = relations.filter((r) => r.kind === "S");
+  const otherRows = relations.filter((r) => r.kind !== "r" && r.kind !== "i" && r.kind !== "S");
+  const flagsOk = (r: CreatedRow) => r.schema === "public" && r.persistence === "p" && r.rowSecurity === false && r.forceRowSecurity === false && r.owner === EXPECTED_USER;
+  const tableNames = tableRows.map((r) => String(r.name)).sort(compareCodePoints);
+  if (tableNames.join(",") !== [...tables].sort(compareCodePoints).join(",")) violations.push("relations: the tables are not exactly the expected ones");
+  const badTables = tableRows.filter((r) => !flagsOk(r) || !sameCanonicalAcl(r.acl, EXPECTED_TABLE_ACL_AFTER_GRANT)).length;
+  if (badTables > 0) violations.push(`relations: ${badTables} table(s) without the expected owner, flags or ACL after creation`);
+  if (sequenceRows.length !== EXPECTED_SEQUENCE_COUNT) violations.push(`relations: ${sequenceRows.length} sequence(s)`);
+  if (otherRows.length > 0) violations.push(`relations: ${otherRows.length} relation(s) of other kinds`);
+  // インデックスの行（invariants）：所有者・フラグ・ACL が未設定・indexes の区分と同じ名前の集合。名前・件数そのものは確かめない
+  const badIndexes = indexRows.filter((r) => !flagsOk(r) || r.acl !== null).length;
+  if (badIndexes > 0) violations.push(`relations: ${badIndexes} index row(s) without the expected owner, flags or empty ACL`);
+
+  // indexes（invariants）：期待するテーブルの public のインデックスで、valid。名前・件数・定義は確かめない
+  const indexes = sectionRows(fingerprint, "indexes");
+  const badIndexDefinitions = indexes.filter((r) => r.schema !== "public" || !tableSet.has(String(r.table)) || r.valid !== true).length;
+  if (badIndexDefinitions > 0) violations.push(`indexes: ${badIndexDefinitions} index(es) outside the expected tables or not valid`);
+  const relationIndexNames = indexRows.map((r) => String(r.name)).sort(compareCodePoints).join(",");
+  const indexNames = indexes.map((r) => String(r.name)).sort(compareCodePoints).join(",");
+  if (relationIndexNames !== indexNames) violations.push("relations: the index rows do not match the indexes section");
+
+  // columns（invariants）：期待するテーブルの列だけ・すべてのテーブルに列がある・列単位の ACL がない。定義は確かめない
+  const columns = sectionRows(fingerprint, "columns");
+  const badColumns = columns.filter((r) => r.schema !== "public" || !tableSet.has(String(r.table)) || r.acl !== null).length;
+  if (badColumns > 0) violations.push(`columns: ${badColumns} column(s) outside the expected tables or with their own ACL`);
+  const tablesWithColumns = new Set(columns.map((r) => String(r.table)));
+  const withoutColumns = tables.filter((t) => !tablesWithColumns.has(t)).length;
+  if (withoutColumns > 0) violations.push(`columns: ${withoutColumns} expected table(s) without columns`);
+
+  // constraints（invariants）：期待するテーブルの主キー・外部キー・一意制約だけ。名前・件数・定義は確かめない
+  const constraints = sectionRows(fingerprint, "constraints");
+  const badConstraints = constraints.filter((r) => r.schema !== "public" || !tableSet.has(String(r.table)) || !["p", "f", "u"].includes(String(r.type))).length;
+  if (badConstraints > 0) violations.push(`constraints: ${badConstraints} constraint(s) outside the expected tables or of other types`);
+
+  return violations;
+}
+
+/** A1：作成後の ACL の照合（A0 と同じ固定の SELECT の観測を、katana_test だけ作成後の期待値にして比べる） */
+export function createdAclViolations(observation: PreChangeAclObservation): string[] {
+  return preChangeAclViolations(observation, "grant-sync");
 }
