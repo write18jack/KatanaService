@@ -16,6 +16,8 @@
     "testdb:verify": "node scripts/testdb-migrate.mts --verify",
     "testdb:checksums": "node scripts/testdb-checksums.mts",
     "testdb:catalog": "node scripts/testdb-catalog.mts",
+    "testdb:ro-role:create": "node scripts/testdb-ro-role.mts --create",
+    "testdb:ro-role:grant-sync": "node scripts/testdb-ro-role.mts --grant-sync",
     "testdb:check": "node scripts/testdb.mts --check",
     "testdb:status": "node scripts/testdb.mts --status",
     "testdb:identity": "node scripts/testdb.mts --identity-check",

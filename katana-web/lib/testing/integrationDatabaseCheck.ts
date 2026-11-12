@@ -152,8 +152,11 @@ export async function select(client: IntegrationDbClient, step: string, sql: str
 
 const sortedDifference = (a: Iterable<string>, b: ReadonlySet<string>) => [...a].filter((x) => !b.has(x)).sort();
 
-/** 接続後の本人確認。読み取り専用のトランザクションの中で、DB名・current_user・session_user・DBのコメントを照合する */
-export async function assertDatabaseIdentity(client: IntegrationDbClient): Promise<{ serverPort: number | null }> {
+/**
+ * 接続後の本人確認。読み取り専用のトランザクションの中で、DB名・current_user・session_user・DBのコメントを照合する。
+ * expectedUser は既定で katana_test_user。読み取り専用ロールの検査（lib/testing/testDbReadOnlyRole.ts）だけが katana_test_ro を渡す。
+ */
+export async function assertDatabaseIdentity(client: IntegrationDbClient, expectedUser: string = EXPECTED_USER): Promise<{ serverPort: number | null }> {
   const [readOnly] = await select(client, "read-only check", "SHOW transaction_read_only");
   if (readOnly?.transaction_read_only !== "on") {
     throw new IntegrationDatabaseCheckError("NOT_READ_ONLY", "the verification transaction is not read-only.");
@@ -173,11 +176,11 @@ export async function assertDatabaseIdentity(client: IntegrationDbClient): Promi
   if (identity.database !== EXPECTED_DATABASE) {
     throw new IntegrationDatabaseCheckError("DATABASE_MISMATCH", `current_database() is not ${EXPECTED_DATABASE}.`);
   }
-  if (identity.currentUser !== EXPECTED_USER) {
-    throw new IntegrationDatabaseCheckError("CURRENT_USER_MISMATCH", `current_user is not ${EXPECTED_USER}.`);
+  if (identity.currentUser !== expectedUser) {
+    throw new IntegrationDatabaseCheckError("CURRENT_USER_MISMATCH", `current_user is not ${expectedUser}.`);
   }
-  if (identity.sessionUser !== EXPECTED_USER) {
-    throw new IntegrationDatabaseCheckError("SESSION_USER_MISMATCH", `session_user is not ${EXPECTED_USER}.`);
+  if (identity.sessionUser !== expectedUser) {
+    throw new IntegrationDatabaseCheckError("SESSION_USER_MISMATCH", `session_user is not ${expectedUser}.`);
   }
   if (identity.marker !== TEST_DATABASE_MARKER) {
     throw new IntegrationDatabaseCheckError("MARKER_MISMATCH", `the database comment is not "${TEST_DATABASE_MARKER}".`);

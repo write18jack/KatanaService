@@ -794,8 +794,15 @@ describe("静的な確認（ソース）", () => {
     }
   });
 
-  it("25. 呼び出し元はカタログの監査専用の経路（testDbCatalogRunner・testdb-catalog）だけで、schemaDiff・checksum・migration の経路からは呼ばない", () => {
-    const allowedCallers = ["lib/testing/testDbCatalogRunner.ts", "scripts/testdb-catalog.mts"];
+  it("25. 呼び出し元はカタログの監査専用の経路（testDbCatalogRunner・testdb-catalog）と、読み取り専用ロールの準備の経路（testDbReadOnlyRole・testdb-ro-role。Step 3-12B-5E-3）だけで、schemaDiff・checksum・migration の経路からは呼ばない", () => {
+    const allowedCallers = [
+      "lib/testing/testDbCatalogRunner.ts",
+      "scripts/testdb-catalog.mts",
+      // 読み取り専用ロールの準備：FP0・FP1（runCatalogDefinitionAudit）と、R-base・R-full（readReadOnlyRoleSnapshot・classifyReadOnlyRoleSnapshot）に再利用する
+      "lib/testing/testDbReadOnlyRole.ts",
+      "lib/testing/testDbReadOnlyRoleRunner.ts",
+      "scripts/testdb-ro-role.mts",
+    ];
     for (const file of allowedCallers) expect(readFileSync(path.join(REPO_ROOT, file), "utf8")).toContain("testDbCatalogAudit");
     const importers = [
       ...readdirSync(path.join(REPO_ROOT, "scripts")).map((f) => `scripts/${f}`),

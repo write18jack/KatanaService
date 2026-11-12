@@ -347,7 +347,8 @@ const KNOWN_DB_INTEGRATION_TEST_FILES = [
 // Step 3-12B-5C-1 で lib/testing/testDbChecksums.test.ts を追加（35 → 36）
 // Step 3-12B-5C-5B で lib/testing/testDbCatalogAudit.test.ts を追加（36 → 37）
 // Step 3-12B-5C-5C で lib/testing/testDbCatalogRunner.test.ts を追加（37 → 38）
-const EXPECTED_UNIT_TEST_COUNT = 38;
+// Step 3-12B-5E-3 で lib/testing/testDbReadOnlyRole.test.ts・testDbReadOnlyRoleRunner.test.ts を追加（38 → 40）
+const EXPECTED_UNIT_TEST_COUNT = 40;
 const INTEGRATION_TEST_GLOB = "**/*.integration.test.{ts,tsx}";
 const TEST_FILE = /\.test\.tsx?$/;
 const INTEGRATION_TEST_FILE = /\.integration\.test\.tsx?$/;

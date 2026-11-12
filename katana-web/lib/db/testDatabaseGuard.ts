@@ -90,6 +90,21 @@ function pointsToSameDatabase(a: URL, b: URL): boolean {
  * DBには接続しない。成功時は、表示してよい接続先の情報を返す。
  */
 export function assertTestDatabaseTarget(input: TestDatabaseGuardInput): TestDatabaseTarget {
+  return assertTargetForUser(input, TEST_DATABASE_TARGET.user);
+}
+
+/** schemaDiff 用の読み取り専用ロール（Step 3-12B-5E-3） */
+export const READ_ONLY_TEST_DATABASE_USER = "katana_test_ro";
+
+/**
+ * 読み取り専用ロール（katana_test_ro）の接続URLを検証する。
+ * 条件は assertTestDatabaseTarget と同じで、ユーザーだけが katana_test_ro に固定される（TEST_DATABASE_TARGET は緩めない）。
+ */
+export function assertReadOnlyTestDatabaseTarget(input: TestDatabaseGuardInput): TestDatabaseTarget {
+  return assertTargetForUser(input, READ_ONLY_TEST_DATABASE_USER);
+}
+
+function assertTargetForUser(input: TestDatabaseGuardInput, expectedUser: string): TestDatabaseTarget {
   const { databaseUrl, env, developmentDatabaseUrl } = input;
 
   if (databaseUrl === undefined || databaseUrl === "") {
@@ -120,7 +135,7 @@ export function assertTestDatabaseTarget(input: TestDatabaseGuardInput): TestDat
 
   // DB名と同じく、パーセントエンコードした表記も認めず、そのままの文字列で比べる
   const user = url.username;
-  if (user !== TEST_DATABASE_TARGET.user) {
+  if (user !== expectedUser) {
     throw new TestDatabaseGuardError("USER_NOT_ALLOWED", `user "${user}" is not allowed.`);
   }
   if (url.password === "") {
@@ -240,4 +255,87 @@ export function assertTestDatabaseCredentials(testEnv: Readonly<Record<string, s
     throw new TestDatabaseCredentialsError("ADMIN_PASSWORD_SAME_AS_APP", `${TEST_DB_ADMIN_PASSWORD_KEY} must differ from ${TEST_DB_APP_PASSWORD_KEY}.`);
   }
   return { appPassword, adminPassword };
+}
+
+/** `.env.test.readonly` の、katana_test_ro の接続URL（Step 3-12B-5E-3。`.env.test` には置かない） */
+export const TEST_DB_RO_URL_KEY = "KATANA_TEST_RO_DATABASE_URL";
+/** `.env.test.readonly` の、katana_test_ro のパスワード（KATANA_TEST_RO_DATABASE_URL のパスワードと同じ値） */
+export const TEST_DB_RO_PASSWORD_KEY = "KATANA_TEST_DB_RO_PASSWORD";
+/** katana_test_ro のパスワードの最短の長さ（SCRAM の検証子は辞書攻撃の材料になり得るので、長いランダムな値を求める） */
+export const TEST_DB_RO_PASSWORD_MIN_LENGTH = 32;
+const READ_ONLY_ENV_KEYS = [TEST_DB_RO_URL_KEY, TEST_DB_RO_PASSWORD_KEY];
+
+export type ReadOnlyTestDatabaseCredentialsErrorCode =
+  | "RO_ENV_UNEXPECTED_KEY"
+  | "RO_URL_INVALID"
+  | "RO_PASSWORD_MISSING"
+  | "RO_PASSWORD_PLACEHOLDER"
+  | "RO_PASSWORD_CHARSET"
+  | "RO_PASSWORD_TOO_SHORT"
+  | "RO_URL_PASSWORD_MISMATCH"
+  | "RO_PASSWORD_REUSED"
+  | "RO_URL_SAME_AS_APP";
+
+export class ReadOnlyTestDatabaseCredentialsError extends Error {
+  readonly code: ReadOnlyTestDatabaseCredentialsErrorCode;
+  /** コードを除いた説明（パスワード・接続URLを含まない） */
+  readonly detail: string;
+
+  constructor(code: ReadOnlyTestDatabaseCredentialsErrorCode, detail: string) {
+    super(`[testDatabaseGuard] ${code}: ${detail}`);
+    this.name = "ReadOnlyTestDatabaseCredentialsError";
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+/**
+ * `.env.test.readonly`（dotenv.parse した結果）の、katana_test_ro の認証情報を検証する。DBには接続しない。
+ * 接続先（ホスト・ポート・DB・ユーザー katana_test_ro・クエリなし・開発用DBでない）は assertReadOnlyTestDatabaseTarget で先に検証する。
+ * `.env.test` は assertTestDatabaseCredentials で先に検証し、その結果（アプリ用・管理用のパスワード）を渡す。
+ *
+ * - キーは KATANA_TEST_RO_DATABASE_URL・KATANA_TEST_DB_RO_PASSWORD の2つだけ
+ * - パスワードは空でない・見本の値でない・使える文字（`[A-Za-z0-9_-]`。SASLprep で変化しない）だけ・32文字以上
+ * - URLに書かれたままのパスワードと KATANA_TEST_DB_RO_PASSWORD が一致する
+ * - アプリ用・管理用のパスワードと違う。URL がアプリ用の DATABASE_URL と違う
+ * 失敗したときのメッセージには、パスワード・接続URLを含めない。成功したら、検証済みの URL とパスワードを返す。
+ */
+export function assertReadOnlyTestDatabaseCredentials(
+  readOnlyEnv: Readonly<Record<string, string | undefined>>,
+  app: { databaseUrl: string; appPassword: string; adminPassword: string },
+): { databaseUrl: string; password: string } {
+  const unexpected = Object.keys(readOnlyEnv).filter((key) => !READ_ONLY_ENV_KEYS.includes(key));
+  if (unexpected.length > 0) {
+    // キーの名前は秘密情報ではないので表示する
+    throw new ReadOnlyTestDatabaseCredentialsError("RO_ENV_UNEXPECTED_KEY", `unexpected keys: ${unexpected.sort().join(", ")}.`);
+  }
+  const databaseUrl = readOnlyEnv[TEST_DB_RO_URL_KEY];
+  const parsed = databaseUrl === undefined ? null : parsePostgresUrl(databaseUrl);
+  if (!parsed || databaseUrl === undefined) {
+    throw new ReadOnlyTestDatabaseCredentialsError("RO_URL_INVALID", `${TEST_DB_RO_URL_KEY} could not be parsed as a URL.`);
+  }
+  const password = readOnlyEnv[TEST_DB_RO_PASSWORD_KEY];
+  if (password === undefined || password === "") {
+    throw new ReadOnlyTestDatabaseCredentialsError("RO_PASSWORD_MISSING", `${TEST_DB_RO_PASSWORD_KEY} is not set.`);
+  }
+  const urlPassword = parsed.url.password;
+  if ([urlPassword, password].some((value) => PASSWORD_PLACEHOLDER.test(value))) {
+    throw new ReadOnlyTestDatabaseCredentialsError("RO_PASSWORD_PLACEHOLDER", "the read-only password still has a placeholder value.");
+  }
+  if ([urlPassword, password].some((value) => !PASSWORD_CHARSET.test(value))) {
+    throw new ReadOnlyTestDatabaseCredentialsError("RO_PASSWORD_CHARSET", "the read-only password may only contain A-Z, a-z, 0-9, '_' and '-'.");
+  }
+  if (password.length < TEST_DB_RO_PASSWORD_MIN_LENGTH) {
+    throw new ReadOnlyTestDatabaseCredentialsError("RO_PASSWORD_TOO_SHORT", `the read-only password must be at least ${TEST_DB_RO_PASSWORD_MIN_LENGTH} characters.`);
+  }
+  if (urlPassword !== password) {
+    throw new ReadOnlyTestDatabaseCredentialsError("RO_URL_PASSWORD_MISMATCH", `the ${TEST_DB_RO_URL_KEY} password does not match ${TEST_DB_RO_PASSWORD_KEY}.`);
+  }
+  if (password === app.appPassword || password === app.adminPassword) {
+    throw new ReadOnlyTestDatabaseCredentialsError("RO_PASSWORD_REUSED", "the read-only password must differ from the application and admin passwords.");
+  }
+  if (databaseUrl === app.databaseUrl) {
+    throw new ReadOnlyTestDatabaseCredentialsError("RO_URL_SAME_AS_APP", `${TEST_DB_RO_URL_KEY} must differ from DATABASE_URL.`);
+  }
+  return { databaseUrl, password };
 }
