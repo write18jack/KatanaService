@@ -2761,6 +2761,7 @@ npm run test:integration ─► 専用runner
   - public スキーマの ACL、DEFAULT PRIVILEGES が0件であること、18区分の fingerprint。
   - ro の認証情報でのログイン。
 - 工程7の時点で、コンテナの同一性・postmaster の起動時刻・状態 C は、工程6と矛盾しない。
+- **（2026-11-13 更新）** 独立した検証は、Step 3-12B-5E-7A-3（`--verify-created`。2026-11-12T23:15:00Z）で、定義した検査範囲で完了した。上の未確認の項目の扱いは、5E-7A-3 の記録が正。工程7の時点の記録は、その時点の事実として残す。
 
 #### Step 3-12B-5E-8：create ゲートの無効化（実施済み。2026-11-13。commit `b762535`）
 
@@ -2796,20 +2797,113 @@ npm run test:integration ─► 専用runner
   7. D2（D1 と一致）
 - 既存の読み取り専用の関数・固定の SELECT・期待値を再利用し、新しい SQL は最小限にする。期待値の定数は、作成の経路と共有する。
 - 設計の提示と承認、実装（モックのテストと静的検査）、実DBでの実行は、それぞれ別に承認を得る。
+- **（2026-11-13 更新）** この案は 5E-7A-1〜7A-3 で実施済み。採用した設計・実装・結果は、下の記録が正（上の案とは、FP-recheck の追加と、14区分の照合の方法が違う）。
 
-**残余リスク（2026-11-13 時点。5E-5C からの更新）:**
+#### Step 3-12B-5E-7A-1：作成後の独立した検証モードの設計（承認済み。2026-11-13。コードの変更なし）
 
-1. 工程7の独立した検証は未完了。作成後の権限・ACL・fingerprint の根拠は、工程6の実行の中での検査だけ。5E-7A で解消する予定。
-2. 工程6の後に、テストDBのロール・ACL が変わっても、今の経路では検出できない。コンテナの同一性・起動時刻・状態 C は、`testdb:identity`・`testdb:verify` で確かめられる。
-3. template1 と postgres の ACL そのものを、作成の後に直接照合していない。確かめたのは、ro の実効権限（R-full）と、ro への明示的な付与がないこと（COMMIT の前の検査）だけ。固定 SQL の変更の文は katana_test にしか作用しない。
-4. `testdb:catalog` の監査が、作成後のカタログで `passed` になるかは、独立には未確認（工程6の FP1 では `passed`）。
+- `--verify-created`（`npm run testdb:ro-role:verify-created`）を、固定のゲートに依存しない読み取り専用のモードとして採用した（`--preflight-create` と同じ扱い）。
+- 順序：事前の検証（引数・認証情報・接続先・固定 SQL の SHA-256・期待値）→ D1 → F1 → FP-created → A1 → R-full → FP-recheck → D2。異常を見つけたら、その場で止まる。
+- 方針：
+  - 新しい SQL・SQL ファイル・docker exec・DB の変更・検証子の作成は追加しない。既存の読み取り専用の部品（F1、カタログの監査と fingerprint、A0 の固定の SELECT、R-full）だけを使う。
+  - **今回読んだ fingerprint を期待値にしない**（自己比較で成功にしない）。期待値は、schema.prisma・migration（`loadCatalogAuditExpectation`）、初期化スクリプト、01-create.sql と同じ定数、PostgreSQL 15 の既定だけから作る。工程6の FP1 は保存していないので、基準にしない。
+  - FP-recheck は、検査の途中の変化を見つけるためのもので、成功の根拠ではない。
+- 18区分の扱い：14区分は完全照合。relations・columns・constraints・indexes の4区分は、決めた不変条件だけを照合する（部分照合）。部分照合の区分で照合しない名前・件数・定義は、schemaDiff に引き継ぐ（下の「schemaDiff への引き継ぎ」）。
+
+#### Step 3-12B-5E-7A-2：作成後の独立した検証モードの実装（実施済み。2026-11-13。commit `711b276`）
+
+- commit：`711b27622b680c6dee2a00f43b8740f5c4a9934e`（`test: add read-only verification of the created read-only role`）。
+- 変更した6ファイル：
+  - `lib/testing/testDbReadOnlyRole.ts`：追加だけ。作成後の期待値の定数、18区分の照合範囲の表（`CREATED_FINGERPRINT_COVERAGE`）、`createdCatalogViolations`・`readOnlyRoleExistsIn`・`createdAclViolations`。
+  - `lib/testing/testDbReadOnlyRoleRunner.ts`：`--verify-created` の引数、結果の種類 `verified-created`、判定コード、F1 の後で分かれて D2 の後で必ず戻る分岐。ゲートの確認の条件を `!preflight` から `apply` に変えた（既存のモードでは同じ意味）。
+  - `scripts/testdb-ro-role.mts`：先頭のコメントだけ。
+  - `package.json`：`testdb:ro-role:verify-created`。
+  - `lib/testing/testDbReadOnlyRole.test.ts`・`lib/testing/testDbReadOnlyRoleRunner.test.ts`。
+- 判定コード（新規5つ）：`ROLE_NOT_CREATED`・`CREATED_STATE_MISMATCH`・`CREATED_ACL_CHECK_FAILED`・`CREATED_ACL_MISMATCH`・`CREATED_STATE_CHANGED_DURING_CHECK`。監査が `passed` でなければ、照合に進まず `CATALOG_CHECK_FAILED`。R-full の接続・認証の失敗は `READ_ONLY_ROLE_CHECK_FAILED`、判定の違反は `READ_ONLY_ROLE_FULL_FAILED`。
+- A1：A0 と同じ `runPreChangeAclCheck` の固定の SELECT。判定は `preChangeAclViolations(…, "grant-sync")`（作成後の katana_test の期待値は、grant-sync の前の値と同じ）。
+- PostgreSQL 15 に依存する期待値と根拠：
+  - 既定のロールの所属：`pg_read_all_settings`・`pg_read_all_stats`・`pg_stat_scan_tables` が `pg_monitor` に所属し、admin は false。根拠は REL_15_STABLE の `src/backend/catalog/system_functions.sql`（`GRANT … TO pg_monitor;` の3文だけで、WITH ADMIN OPTION はない）。PG15 の `pg_auth_members` の列は roleid・member・grantor・admin_option で、fingerprint は grantor を読まない。
+  - bootstrap のスーパーユーザー：属性はすべて true、接続の上限は -1、config は NULL。根拠は REL_15_STABLE の `src/include/catalog/pg_authid.dat`（oid 10）。
+  - plpgsql：版は `1.0`、スキーマは `pg_catalog`（PG15 の initdb の既定。ソースでは未確認で、実DBの照合で一致した）。
+  - public スキーマの ACL：`{pg_database_owner=UC/pg_database_owner,=U/pg_database_owner}`（A0 と同じ根拠）。
+  - 配列型の名前：テーブルと enum の名前の前に `_` を付けたもの（PostgreSQL の命名規則）。
+- そのほかの期待値の根拠は、静的テストで確かめる：01-app-role.sh の CREATE ROLE の行、初期化スクリプトに `ALTER … SET` がないこと、02-marker.sql のコメント、01-create.sql の CREATE ROLE・ALTER ROLE、migration に SERIAL・IDENTITY・SEQUENCE がないこと（sequence 0件の根拠）。
+- 検証：
+  - 関連5ファイルで559件、`npm test` で40ファイル・1881件が成功した（`*.integration.test.*` は0件。DATABASE_URL はダミー）。
+  - `tsc --noEmit`・変更ファイルの ESLint・`node --check`・`git diff --check` が成功した。全体の ESLint の9件は既存の問題。
+  - 静的検査：分岐が exec の準備より前で戻ること、分岐が exec・検証子・ゲート・SQL を参照しないこと、ゲートの確認が `--apply` のときだけであること、npm スクリプトが4つで `--apply` を含まないこと。
+  - テストが実際に失敗することを、ランナーを一時的に6通り書き換えて確かめた（照合の無効化、A1 の無効化、FP-recheck の削除、ロール不存在の検査の削除、R-full の判定の削除、ゲートの条件を以前の形に戻す）。
+- 固定ゲートは6つとも無効のまま。実DB・Docker には問い合わせていない。
+
+#### Step 3-12B-5E-7A-3：実DBでの作成後の独立した検証（実施済み。2026-11-12T23:15:00Z。コードの変更なし）
+
+- **開始条件（すべて一致）:**
+  - HEAD は `711b276`。追跡済みのファイルに差分はなく、未追跡は pptx と `test-data/` だけ。
+  - 固定ゲートは6つとも無効。
+  - `.env.test.readonly` は `-rw-------` で、Git の除外の対象。追跡されていない。
+  - 固定 SQL の SHA-256 は、2つとも定数と一致した。予行（`npm run testdb:ro-role:create`。Docker・DB に触れない）で、認証情報と接続先の検証が成功した。
+- **既存の読み取り専用の検査（2026-11-12T23:14:54Z。どれも終了コード0）:**
+  - status：`katana-test-db` は running で healthy。katana-test のボリュームはない。`katana-db` はない。開発用のボリューム（作成日時 2026-07-18T05:42:41Z）は同じで、使うコンテナはない。全ボリュームの数は3。
+  - identity：D の検査はすべて成功した。コンテナ ID `591ffba8…`、StartedAt `2026-11-08T00:41:30.157808382Z`、再起動の回数0、ネットワーク ID `979eeb82…`、IP `172.18.0.2`。工程6・7と一致した。
+  - verify：本人確認の4項目が一致した。状態 C（8件・テーブルは空）。`pg_postmaster_start_time` は `2026-11-08T00:41:30.798895Z` で一致した。
+- **実行:** `npm run testdb:ro-role:verify-created` を1回だけ（2026-11-12T23:15:00Z〜23:15:01Z）。**終了コード0。** `NODE_TLS_REJECT_UNAUTHORIZED` は、このコマンドだけで外した（`env -u`）。
+- **出力の要点（そのまま）:**
+  - `verify-created passed for 127.0.0.1:5434/katana_test (read-only; nothing was changed and docker exec was not run).`
+  - `checks D1/F1/FP-created/A1/R-full/FP-recheck/D2 passed: same container, state C, catalog audit passed, katana_test_ro exists with the expected attributes, setting, ACLs and effective privileges (16 tables, SELECT only).`
+  - `fingerprint compared with expectations built from the repository and fixed constants (not with itself): exact for 14 sections (…)`
+  - `limited checks only: columns (invariants; …); constraints (invariants; …); indexes (invariants; …); relations (partial; …).`
+- **結果:** 判定は、終了コード0と、コード上の成功の条件から確かめた。どれか1つでも違えば、固定の判定コードで止まる。
+  - D1・F1・D2：コンテナは同じ。F1 のサーバーの識別は D1 と整合し、D2 は D1 と一致した。状態 C を維持した。
+  - fingerprint の14区分は、期待値と完全に一致した。PostgreSQL 15 に依存する期待値（bootstrap のスーパーユーザーの属性、既定の所属3行、plpgsql 1.0、配列型の名前）も一致した。
+  - 残り4区分の不変条件は、すべて成り立った（下の「検証範囲」）。
+  - A1：4つの DB（katana_test は作成後の ACL、template0・template1・postgres は PostgreSQL 15 と初期化スクリプトの期待値）と public スキーマの ACL・PUBLIC の実効権限が、期待値と一致した。GRANTABLE はなく、想定外の DB・スキーマもない。
+  - 16テーブルの ACL は、作成後の期待値（`katana_test_user=arwdDxt`、`katana_test_ro=r`）と一致した。
+  - R-full：`katana_test_ro` 本人で認証して接続し、実効権限の検査が成功した。属性の違反・所属・所有はない。16テーブルに SELECT だけで、書き込み系の権限はない。katana_test の CREATE・TEMPORARY、public の CREATE、postgres の CONNECT はない。pg_shdepend の依存は、16テーブルへの ACL だけ。
+  - FP-created と FP-recheck は一致した（検査の途中でカタログは変わっていない）。
+  - 想定外のロール・権限・所有・所属はない（roles・roleMemberships・defaultPrivileges の完全照合と R-full）。
+- DB の変更・docker exec・`--apply`・ゲートの変更・認証情報の変更・自動の再試行は、どれも行っていない。パスワード・接続 URL・検証子は、表示も記録もしていない。
+- **二つの事実を区別して記録する:**
+  - 工程6（5E-6）の事後の検査の成功（2026-11-12T07:50:30Z）：`--create --apply` の実行の中で、同じ実行の FP0 からの差分として D3・F2・FP1・R-full が成功した。
+  - 5E-7A-3 の独立した検証の成功（2026-11-12T23:15:00Z）：変更の操作から独立した読み取り専用の経路で、リポジトリと固定の定数から作った期待値と照合して成功した。
+- **工程7の独立した検証は、定義した検査範囲で完了した。** 部分照合の4区分で照合していない項目は、完了の範囲に含めない。
+
+#### 作成後の検証範囲と、schemaDiff への引き継ぎ（2026-11-13）
+
+- **完全照合（14区分）:** database・schemas・extensions・types・enumValues・roles・dbRoleSettings・roleMemberships・sequences・routines・triggers・policies・defaultPrivileges・largeObjects。
+- **部分照合（4区分。照合した不変条件）:**
+  - relations：テーブル16件の所有者・フラグ・作成後の ACL、sequence 0件、その他の種類0件（ここまでは完全照合）。インデックスの行の所有者・フラグ・ACL が未設定であること、indexes の区分と名前の集合が一致すること。
+  - columns：列は16テーブルのものだけ、すべてのテーブルに列がある、列単位の ACL がない。
+  - constraints：16テーブルのものだけで、種類は主キー・外部キー・一意制約（p・f・u）だけ。
+  - indexes：16テーブルのものだけで、すべて valid（`indexes.valid` は検査済み）。
+- **未確認（完全一致を確かめていない）:**
+  - インデックスの名前・件数・定義
+  - 列の名前・位置・型・NOT NULL・既定値・identity・generated・collation
+  - 制約の名前・件数・定義
+- **schemaDiff での管理の方針:** 未確認の項目を、次の2つに分けて管理する。分け方は、工程9の設計で、Prisma 7 の `migrate diff` が実際に比較する範囲を確認してから確定する（ここでは決めない）。
+  - Prisma が比較できる範囲：schemaDiff の結果（差分なし）を根拠にする。
+  - Prisma が比較しない（または比較するか未確認の）範囲：schemaDiff の後も残余リスクとして残すか、別の読み取り専用の検査を設計する。候補は、列の位置、列ごとの collation、identity・generated の詳細、制約の DEFERRABLE・validated、権限・所有、CHECK・EXCLUDE・RLS などの PostgreSQL 固有の定義（後者は、カタログの監査で0件であることを確かめ済み）。
+
+#### 次工程の方針：Prisma CLI による schemaDiff の安全設計の確認（未着手）
+
+- 次は、Prisma CLI（`migrate diff`）による schemaDiff の安全設計を確かめる工程とする。
+- 最初に、既存の設計（3-Aの schemaDiff・`katana_test_ro` の方式の比較、5E-1・5E-2A・5E-2B など）・コード（`lib/testing/schemaDiff.ts`・固定ゲート `SCHEMA_DIFF_DISABLED`）・本ファイルを読み、今の構成（作成済みの `katana_test_ro`、`--verify-created`、6つの固定ゲート）に合わせて、工程9以降の実装の方針を整理する。
+- 整理の対象：ro で接続すること、接続 URL の露出（Prisma CLI の `--datasource` の引数）、実行の前後の R-full と fingerprint、上の「Prisma が比較できる範囲・比較しない範囲」の確定。
+- 設計の提示と承認、実装、Prisma CLI の実行は、それぞれ別に承認を得る。
+
+**残余リスク（2026-11-13 時点。5E-7A-3 で更新）:**
+
+1. （解消・5E-7A-3）工程7の独立した検証は、定義した検査範囲で完了した。部分照合の4区分の名前・件数・定義は未確認（上の「検証範囲」）。
+2. （一部解消・5E-7A-3）工程6の後のロール・ACL の変化は、`--verify-created` を実行したときに検出できる。実行と実行の間の変化は検出しない。コンテナの同一性・起動時刻・状態 C は、`testdb:identity`・`testdb:verify` で確かめられる。
+3. （解消・5E-7A-3）template1・postgres の ACL は、作成の後に A1 で直接照合した。
+4. （解消・5E-7A-3）作成後のカタログで、カタログの監査は `passed` だった（FP-created・FP-recheck）。
 5. template1 の PUBLIC の CONNECT は残す（REVOKE は見送り）。
 6. docker exec の環境変数（SCRAM の検証子とその SHA-256。平文のパスワードではない）が、Docker の API にどれだけ残るかは、未確認。
-7. `default_transaction_read_only` は既定値にすぎない。書き込みの防止の根拠は、権限を付けていないことにある。
+7. `default_transaction_read_only` は既定値にすぎず、セッションの中で解除できる。書き込みの防止の根拠は、権限を付けていないことにある。
 8. データ領域は tmpfs なので、コンテナを作り直すとロールは消える。その場合は、手順に沿ってもう一度作る（工程5〜8と同じ承認の手順）。
-9. Prisma CLI の `--datasource` の引数で、接続 URL が露出しうる。工程11の前に承認を得る。
-10. TOCTOU のリスクは残る。
-11. 解消したこと：固定 SQL の中の検査、Unix ソケットの trust 認証、SCRAM の検証子がそのまま保存されること、aclitem の表記、ro による pg_shdepend の読み取り。どれも工程6で、実DBで動作した。
+9. Prisma CLI の `--datasource` などのプロセスの引数で、接続 URL が露出しうる。工程11の前に承認を得る。
+10. TOCTOU のリスクは残る。`--verify-created` の中では、FP-recheck・D2・接続ごとのサーバーの固定で検出する。
+11. Prisma が比較しない PostgreSQL 固有の定義（上の「schemaDiff での管理の方針」の候補）は、schemaDiff の後も残りうる。
+12. 保存されたパスワードそのものは確かめられない。根拠は、ro でのログインが成功したことだけ。
+13. 解消したこと：固定 SQL の中の検査、Unix ソケットの trust 認証、SCRAM の検証子がそのまま保存されること、aclitem の表記、ro による pg_shdepend の読み取り（どれも工程6で、実DBで動作した）。PostgreSQL 15 に依存する期待値（5E-7A-3 で実DBと一致した）。
 
 ### Step 3-0：読み取りだけの事前確認（実施済み。Dockerの記録は未記録）
 
@@ -2962,6 +3056,7 @@ npm run test:integration ─► 専用runner
 - **2026-11-10 追記:** checksum の実DB照合は Step 3-12B-5C-3C で実施済み（8件すべて完全一致。条件2-A は達成）。差分（`migrate diff`。条件2-B）は未実施。3-Aの「条件2の整理」。
 - **2026-11-11 追記:** PostgreSQL 固有の定義と enum の値・順序のカタログ監査は、Step 3-12B-5D-3 で実施済み（`passed`。条件2-B の一部）。`migrate diff` による定義の一致（条件2-B の残り）は未実施。3-Aの「条件2の整理（2026-11-11）」。
 - **2026-11-13 追記:** schemaDiff 用の読み取り専用ロール `katana_test_ro` は、Step 3-12B-5E-6 で作成した（1回。事後の検査は成功）。create ゲートは 5E-8（`b762535`）で無効に戻した。作成後の独立した検証は未完了で、次の 5E-7A（`--verify-created`。設計案）で行う。`migrate diff`（条件2-B の残り）は未実施。
+- **2026-11-13 追記（5E-7A-3）:** 作成後の独立した検証（`--verify-created`。`711b276`）を実DBで1回実行し、成功した（14区分は完全照合、4区分は部分照合）。部分照合の区分の名前・件数・定義は未確認で、schemaDiff に引き継ぐ（3-Aの「作成後の検証範囲と、schemaDiff への引き継ぎ」）。`migrate diff` は未実施。
 
 ### Step 3-13：ドキュメント
 
@@ -3041,7 +3136,7 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：PLAN の記録の commit（`docs: record read-only role creation and gate reset`。親は `b762535`（`test: disable the create gate for read-only role provisioning again`。Step 3-12B-5E-8））
+   - HEAD：PLAN の記録の commit（`docs: record independent verification of the read-only role`。親は `711b276`（`test: add read-only verification of the created read-only role`。Step 3-12B-5E-7A-2））
    - `.env.test.readonly` はユーザーが作成済み（`-rw-------`。キーは2つ。中身は表示しない）
    - 変更済み（未commit）：なし
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
@@ -3052,6 +3147,7 @@ npm run test:integration ─► 専用runner
    - （2026-11-10 更新）checksum の実DB照合は Step 3-12B-5C-3C で完了（8件すべて完全一致。条件2-A 達成）。ゲートは 5C-4（`fc45fc0`）で無効に戻した。3つの固定ゲートはすべて無効。条件2-B（定義の一致）は未完了。3-Aの「条件2の整理」
    - （2026-11-11 更新）PostgreSQL 固有の定義のカタログ監査は Step 3-12B-5D-3 で完了（`passed`。条件2-B の一部）。catalog ゲートは 5D-4（`f390846`）で無効に戻した。4つの固定ゲート（migration・checksum・schemaDiff・catalog）はすべて無効。条件2-B の全体は未完了。3-Aの「条件2の整理（2026-11-11）」
    - `katana_test_ro`（schemaDiff 用の読み取り専用ロール）の導入方式の比較（A：既存のコンテナに追加、B：初期化スクリプトに組み込んで再構築。3-Aの「次工程の方針（2026-11-11）」）と、schemaDiff の実行経路の安全設計（DB の変更を伴う。比較・設計の提示と承認が先。コードの変更・DB の変更・Prisma CLI の起動は、それぞれ別途の承認）
+   - （2026-11-13 更新・5E-7A-3）作成後の独立した検証モード `--verify-created`（`711b276`）を実装し、実DBで1回実行して成功した（14区分は完全照合、relations・columns・constraints・indexes は部分照合）。**工程7の独立した検証は、定義した検査範囲で完了。** 固定ゲートは6つとも無効。**次は Prisma CLI による schemaDiff の安全設計の確認（既存の設計・コード・本ファイルを読み、工程9以降の方針を整理する）で、承認が必要。** 実装・Prisma CLI の実行は、それぞれ別の承認。3-Aの「Step 3-12B-5E-7A-1」〜「次工程の方針：Prisma CLI による schemaDiff の安全設計の確認」
    - （2026-11-13 更新・5E-8）工程5（`4b03005`）で create ゲートを一時的に有効にした。工程6（Step 3-12B-5E-6）で `katana_test_ro` を1回で作成した（終了コード0。固定 SQL の中の検査と D3・F2・FP1・R-full が成功。FP0 → FP1 は4区分だけ）。工程8（`b762535`）で create ゲートを無効に戻した。**固定ゲートは6つとも無効。** 工程7の独立した検証は、読み取り専用の経路がないので未完了（status・identity・verify だけ成功）。**次は Step 3-12B-5E-7A（作成後の読み取り専用の検証モード `--verify-created`）の設計の提示で、承認が必要。** 実装・実DBでの実行は、それぞれ別の承認。schemaDiff（Prisma CLI）は、その後。3-Aの「Step 3-12B-5E-6」〜「次工程の方針：Step 3-12B-5E-7A」
    - （2026-11-12 更新・5E-5C）変更の前の ACL の照合（5E-5A。`d47a34e`）と、読み取り専用の事前検証モード `--preflight-create`（5E-5B。`558ab79`）を追加した。5E-5C の実DBでの preflight は成功した（状態 C、ロールなし、ACL は期待値と一致）。固定ゲートは6つとも無効。**次は工程5（create ゲートの有効化と、対応する静的テストの変更を同じ commit で。コードの変更のみ）で、承認が必要。** 3-Aの「工程5（create ゲートの有効化）に進む条件（2026-11-12）」
    - （2026-11-12 更新）方式 A を採用し、Step 3-12B-5E-3（`b9da91c`）で作成・補完の経路を実装した。固定ゲートは6つ（migration・checksum・schemaDiff・catalog・ro-role create・ro-role grant-sync）で、すべて無効。Step 3-12B-5E-4 で、実環境の読み取り専用の事前確認と予行が成功した（状態 C。ACL などは未確認。3-Aの「Step 3-12B-5E-4」）。**次は工程5（create ゲートの有効化。コードの変更のみ）で、承認が必要。** 工程6（`--apply`）は別の承認
