@@ -2476,6 +2476,120 @@ npm run test:integration ─► 専用runner
   - B：初期化スクリプトにロールの作成を組み込み、テストDBを再構築する方式。
 - 検討の観点：状態 C を保てるか、再現性、DB の権限の変更の範囲、これまでの検証の結果への影響、migration と checksum の再実施の必要性、安全な実行経路の有無、ロールの実効権限の検証の方法、ロールの作成の後の復旧の方法。
 
+#### Step 3-12B-5E-1〜5E-2B：`katana_test_ro` の導入方式の比較と設計（実施済み。設計のみ。コードの変更なし）
+
+- 方式 A（今の状態 C を保ったまま、既存のコンテナにロールを追加する）を採用した。
+- 作成（create）と、後から増えたテーブルへの権限の補完（grant-sync）を、別々の操作に分けた。どちらも1つのトランザクションで、事前の検査・変更・事後の検査を行う。
+- 実行の経路は、専用の docker exec（標準入力から固定の SQL を渡す）。操作ごとに、無効の固定ゲートを新しく設けた。
+- `REVOKE TEMPORARY ON DATABASE katana_test FROM PUBLIC` だけを行う。template1 の PUBLIC の CONNECT への対処は見送り、残余リスクとした。
+- 期待する fingerprint の差分を、次の4つに限定した。
+  - DB の ACL
+  - 16テーブルの ACL
+  - roles への `katana_test_ro` の追加
+  - dbRoleSettings への1行の追加
+- 再確認の検査を2つに分けた。R-base（補完の前）と R-full（すべての検査）。
+
+#### Step 3-12B-5E-3：工程1〜3の実装（実施済み。commit `b9da91c`）
+
+- commit：`b9da91c`（`test: add gated read-only role provisioning for the test DB`）。
+- 追加したもの：
+  - 固定の SQL：`docker/test-db/readonly-role/01-create.sql`、`02-grant-sync.sql`。どちらも SHA-256 を照合してから使う。
+  - コアのモジュール：`lib/testing/testDbReadOnlyRole.ts`
+  - ランナー：`lib/testing/testDbReadOnlyRoleRunner.ts`
+  - スクリプト：`scripts/testdb-ro-role.mts`
+  - `package.json` の `testdb:ro-role:create` と `testdb:ro-role:grant-sync`。どちらも予行。
+- ガード（`lib/db/testDatabaseGuard.ts`）に、次の2つを追加した。
+  - `assertReadOnlyTestDatabaseTarget`
+  - `assertReadOnlyTestDatabaseCredentials`
+- 認証情報は `.env.test` とは別の `.env.test.readonly` に置く。キーは2つだけ。`.env.test.example` に注記を追加した。
+- 固定ゲートを2つ追加した。`RO_ROLE_CREATE_DISABLED` と `RO_ROLE_GRANT_SYNC_DISABLED`。どちらも無効。
+- テストの結果：
+  - 新しいテストは、`testDbReadOnlyRole.test.ts` が106件、`testDbReadOnlyRoleRunner.test.ts` が53件。
+  - 既存の2件（接続経路の件数と、呼び出し元の許可リスト）を更新した。
+  - 通常テストは40ファイル・1,713件が成功した。
+- 実DB・Docker の操作はしていない。
+
+#### Step 3-12B-5E-4：実環境の読み取り専用の事前確認（実施済み。2026-11-12。コードの変更なし）
+
+- **開始条件:**
+  - ブランチは `chore/test-db-isolation`、HEAD は `b9da91c`。
+  - 追跡済みのファイルに差分はない。未追跡は pptx と `test-data/` だけ。
+  - 固定ゲートは6つともすべて無効。
+    - `LIVE_DATABASE_DISABLED`
+    - `CHECKSUM_DATABASE_DISABLED`
+    - `CATALOG_AUDIT_DATABASE_DISABLED`
+    - `SCHEMA_DIFF_DISABLED`（どのスクリプトにもつながっていない）
+    - `RO_ROLE_CREATE_DISABLED`
+    - `RO_ROLE_GRANT_SYNC_DISABLED`
+- **認証情報:**
+  - `.env.test.readonly` はユーザーが手で作成した。
+  - 権限は `-rw-------`。
+  - `git check-ignore` で除外されることを確かめた。Git の追跡の対象ではない。
+  - キーは `KATANA_TEST_DB_RO_PASSWORD` と `KATANA_TEST_RO_DATABASE_URL` の2つだけ。
+  - 既存の `assertTestDatabaseCredentials` と `assertReadOnlyTestDatabaseCredentials` で検証し、成功した。検証した条件は、見本の値でない・文字種・32文字以上・URL との一致・アプリ用と管理用のパスワードとの違い・アプリ用の URL との違い。
+  - この検証は、作業用ディレクトリに置いた一時的なスクリプトから行った。スクリプトはリポジトリの外にあり、ファイルを読むだけ。出力は結果のコードだけで、値は表示も記録もしていない。
+- **testdb:status（終了コード0）:**
+  - `katana-test-db` は running で healthy。
+  - katana-test のボリュームはない。
+  - 開発用のコンテナ `katana-db` は存在しない。
+  - 開発用のボリュームの記録は変わっていない。
+  - 全ボリュームの数は3。
+- **testdb:identity（終了コード0）:**
+  - D の検査はすべて成功した。
+  - コンテナ ID は `591ffba8…`。StartedAt は `2026-11-08T00:41:30.157808382Z`。再起動の回数は0。
+  - 上の値と、イメージ・ネットワーク・ボリュームは、「Step 3-12B-2」以降の記録と一致した。
+  - 2026-11-08 から同じコンテナが動いているので、tmpfs は初期化されていない。
+- **testdb:verify（終了コード0）:**
+  - 本人確認の4項目が一致した。
+  - **状態 C**（8件が適用済みで、テーブルは空）。
+  - `pg_postmaster_start_time` は `2026-11-08T00:41:30.798895Z` で、記録と一致した。
+  - Prisma CLI は起動していない。トランザクションは ROLLBACK した。
+- **予行 `npm run testdb:ro-role:create`（終了コード0。ゲートは無効のまま）:**
+  - 出力は「Docker was not read and no database connection was made」。
+  - 接続先と、両方のロールの認証情報の検証が成功した。
+  - `01-create.sql` の SHA-256 が一致した。
+  - 期待するテーブルは16。
+  - 実行予定の docker exec の引数を表示した。値は表示していない。
+  - create のゲートは無効と表示された。
+  - 予行の前後で `docker inspect` を読み、StartedAt と RestartCount が変わっていないことを確かめた。これは読み取りだけの直接の確認。
+- **補足:** 終了コードを取得するために、identity・verify・予行をもう1回ずつ実行した。どれも読み取りだけで、結果は1回目と同じ。
+- **変更前の ACL のスナップショット：未確認。**
+  - 承認済みの読み取り専用の経路では、ACL を出力できない。
+    - verify は ACL を出力しない。
+    - カタログ監査は、ゲートが無効で、値も表示しない。
+  - 新しい SQL の実行経路は追加していない。
+  - 次の項目は、今回は未確認とする。
+    - `katana_test_ro` が存在しないこと
+    - katana_test・template1・postgres の DB の ACL
+    - public スキーマの ACL
+    - 16テーブルの ACL
+    - 想定外のリレーション・sequence
+    - DEFAULT PRIVILEGES
+    - 既存のロールの依存関係（pg_shdepend）
+  - これらは、工程6の実行のときに、変更の前に自動で検査し、違えば停止する。検査は、ランナーの D1・F1・FP0 と作成の前提条件、`01-create.sql` の事前の DO ブロックで行う。
+- Docker・DB の変更、ロールの作成、GRANT・REVOKE、`--apply`、ゲートの変更、認証情報の自動の変更は、どれも行っていない。
+
+#### 工程5（create ゲートの有効化）に進む条件
+
+- 状態 C・D の検査・認証情報・予行は、上のとおりすべて満たした。
+- 工程5はコードの変更（`scripts/testdb-ro-role.mts` の `createGate`）だけで、DB には触れない。ゲートの有効化（工程5）と実行（工程6の `--apply`）は、それぞれ別に承認を得る。
+- 工程6の直前に、もう一度 status・identity・verify を行い、状態 C とコンテナの同一性を確かめる。tmpfs のため、コンテナが再起動していれば工程を止める。
+
+**残余リスク（2026-11-12 時点）:**
+
+1. 変更前の ACL などは、今回は未確認（上の項目）。実行のときの自動の検査に頼る。
+2. template1 の PUBLIC の CONNECT は残す（REVOKE は見送り）。
+3. 実DBでまだ確かめていないこと：
+   - コンテナの Unix ソケットの trust 認証
+   - SCRAM の verifier がそのまま保存されること
+   - `katana_test_ro` が pg_shdepend を読めること
+   - aclitem の実際の表記
+4. docker exec の環境変数（SCRAM の verifier など。平文のパスワードではない）が、Docker の API にどれだけ残るかは、未確認。
+5. Prisma CLI の `--datasource` の引数で、接続 URL が露出しうる。工程11の前に承認を得る。
+6. `default_transaction_read_only` は既定値にすぎず、セッションの中で変えられる。書き込みの防止の根拠は、権限を付けていないことにある。ラージオブジェクトについての残余リスクは、5E-2B の記録のとおり。
+7. TOCTOU のリスクは残る。D2・D3・F2・FP1 で、事後に検出する。
+8. 実DBでの確認の結果は、確認した時点のスナップショットである。
+
 ### Step 3-0：読み取りだけの事前確認（実施済み。Dockerの記録は未記録）
 
 - **作業内容:**
@@ -2705,7 +2819,8 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：PLAN の記録の commit（`docs: record successful PostgreSQL catalog audit`。親は `f390846`（`test: disable live catalog audit after successful verification`。Step 3-12B-5D-4））
+   - HEAD：PLAN の記録の commit（`docs: record read-only role pre-verification`。親は `b9da91c`（`test: add gated read-only role provisioning for the test DB`。Step 3-12B-5E-3））
+   - `.env.test.readonly` はユーザーが作成済み（`-rw-------`。キーは2つ。中身は表示しない）
    - 変更済み（未commit）：なし
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
    - `.env.test` はユーザーが作成済み（`-rw-------`。中身は表示しない）
@@ -2715,6 +2830,7 @@ npm run test:integration ─► 専用runner
    - （2026-11-10 更新）checksum の実DB照合は Step 3-12B-5C-3C で完了（8件すべて完全一致。条件2-A 達成）。ゲートは 5C-4（`fc45fc0`）で無効に戻した。3つの固定ゲートはすべて無効。条件2-B（定義の一致）は未完了。3-Aの「条件2の整理」
    - （2026-11-11 更新）PostgreSQL 固有の定義のカタログ監査は Step 3-12B-5D-3 で完了（`passed`。条件2-B の一部）。catalog ゲートは 5D-4（`f390846`）で無効に戻した。4つの固定ゲート（migration・checksum・schemaDiff・catalog）はすべて無効。条件2-B の全体は未完了。3-Aの「条件2の整理（2026-11-11）」
    - `katana_test_ro`（schemaDiff 用の読み取り専用ロール）の導入方式の比較（A：既存のコンテナに追加、B：初期化スクリプトに組み込んで再構築。3-Aの「次工程の方針（2026-11-11）」）と、schemaDiff の実行経路の安全設計（DB の変更を伴う。比較・設計の提示と承認が先。コードの変更・DB の変更・Prisma CLI の起動は、それぞれ別途の承認）
+   - （2026-11-12 更新）方式 A を採用し、Step 3-12B-5E-3（`b9da91c`）で作成・補完の経路を実装した。固定ゲートは6つ（migration・checksum・schemaDiff・catalog・ro-role create・ro-role grant-sync）で、すべて無効。Step 3-12B-5E-4 で、実環境の読み取り専用の事前確認と予行が成功した（状態 C。ACL などは未確認。3-Aの「Step 3-12B-5E-4」）。**次は工程5（create ゲートの有効化。コードの変更のみ）で、承認が必要。** 工程6（`--apply`）は別の承認
    - `reset` の実装（本人確認の後）
 
    接続後の本人確認と状態の判定は Step 3-10B で実装して commit し、Step 3-10C で migration 用スクリプトの流れに組み込んだ。Step 3-12B-1（`608c92a`）で、スクリプトの migration 用の許可を固定で有効にし、Step 3-12B-4（`d87bc9a`）で固定の `LIVE_DATABASE_DISABLED` に戻した（今は `--apply` でも Docker・DB の前に止まる）。許可が有効なときは、`--apply` を付けたときだけ migration に進み、予行・`--check`・`--verify` は Prisma CLI を起動しない。globalSetup には組み込んでおらず、強制停止のまま（初回の実DB接続で確かめることは、3-Aの3-10B・3-10Cの記録）。指示されたStep以外には着手しない。
