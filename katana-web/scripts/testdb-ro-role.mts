@@ -3,6 +3,9 @@
  *
  *   npm run testdb:ro-role:create        … 予行（--create）。事前の検証と、実行予定の docker exec の表示だけ（Docker・DB に触れない）
  *   npm run testdb:ro-role:grant-sync    … 予行（--grant-sync）。同上
+ *   npm run testdb:ro-role:preflight-create
+ *                                        … 読み取り専用の事前検証（--preflight-create）。D1・F1・FP0・A0・D2 だけ。
+ *                                          DB への接続は読み取り専用のトランザクションだけで、docker exec・DB の変更はしない
  *   node scripts/testdb-ro-role.mts --create --apply / --grant-sync --apply
  *                                        … 実行の意思表示。操作ごとの固定のゲートが無効なので、今は Docker・DB に触れる前に
  *                                          RO_ROLE_CREATE_DISABLED・RO_ROLE_GRANT_SYNC_DISABLED で止まる

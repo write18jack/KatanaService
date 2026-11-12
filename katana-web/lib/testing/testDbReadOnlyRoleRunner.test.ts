@@ -484,6 +484,134 @@ describe("初回作成（create。ゲートを有効にした偽の実行）", (
   });
 });
 
+describe("読み取り専用の事前検証（--preflight-create。偽の Docker・DB）", () => {
+  const preflight = (o: Parameters<typeof fake>[0] = {}) => fake({ gates: "disabled", ...o, argv: ["--preflight-create"] });
+
+  it("引数は --preflight-create の単独だけ。--apply・変更の操作との併用・未知の形は、何にも触れる前に ARGUMENTS_INVALID", async () => {
+    expect(parseTestDbReadOnlyRoleArgs(["--preflight-create"])).toEqual({ operation: "create", apply: false, preflight: true });
+    for (const argv of [
+      ["--preflight-create", "--apply"],
+      ["--apply", "--preflight-create"],
+      ["--preflight-create", "--create"],
+      ["--create", "--preflight-create"],
+      ["--preflight-create", "--grant-sync"],
+      ["--preflight-create", "--preflight-create"],
+      ["--preflight-grant-sync"],
+      ["--preflight"],
+      ["--preflight-create", "--sql", "SELECT 1"],
+    ]) {
+      const f = fake({ argv, gates: "both" });
+      await expectError(f, "ARGUMENTS_INVALID");
+      touchedNothing(f);
+    }
+  });
+
+  it("成功：ゲートが6つとも無効のままで、D1 → F1 → FP0 → A0 → D2 だけ。docker exec・ro の接続・検証子の作成はしない", async () => {
+    const createVerifier = vi.fn(() => VERIFIER);
+    const f = preflight();
+    f.deps.createVerifier = createVerifier;
+    expect(await runTestDbReadOnlyRole(f.deps)).toEqual({ mode: "preflight", operation: "create" });
+    expect(f.calls).toEqual(["D1", "F1", "FP0", "A0", "D2"]);
+    expect(f.exec).not.toHaveBeenCalled();
+    expect(f.role).not.toHaveBeenCalled();
+    expect(createVerifier).not.toHaveBeenCalled();
+    expect(f.deps.createGate).toBe(RO_ROLE_CREATE_DISABLED);
+    expect(f.deps.grantSyncGate).toBe(RO_ROLE_GRANT_SYNC_DISABLED);
+    const log = f.logs.join("\n");
+    expect(log).toContain("preflight of create passed");
+    expect(log).toContain("nothing was changed and docker exec was not run");
+    noSecrets(f);
+  });
+
+  it("DB への接続は、katana_test_user の読み取り専用の検査（F1・FP0・A0）だけ。どれも D1・F1 の識別情報を受け取る", async () => {
+    const f = preflight();
+    await runTestDbReadOnlyRole(f.deps);
+    expect(f.inspectDb).toHaveBeenCalledTimes(1);
+    expect(f.audit).toHaveBeenCalledTimes(1);
+    expect(f.acl).toHaveBeenCalledTimes(1);
+    for (const mock of [f.inspectDb, f.audit, f.acl] as Mock[]) expect(mock.mock.calls[0][0].databaseUrl).toBe(APP_URL);
+    expect(f.audit.mock.calls[0][0].expectedServer).toEqual({ docker: DOCKER, server: SERVER });
+    expect(f.acl.mock.calls[0][0].expectedServer).toEqual({ docker: DOCKER, server: SERVER });
+  });
+
+  it("変更の前の検査は --create --apply と同じ手順（呼び出しの順序が D2 まで一致）", async () => {
+    const p = preflight();
+    await runTestDbReadOnlyRole(p.deps);
+    const a = fake({ gates: "create", argv: ["--create", "--apply"] });
+    await runTestDbReadOnlyRole(a.deps);
+    expect(a.calls.slice(0, p.calls.length)).toEqual(p.calls);
+    expect(a.calls[p.calls.length]).toBe("exec");
+  });
+
+  it.each<[string, Parameters<typeof fake>[0], TestDbReadOnlyRoleErrorCode, string[]]>([
+    ["F1 が状態 C でない（A0 に進まない）", { states: [{ state: "B", reasons: ["x"] } as unknown as TestDatabaseState] }, "DATABASE_STATE_NOT_C", ["D1", "F1"]],
+    ["FP0 でロールが既に存在する", { fingerprints: [fp({ created: true, granted: TABLES })] }, "PRECONDITION_FAILED", ["D1", "F1", "FP0"]],
+    ["FP0 でテーブルに権限がある", { fingerprints: [fp({ granted: TABLES.slice(0, 1) })] }, "PRECONDITION_FAILED", ["D1", "F1", "FP0"]],
+    [
+      "A0 で template1 の PUBLIC に TEMPORARY",
+      { acl: (() => { const o = aclObservation("create"); Object.assign(o.databases.find((d) => d.name === "template1") ?? {}, { publicTemporary: true }); return o; })() },
+      "PRE_CHANGE_ACL_MISMATCH",
+      ["D1", "F1", "FP0", "A0"],
+    ],
+    ["A0 で想定外のスキーマ", { acl: (() => { const o = aclObservation("create"); o.schemas.push({ ...o.schemas[0], name: "extra" }); return o; })() }, "PRE_CHANGE_ACL_MISMATCH", ["D1", "F1", "FP0", "A0"]],
+    ["A0 で想定外の DB", { acl: (() => { const o = aclObservation("create"); o.databases.push({ ...o.databases[0], name: "extra" }); return o; })() }, "PRE_CHANGE_ACL_MISMATCH", ["D1", "F1", "FP0", "A0"]],
+    ["A0 の照会の失敗", { acl: Object.assign(new Error("x"), { code: "CHECK_QUERY_FAILED" }) }, "PRE_CHANGE_ACL_CHECK_FAILED", ["D1", "F1", "FP0", "A0"]],
+    ["D2 でコンテナが変わった", { dockers: [DOCKER, { ...DOCKER, restartCount: 1 }] }, "DOCKER_IDENTITY_MISMATCH", ["D1", "F1", "FP0", "A0", "D2"]],
+  ])("%s なら成功にしない", async (_, options, expected, calls) => {
+    const f = preflight(options);
+    await expectError(f, expected);
+    expect(f.calls).toEqual(calls);
+    expect(f.exec).not.toHaveBeenCalled();
+    expect(f.role).not.toHaveBeenCalled();
+  });
+
+  it("Docker・DB の識別・照会の失敗は、固定のエラーコードで止まる（秘密情報を含めない）", async () => {
+    const d = preflight();
+    d.docker.mockRejectedValueOnce(Object.assign(new Error(`boom ${APP_URL}`), { code: "DOCKER_FAILED" }));
+    await expectError(d, "DOCKER_IDENTITY_FAILED");
+    expect(d.inspectDb).not.toHaveBeenCalled();
+
+    const i = preflight();
+    i.inspectDb.mockRejectedValueOnce(Object.assign(new Error(`boom ${APP_PASSWORD}`), { code: "CONNECT_FAILED" }));
+    const error = await expectError(i, "STATE_CHECK_FAILED");
+    expect(error.message).toContain("CONNECT_FAILED");
+    expect(i.audit).not.toHaveBeenCalled();
+    expect(i.acl).not.toHaveBeenCalled();
+
+    const a = preflight();
+    a.audit.mockRejectedValueOnce(Object.assign(new Error("x"), { code: "QUERY_FAILED" }));
+    await expectError(a, "CATALOG_CHECK_FAILED");
+    expect(a.acl).not.toHaveBeenCalled();
+    for (const f of [d, i, a]) expect(f.exec).not.toHaveBeenCalled();
+  });
+
+  it("事前の検証（認証情報・SQL ファイル・期待値）に失敗すれば、Docker・DB に触れない", async () => {
+    for (const options of [
+      { roEnv: null },
+      { testEnv: null },
+      { readFile: (p: string) => `${p.endsWith("01-create.sql") ? SQL.create : SQL["grant-sync"]}\nSELECT 1;` },
+      { parentEnv: { PATH: "/usr/bin", PGHOST: "elsewhere" } },
+      { parentEnv: { PATH: "/usr/bin", DOCKER_HOST: "tcp://elsewhere" } },
+    ] as Parameters<typeof fake>[0][]) {
+      const f = preflight(options);
+      await expect(runTestDbReadOnlyRole(f.deps)).rejects.toBeInstanceOf(TestDbReadOnlyRoleError);
+      touchedNothing(f);
+    }
+  });
+
+  it("既存の経路は変わらない：予行は Docker・DB に触れず、ゲートが無効の --apply は Docker・DB の前に止まる", async () => {
+    const dry = fake({ argv: ["--create"], gates: "disabled" });
+    expect(await runTestDbReadOnlyRole(dry.deps)).toEqual({ mode: "dry-run", operation: "create" });
+    touchedNothing(dry);
+    const apply = fake({ argv: ["--create", "--apply"], gates: "disabled" });
+    await expectError(apply, "RO_ROLE_CREATE_DISABLED");
+    touchedNothing(apply);
+    const sync = fake({ argv: ["--grant-sync", "--apply"], gates: "disabled" });
+    await expectError(sync, "RO_ROLE_GRANT_SYNC_DISABLED");
+    touchedNothing(sync);
+  });
+});
+
 describe("補完（grant-sync。ゲートを有効にした偽の実行）", () => {
   const added = TABLES.filter((t) => t !== "_prisma_migrations").slice(0, 2);
   const before = TABLES.filter((t) => !added.includes(t));
@@ -606,7 +734,8 @@ describe("スクリプトの配線と、ほかの経路への影響（静的な�
     const pkg = JSON.parse(code("package.json")) as { scripts: Record<string, string> };
     expect(pkg.scripts["testdb:ro-role:create"]).toBe("node scripts/testdb-ro-role.mts --create");
     expect(pkg.scripts["testdb:ro-role:grant-sync"]).toBe("node scripts/testdb-ro-role.mts --grant-sync");
-    expect(Object.values(pkg.scripts).filter((s) => s.includes("testdb-ro-role.mts"))).toHaveLength(2);
+    expect(pkg.scripts["testdb:ro-role:preflight-create"]).toBe("node scripts/testdb-ro-role.mts --preflight-create");
+    expect(Object.values(pkg.scripts).filter((s) => s.includes("testdb-ro-role.mts"))).toHaveLength(3);
     expect(Object.values(pkg.scripts).some((s) => s.includes("--apply"))).toBe(false);
   });
 

@@ -53,6 +53,9 @@ import type { TestDatabaseInspection } from "./testDbState.ts";
  *
  *   npm run testdb:ro-role:create        … 予行（--create）。事前の検証と、実行予定の docker exec の表示だけ（Docker・DB に触れない）
  *   npm run testdb:ro-role:grant-sync    … 予行（--grant-sync）。同上
+ *   npm run testdb:ro-role:preflight-create
+ *                                        … 読み取り専用の事前検証（--preflight-create。Step 3-12B-5E-5B）。create の変更の前と同じ
+ *                                          D1 → F1 → FP0 → FP0 の前提 → A0 → D2 だけを行い、docker exec・DB の変更はしない。ゲートに依存しない
  *   node scripts/testdb-ro-role.mts --create --apply / --grant-sync --apply
  *                                        … 実行の意思表示。操作ごとの固定のゲートが無効なので、今は Docker・DB に触れる前に止まる
  *
@@ -175,10 +178,12 @@ export type TestDbReadOnlyRoleDeps = {
   log: (text: string) => void;
 };
 
-export type TestDbReadOnlyRoleCommand = { operation: ReadOnlyRoleOperation; apply: boolean };
+/** preflight は --preflight-create のときだけ true（読み取り専用の事前検証。apply とは併用できない） */
+export type TestDbReadOnlyRoleCommand = { operation: ReadOnlyRoleOperation; apply: boolean; preflight?: true };
 
 export type TestDbReadOnlyRoleOutcome =
   | { readonly mode: "dry-run"; readonly operation: ReadOnlyRoleOperation }
+  | { readonly mode: "preflight"; readonly operation: "create" }
   | { readonly mode: "applied"; readonly operation: ReadOnlyRoleOperation; readonly grantedTables: readonly string[] }
   | { readonly mode: "nothing-to-do"; readonly operation: "grant-sync" };
 
@@ -187,13 +192,14 @@ const COMMANDS: readonly [readonly string[], TestDbReadOnlyRoleCommand][] = [
   [["--create", "--apply"], { operation: "create", apply: true }],
   [["--grant-sync"], { operation: "grant-sync", apply: false }],
   [["--grant-sync", "--apply"], { operation: "grant-sync", apply: true }],
+  [["--preflight-create"], { operation: "create", apply: false, preflight: true }],
 ];
 
-/** 引数は固定の4通りだけ。それ以外（引数なし・未知の引数・順序の違い）は、何にも触れる前に止める */
+/** 引数は固定の5通りだけ。それ以外（引数なし・未知の引数・順序の違い・--preflight-create と --apply などの併用）は、何にも触れる前に止める */
 export function parseTestDbReadOnlyRoleArgs(args: readonly string[]): TestDbReadOnlyRoleCommand {
   const match = COMMANDS.find(([expected]) => expected.length === args.length && expected.every((arg, i) => arg === args[i]));
   if (!match) {
-    throw new TestDbReadOnlyRoleError("ARGUMENTS_INVALID", "use --create or --grant-sync (dry run), optionally followed by --apply.");
+    throw new TestDbReadOnlyRoleError("ARGUMENTS_INVALID", "use --create or --grant-sync (dry run), optionally followed by --apply, or --preflight-create alone.");
   }
   return { ...match[1] };
 }
@@ -235,7 +241,7 @@ const AFTER_NOTE = "docker exec was already attempted, so this is detection afte
 /** 手順どおりに検証し、実行する。成功なら結果を返し、どれか1つでも失敗したら TestDbReadOnlyRoleError を投げる */
 export async function runTestDbReadOnlyRole(deps: TestDbReadOnlyRoleDeps): Promise<TestDbReadOnlyRoleOutcome> {
   const { root } = deps;
-  const { operation, apply } = parseTestDbReadOnlyRoleArgs(deps.argv);
+  const { operation, apply, preflight = false } = parseTestDbReadOnlyRoleArgs(deps.argv);
   if (deps.execArgv.length > 0) throw new TestDbReadOnlyRoleError("NODE_EXEC_ARGV_PRESENT", "Node.js options for this script are not allowed.");
   if (deps.parentEnv.NODE_OPTIONS !== undefined && deps.parentEnv.NODE_OPTIONS !== "") {
     throw new TestDbReadOnlyRoleError("NODE_OPTIONS_PRESENT", "NODE_OPTIONS is set; unset it before running this script.");
@@ -319,7 +325,7 @@ export async function runTestDbReadOnlyRole(deps: TestDbReadOnlyRoleDeps): Promi
 
   const where = `${appTarget.host}:${appTarget.port}/${appTarget.database}`;
   const gateEnabled = operation === "create" ? deps.createGate.mode === "enabled-create" : deps.grantSyncGate.mode === "enabled-grant-sync";
-  if (!apply) {
+  if (!apply && !preflight) {
     const preview = buildReadOnlyRoleExecArgs(operation, "0".repeat(64)).map((arg) => (arg === "0".repeat(64) ? "<container id from D1>" : arg));
     deps.log(
       [
@@ -334,11 +340,13 @@ export async function runTestDbReadOnlyRole(deps: TestDbReadOnlyRoleDeps): Promi
     return { mode: "dry-run", operation };
   }
 
-  // ---- ここからは --apply だけ。操作ごとの固定のゲートが無効なら、Docker・DB に触れずに止まる ----
-  if (operation === "create" && deps.createGate.mode !== "enabled-create") {
+  // ---- ここからは --apply と --preflight-create だけ ----
+  // --apply：操作ごとの固定のゲートが無効なら、Docker・DB に触れずに止まる。
+  // --preflight-create：ゲートを確かめない（変更の文・docker exec に進まず、D2 の後で必ず戻る。読み取り専用の接続だけ）
+  if (!preflight && operation === "create" && deps.createGate.mode !== "enabled-create") {
     throw new TestDbReadOnlyRoleError("RO_ROLE_CREATE_DISABLED", "creating the read-only role is disabled in this build; refusing to read Docker or connect to the test database.");
   }
-  if (operation === "grant-sync" && deps.grantSyncGate.mode !== "enabled-grant-sync") {
+  if (!preflight && operation === "grant-sync" && deps.grantSyncGate.mode !== "enabled-grant-sync") {
     throw new TestDbReadOnlyRoleError("RO_ROLE_GRANT_SYNC_DISABLED", "granting missing privileges to the read-only role is disabled in this build; refusing to read Docker or connect to the test database.");
   }
 
@@ -431,6 +439,18 @@ export async function runTestDbReadOnlyRole(deps: TestDbReadOnlyRoleDeps): Promi
   const changedBefore = dockerIdentityChanges(docker1, docker2);
   if (changedBefore.length > 0) {
     throw new TestDbReadOnlyRoleError("DOCKER_IDENTITY_MISMATCH", `the test database container changed (${changedBefore.join(", ")}); docker exec was not started.`);
+  }
+
+  // --preflight-create は、ここで終わる（変更の前の検査は --create --apply と同じ手順・同じ判定。docker exec・検証子の作成・事後の検査はしない）
+  if (preflight) {
+    deps.log(
+      [
+        `[testdb-ro-role] preflight of create passed for ${where} (read-only; nothing was changed and docker exec was not run).`,
+        "checks D1/F1/FP0/A0/D2 passed: same container, state C, catalog audit passed, the role does not exist, the database and table privileges are the initial ones, the cluster and schema ACLs match the expected PostgreSQL 15 state.",
+        "not covered: the checks inside the fixed SQL (01-create.sql) run only with --create --apply; this result is a snapshot of this run.",
+      ].join("\n"),
+    );
+    return { mode: "preflight", operation: "create" };
   }
 
   // 固定の docker exec の組み立てと照合（Container ID は D1・D2 の値）
