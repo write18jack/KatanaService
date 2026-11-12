@@ -1,6 +1,6 @@
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from "node:crypto";
 import path from "node:path";
-import { assertReadOnlyTestDatabaseTarget, READ_ONLY_TEST_DATABASE_USER, TestDatabaseGuardError } from "../db/testDatabaseGuard.ts";
+import { assertReadOnlyTestDatabaseTarget, assertTestDatabaseTarget, READ_ONLY_TEST_DATABASE_USER, TestDatabaseGuardError } from "../db/testDatabaseGuard.ts";
 import {
   assertDatabaseIdentity,
   EXPECTED_DATABASE,
@@ -44,6 +44,8 @@ import { pinSearchPath, readServerIdentity } from "./testDbState.ts";
  * - public schema：変更しない（USAGE は PUBLIC から受け取る。CREATE は PostgreSQL 15 の既定で PUBLIC にない）。
  * - テーブル：期待するテーブル（schema.prisma の15件 + `_prisma_migrations`）に SELECT だけ。sequence・列単位の権限・既定の権限の設定は使わない。
  * - template1 の CONNECT（PUBLIC から）は変更しない（5E-2A で保留。R で「明示的な付与がない」ことを確かめ、残存リスクとして許容する）。
+ *   template1 の CREATE・TEMPORARY は、PostgreSQL 15 の initdb が PUBLIC から取り上げている。変更の前に A0 と SQL の事前の照合で確かめ、
+ *   違えば変更の前に止まる（Step 3-12B-5E-5A。許容する仕様にはしない・新しい REVOKE もしない）。
  */
 
 /**
@@ -66,8 +68,8 @@ export const READ_ONLY_ROLE_SQL_FILES: Readonly<Record<ReadOnlyRoleOperation, st
 
 /** 固定の SQL ファイルの SHA-256。中身が変わったら、レビューの後にこの値も変える（テストで一致を確かめる） */
 export const READ_ONLY_ROLE_SQL_SHA256: Readonly<Record<ReadOnlyRoleOperation, string>> = Object.freeze({
-  create: "74f70c964309ae7abb48e593b47c0e8928010ace7edd9aa7f88ff9e550c6eceb",
-  "grant-sync": "9c284a49ccbc9ef5746c253ff19c56ef6b9fc57be4f15563386c15bfc04e5391",
+  create: "1bcca131a86f81dc4aa0b25650556a929cbf5c643d5437a74d8248a4a5d0585e",
+  "grant-sync": "2dcb34b975aaf0f7f84c85a338e2de93f71610d49caf156ed5ce65bcd7f2165e",
 });
 
 /** 初回作成で付与するテーブルの件数（schema.prisma の15件 + `_prisma_migrations`）。01-create.sql の中でも同じ値で照合する */
@@ -473,6 +475,218 @@ function dependencyAndDatabaseViolations(observation: ReadOnlyRoleObservation, g
     // template1 の CONNECT（PUBLIC から）は、許容する残存リスク（明示的な付与・TEMPORARY・CREATE がないことは上で確かめる）
   }
   return violations;
+}
+
+// ---- 変更の前の ACL の照合（A0。Step 3-12B-5E-5A）。katana_test_user で接続し、BEGIN READ ONLY の中で固定の SELECT だけ ----
+//
+// fingerprint（FP0）は、カレントDB の行だけを持ち、スキーマの ACL を期待値と照合しない。そこで、変更の前に、クラスタのすべてのDBと
+// 非システムのスキーマについて、所有者・接続の可否・ACL（未設定なら acldefault で展開）・PUBLIC の実効権限を読み、固定の期待値と比べる。
+// 同じ条件を、固定の SQL（01-create.sql・02-grant-sync.sql）でも、最初の変更の文より前に確かめる（二重の検査）。
+//
+// 期待値の根拠（PostgreSQL 15）:
+// - initdb（src/bin/initdb/initdb.c の make_template0）が `REVOKE CREATE,TEMPORARY ON DATABASE template1 FROM public;` と、
+//   template0 にも同じ文を実行する → どちらも {=c/postgres,postgres=CTc/postgres}。template0 は ALLOW_CONNECTIONS = false。
+// - postgres DB は、初期化スクリプト（docker/test-db/init/01-app-role.sh）の `REVOKE ALL ON DATABASE postgres FROM PUBLIC;` → {postgres=CTc/postgres}。
+// - katana_test は所有者が katana_test_user（01-app-role.sh の ALTER DATABASE … OWNER TO）。ACL は create の前は未設定（NULL）、
+//   create の後は PUBLIC の TEMPORARY を取り上げた形。
+// - public スキーマは、PostgreSQL 15 の既定（所有者 pg_database_owner、{pg_database_owner=UC/pg_database_owner,=U/pg_database_owner}）。
+
+/** ACL の項目を「付与先:権限:付与者」（付与先が PUBLIC なら `PUBLIC`。付与の権限があれば `:GRANTABLE` を付ける）にして、コードポイント順に `,` でつなぐ式 */
+const canonicalAclSql = (aclExpression: string) =>
+  `COALESCE((SELECT pg_catalog.string_agg(i, ',' ORDER BY i COLLATE "C")
+                FROM (SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END
+                             || ':' || a.privilege_type || ':' || pg_catalog.pg_get_userbyid(a.grantor)::text
+                             || CASE WHEN a.is_grantable THEN ':GRANTABLE' ELSE '' END AS i
+                        FROM pg_catalog.aclexplode(${aclExpression}) a) items), '')`;
+
+/** クラスタのすべてのDB（所有者・接続の可否・ACL が未設定か・展開した ACL・PUBLIC の実効権限） */
+export const PRE_CHANGE_DATABASES_SQL = `SELECT d.datname::text AS name, pg_catalog.pg_get_userbyid(d.datdba)::text AS owner,
+            d.datallowconn AS "allowConnections", d.datacl IS NULL AS "aclNull",
+            ${canonicalAclSql("COALESCE(d.datacl, pg_catalog.acldefault('d', d.datdba))")} AS acl,
+            pg_catalog.has_database_privilege('public', d.oid, 'CONNECT') AS "publicConnect",
+            pg_catalog.has_database_privilege('public', d.oid, 'TEMPORARY') AS "publicTemporary",
+            pg_catalog.has_database_privilege('public', d.oid, 'CREATE') AS "publicCreate"
+       FROM pg_catalog.pg_database d`;
+
+/** カレントDB の非システムのスキーマ（所有者・ACL が未設定か・展開した ACL・PUBLIC の実効権限） */
+export const PRE_CHANGE_SCHEMAS_SQL = `SELECT n.nspname::text AS name, pg_catalog.pg_get_userbyid(n.nspowner)::text AS owner, n.nspacl IS NULL AS "aclNull",
+            ${canonicalAclSql("COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))")} AS acl,
+            pg_catalog.has_schema_privilege('public', n.oid, 'USAGE') AS "publicUsage",
+            pg_catalog.has_schema_privilege('public', n.oid, 'CREATE') AS "publicCreate"
+       FROM pg_catalog.pg_namespace n
+      WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_%'`;
+
+export type PreChangeDatabase = {
+  name: string;
+  owner: string;
+  allowConnections: boolean;
+  aclNull: boolean;
+  acl: string;
+  publicConnect: boolean;
+  publicTemporary: boolean;
+  publicCreate: boolean;
+};
+export type PreChangeSchema = { name: string; owner: string; aclNull: boolean; acl: string; publicUsage: boolean; publicCreate: boolean };
+export type PreChangeAclObservation = { databases: PreChangeDatabase[]; schemas: PreChangeSchema[] };
+
+const ownerAll = (grantee: string, owner: string) => ["CONNECT", "CREATE", "TEMPORARY"].map((p) => `${grantee}:${p}:${owner}`);
+const aclText = (items: readonly string[]) => [...items].sort(compareCodePoints).join(",");
+
+/** template0・template1・postgres（どちらの操作でも同じ。SQL の照合でも同じ文字列を使う） */
+export const EXPECTED_PRE_CHANGE_SYSTEM_DATABASES: readonly PreChangeDatabase[] = Object.freeze([
+  { name: "postgres", owner: "postgres", allowConnections: true, aclNull: false, acl: aclText(ownerAll("postgres", "postgres")), publicConnect: false, publicTemporary: false, publicCreate: false },
+  {
+    name: "template0",
+    owner: "postgres",
+    allowConnections: false,
+    aclNull: false,
+    acl: aclText(["PUBLIC:CONNECT:postgres", ...ownerAll("postgres", "postgres")]),
+    publicConnect: true,
+    publicTemporary: false,
+    publicCreate: false,
+  },
+  {
+    name: "template1",
+    owner: "postgres",
+    allowConnections: true,
+    aclNull: false,
+    acl: aclText(["PUBLIC:CONNECT:postgres", ...ownerAll("postgres", "postgres")]),
+    publicConnect: true,
+    publicTemporary: false,
+    publicCreate: false,
+  },
+]);
+
+/** katana_test（create の前は ACL が未設定、grant-sync の前は create の後の形） */
+export const EXPECTED_PRE_CHANGE_TEST_DATABASE: Readonly<Record<ReadOnlyRoleOperation, PreChangeDatabase>> = Object.freeze({
+  create: {
+    name: EXPECTED_DATABASE,
+    owner: EXPECTED_USER,
+    allowConnections: true,
+    aclNull: true,
+    acl: aclText([`PUBLIC:CONNECT:${EXPECTED_USER}`, `PUBLIC:TEMPORARY:${EXPECTED_USER}`, ...ownerAll(EXPECTED_USER, EXPECTED_USER)]),
+    publicConnect: true,
+    publicTemporary: true,
+    publicCreate: false,
+  },
+  "grant-sync": {
+    name: EXPECTED_DATABASE,
+    owner: EXPECTED_USER,
+    allowConnections: true,
+    aclNull: false,
+    acl: aclText([`PUBLIC:CONNECT:${EXPECTED_USER}`, ...ownerAll(EXPECTED_USER, EXPECTED_USER)]),
+    publicConnect: true,
+    publicTemporary: false,
+    publicCreate: false,
+  },
+});
+
+/** 非システムのスキーマは public だけ（PostgreSQL 15 の既定） */
+export const EXPECTED_PRE_CHANGE_SCHEMAS: readonly PreChangeSchema[] = Object.freeze([
+  {
+    name: "public",
+    owner: "pg_database_owner",
+    aclNull: false,
+    acl: aclText(["PUBLIC:USAGE:pg_database_owner", "pg_database_owner:CREATE:pg_database_owner", "pg_database_owner:USAGE:pg_database_owner"]),
+    publicUsage: true,
+    publicCreate: false,
+  },
+]);
+
+function rowsViolations<T extends { name: string }>(kind: string, actual: readonly T[], expected: readonly T[]): string[] {
+  const violations: string[] = [];
+  const names = (rows: readonly T[]) => rows.map((r) => r.name).sort(compareCodePoints).join(",");
+  if (names(actual) !== names(expected)) violations.push(`the ${kind}s are not the expected ones`);
+  for (const e of expected) {
+    const a = actual.find((r) => r.name === e.name);
+    if (!a) continue;
+    for (const field of Object.keys(e) as (keyof T)[]) {
+      if (a[field] !== e[field]) violations.push(`${kind} ${e.name}: ${String(field)} differs`);
+    }
+  }
+  return violations;
+}
+
+/** A0 の判定：期待値との違いの一覧（空なら一致）。値そのものは返さない（項目名だけ） */
+export function preChangeAclViolations(observation: PreChangeAclObservation, operation: ReadOnlyRoleOperation): string[] {
+  return [
+    ...rowsViolations("database", observation.databases, [...EXPECTED_PRE_CHANGE_SYSTEM_DATABASES, EXPECTED_PRE_CHANGE_TEST_DATABASE[operation]]),
+    ...rowsViolations("schema", observation.schemas, EXPECTED_PRE_CHANGE_SCHEMAS),
+  ];
+}
+
+export async function readPreChangeAclObservation(client: IntegrationDbClient): Promise<PreChangeAclObservation> {
+  const databases = (await select(client, "pre-change databases", PRE_CHANGE_DATABASES_SQL)).map((row) => {
+    if (
+      !isText(row.name) || !isText(row.owner) || !isBool(row.allowConnections) || !isBool(row.aclNull) || !isText(row.acl) ||
+      !isBool(row.publicConnect) || !isBool(row.publicTemporary) || !isBool(row.publicCreate)
+    ) {
+      throw invalid("pre-change databases");
+    }
+    return {
+      name: row.name,
+      owner: row.owner,
+      allowConnections: row.allowConnections,
+      aclNull: row.aclNull,
+      acl: row.acl,
+      publicConnect: row.publicConnect,
+      publicTemporary: row.publicTemporary,
+      publicCreate: row.publicCreate,
+    };
+  });
+  const schemas = (await select(client, "pre-change schemas", PRE_CHANGE_SCHEMAS_SQL)).map((row) => {
+    if (!isText(row.name) || !isText(row.owner) || !isBool(row.aclNull) || !isText(row.acl) || !isBool(row.publicUsage) || !isBool(row.publicCreate)) {
+      throw invalid("pre-change schemas");
+    }
+    return { name: row.name, owner: row.owner, aclNull: row.aclNull, acl: row.acl, publicUsage: row.publicUsage, publicCreate: row.publicCreate };
+  });
+  return { databases, schemas };
+}
+
+export type PreChangeAclCheckInput = {
+  /** `.env.test` の検証済みの接続URL（katana_test_user） */
+  databaseUrl: string;
+  developmentDatabaseUrl: string | undefined;
+  connect: (databaseUrl: string) => Promise<IntegrationDbClient>;
+  /** D1・F1 の識別情報。この接続のサーバーが合わなければ、ACL を読まずに止まる */
+  expectedServer: PinnedServerExpectation;
+};
+
+/**
+ * A0：katana_test_user で1回だけ接続し、BEGIN READ ONLY → search_path の固定 → 本人確認（katana_test_user）→ サーバーの識別（D1・F1 と同じ）
+ * → 固定の SELECT 2つ（PRE_CHANGE_DATABASES_SQL・PRE_CHANGE_SCHEMAS_SQL）→ ROLLBACK・接続の解放（runReadOnlyCheck）。DB は変更しない。
+ * 判定は呼び出し側（preChangeAclViolations）で行う。
+ */
+export async function runPreChangeAclCheck(input: PreChangeAclCheckInput): Promise<PreChangeAclObservation> {
+  try {
+    assertTestDatabaseTarget({ databaseUrl: input.databaseUrl, env: {}, developmentDatabaseUrl: input.developmentDatabaseUrl });
+  } catch (error) {
+    if (error instanceof TestDatabaseGuardError) throw new ReadOnlyRoleError("TARGET_REJECTED", `the pre-change ACL check target was rejected (${error.code}).`);
+    throw error;
+  }
+  try {
+    return await runReadOnlyCheck(input.connect, input.databaseUrl, async (client) => {
+      await pinSearchPath(client);
+      try {
+        await assertDatabaseIdentity(client);
+      } catch (error) {
+        if (error instanceof IntegrationDatabaseCheckError && IDENTITY_CODES.has(error.code)) {
+          throw new ReadOnlyRoleError("IDENTITY_CHECK_FAILED", `the pre-change ACL check identity check failed (${error.code}).`);
+        }
+        throw error;
+      }
+      const server = await readServerIdentity(client);
+      const mismatches = pinnedServerMismatches(server, input.expectedServer);
+      if (mismatches.length > 0) {
+        throw new ReadOnlyRoleError("SERVER_IDENTITY_MISMATCH", `this connection does not reach the verified server (${mismatches.join(", ")}); the ACLs were not read.`);
+      }
+      return readPreChangeAclObservation(client);
+    });
+  } catch (error) {
+    if (error instanceof ReadOnlyRoleError) throw error;
+    const code = error instanceof IntegrationDatabaseCheckError ? error.code : (error as { code?: unknown } | null)?.code;
+    throw new ReadOnlyRoleError("CHECK_QUERY_FAILED", `the pre-change ACL check failed (${typeof code === "string" && /^[A-Z][A-Z0-9_]*$/.test(code) ? code : "unknown"}).`);
+  }
 }
 
 export type ReadOnlyRoleVerdict = { readonly passed: boolean; readonly findings: readonly string[] };

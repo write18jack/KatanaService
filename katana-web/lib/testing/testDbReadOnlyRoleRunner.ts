@@ -34,6 +34,8 @@ import {
   expectedReadOnlyRoleTables,
   initialCreationPreconditionViolations,
   loadReadOnlyRoleSql,
+  type PreChangeAclObservation,
+  preChangeAclViolations,
   READ_ONLY_ROLE_ENV_FILE,
   READ_ONLY_ROLE_SQL_FILES,
   ReadOnlyRoleError,
@@ -59,11 +61,11 @@ import type { TestDatabaseInspection } from "./testDbState.ts";
  *
  * create（--apply・ゲートが有効なときだけ）:
  *   D1 → F1（katana_test_user。状態 C・migration 8件・識別情報）→ FP0（カタログの監査。passed・fingerprint）→ FP0 の前提（ロールがない・ACL が未設定）
- *   → D2（D1 と一致）→ docker exec（01-create.sql）→ D3 → F2（状態 C・F1 と同じサーバー）→ FP1（FP0 からの想定した差分だけ）→ R-full
+ *   → A0（katana_test_user。クラスタの DB・スキーマの ACL と PUBLIC の実効権限が固定の期待値と一致）→ D2（D1 と一致）→ docker exec（01-create.sql）→ D3 → F2（状態 C・F1 と同じサーバー）→ FP1（FP0 からの想定した差分だけ）→ R-full
  * grant-sync（同上）:
  *   D1 → F1 → FP0 → R-base（katana_test_ro。補完の対象 = SELECT がなく ACL が未設定の、期待するテーブル）
  *   → 対象が0件なら、docker exec をせず、R-full が通ったときだけ成功
- *   → D2 → docker exec（02-grant-sync.sql）→ D3 → F2 → FP1（補完したテーブルの ACL だけ）→ R-full
+ *   → A0 → D2 → docker exec（02-grant-sync.sql）→ D3 → F2 → FP1（補完したテーブルの ACL だけ）→ R-full
  * docker exec を試みた後は、成功・失敗にかかわらず D3・F2・FP1 を行う（exec が失敗したときは、FP1 が FP0 と同じことを確かめる）。
  * どの検査の失敗でも、自動の復旧・再試行・再構築はしない。表示には、接続URL・パスワード・検証子・ハッシュを含めない。
  */
@@ -98,6 +100,8 @@ export type TestDbReadOnlyRoleErrorCode =
   | "READ_ONLY_ROLE_CHECK_FAILED"
   | "READ_ONLY_ROLE_BASE_FAILED"
   | "GRANT_TARGETS_MISMATCH"
+  | "PRE_CHANGE_ACL_CHECK_FAILED"
+  | "PRE_CHANGE_ACL_MISMATCH"
   | "EXEC_REJECTED"
   | "EXEC_FAILED"
   | "EXEC_FAILED_STATE_CHANGED"
@@ -162,6 +166,8 @@ export type TestDbReadOnlyRoleDeps = {
   runAudit: (input: CheckInput & { expectation: CatalogAuditExpectation; expectedServer: PinnedServerExpectation }) => Promise<CatalogDefinitionAuditResult>;
   /** R-base・R-full（runReadOnlyRoleCheck。katana_test_ro の読み取り専用の接続） */
   checkReadOnlyRole: (input: CheckInput & { expectedServer: PinnedServerExpectation }) => Promise<ReadOnlyRoleObservation>;
+  /** A0（runPreChangeAclCheck。katana_test_user の読み取り専用の接続。固定の SELECT だけ） */
+  checkPreChangeAcl: (input: CheckInput & { expectedServer: PinnedServerExpectation }) => Promise<PreChangeAclObservation>;
   /** 固定の docker exec を、shell なし・標準入力付きで起動する */
   exec: (command: string, args: readonly string[], options: ReadOnlyRoleExecOptions) => Promise<ReadOnlyRoleExecResult>;
   /** 検証子の作成（既定は createScramVerifier。テストでだけ差し替える） */
@@ -408,6 +414,18 @@ export async function runTestDbReadOnlyRole(deps: TestDbReadOnlyRoleDeps): Promi
     grantTargets = [...base.candidates];
   }
 
+  // A0（変更の前の ACL。クラスタのすべての DB と非システムのスキーマ。違えば docker exec の前に止まる）
+  let a0: PreChangeAclObservation;
+  try {
+    a0 = await deps.checkPreChangeAcl({ ...appCheck, expectedServer });
+  } catch (error) {
+    throw new TestDbReadOnlyRoleError("PRE_CHANGE_ACL_CHECK_FAILED", `the pre-change ACL check A0 failed (${codeOf(error)}). Nothing was changed.`);
+  }
+  const aclViolations = preChangeAclViolations(a0, operation);
+  if (aclViolations.length > 0) {
+    throw new TestDbReadOnlyRoleError("PRE_CHANGE_ACL_MISMATCH", `the privileges before the change are not the expected ones (${aclViolations.join(", ")}). Nothing was changed.`);
+  }
+
   // D2（D1 と一致）
   const docker2 = await readDocker("D2");
   const changedBefore = dockerIdentityChanges(docker1, docker2);
@@ -474,7 +492,7 @@ export async function runTestDbReadOnlyRole(deps: TestDbReadOnlyRoleDeps): Promi
   deps.log(
     [
       `[testdb-ro-role] ${operation} applied to ${where}: ${grantTargets.length} tables granted SELECT for ${readOnlyTarget.user} (passwords and values hidden).`,
-      "checks D1/F1/FP0/D2 before and D3/F2/FP1/R-full after passed; state C before and after; only the expected catalog changes were found.",
+      "checks D1/F1/FP0/A0/D2 before and D3/F2/FP1/R-full after passed; state C before and after; only the expected catalog changes were found.",
     ].join("\n"),
   );
   return { mode: "applied", operation, grantedTables: grantTargets };

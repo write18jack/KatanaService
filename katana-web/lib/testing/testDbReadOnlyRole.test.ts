@@ -27,10 +27,17 @@ import {
   EXEC_ENV,
   EXEC_ENV_KEYS,
   EXPECTED_INITIAL_TABLE_COUNT,
+  EXPECTED_PRE_CHANGE_SCHEMAS,
+  EXPECTED_PRE_CHANGE_SYSTEM_DATABASES,
+  EXPECTED_PRE_CHANGE_TEST_DATABASE,
   EXPECTED_ROLE_CONFIG_MD5,
   expectedReadOnlyRoleTables,
   initialCreationPreconditionViolations,
   loadReadOnlyRoleSql,
+  type PreChangeAclObservation,
+  preChangeAclViolations,
+  PRE_CHANGE_DATABASES_SQL,
+  PRE_CHANGE_SCHEMAS_SQL,
   PSQL_ARGS,
   READ_ONLY_ROLE_SQL_FILES,
   READ_ONLY_ROLE_SQL_SHA256,
@@ -40,6 +47,7 @@ import {
   RO_ROLE_CREATE_DISABLED,
   RO_ROLE_GRANT_SYNC_DISABLED,
   RO_TEST_CONTAINER,
+  runPreChangeAclCheck,
   runReadOnlyRoleCheck,
   SCRAM_VERIFIER_PATTERN,
   sha256Hex,
@@ -193,6 +201,16 @@ describe("固定の SQL ファイル（静的な検査。実行しない）", ()
     expect(sql.indexOf("refusing: unexpected database")).toBeLessThan(sql.indexOf("refusing: the public relations do not match"));
     expect(sql.indexOf("refusing: the public relations do not match")).toBeLessThan(firstChange);
     expect(sql.indexOf("refusing: the tables without privileges do not match the grant targets")).toBeLessThan(firstChange);
+    // クラスタの DB・スキーマの ACL の照合（Step 3-12B-5E-5A）も、最初の変更の文より前
+    for (const refusal of [
+      "refusing: the cluster databases are not the expected ones",
+      "refusing: the test database owner is not the expected one",
+      "refusing: the privileges of the other databases are not the expected ones",
+      "refusing: the schemas or their privileges are not the expected ones",
+    ]) {
+      expect(sql.indexOf(refusal), refusal).toBeGreaterThan(sql.indexOf("refusing: the public relations do not match"));
+      expect(sql.indexOf(refusal), refusal).toBeLessThan(firstChange);
+    }
     expect(sql.lastIndexOf("the table privileges are not the expected ones")).toBeGreaterThan(firstChange);
     expect(sql.lastIndexOf("the privilege dependencies do not match the expected tables")).toBeGreaterThan(firstChange);
   });
@@ -208,6 +226,39 @@ describe("固定の SQL ファイル（静的な検査。実行しない）", ()
     const block = (sql: string) => sql.slice(sql.indexOf("-- 本人確認（変更の前）"), sql.search(/^-- (初回作成だけの前提|補完だけの前提)/m));
     expect(block(CREATE_SQL).length).toBeGreaterThan(1000);
     expect(block(SYNC_SQL)).toBe(block(CREATE_SQL));
+  });
+
+  it("クラスタの ACL の照合は、2つのファイルで同じ文面の範囲にあり、期待値は TS の EXPECTED_PRE_CHANGE_* と同じ", () => {
+    const block = (sql: string) => sql.slice(sql.indexOf("-- 本人確認（変更の前）"), sql.search(/^-- (初回作成だけの前提|補完だけの前提)/m));
+    expect(block(CREATE_SQL)).toContain("refusing: the privileges of the other databases are not the expected ones");
+    // SQL の行の形：名前|所有者|接続の可否|ACL が未設定か|展開した ACL|PUBLIC の CONNECT|TEMPORARY|CREATE（スキーマは USAGE|CREATE）
+    const dbRows = [...EXPECTED_PRE_CHANGE_SYSTEM_DATABASES]
+      .sort((a, b) => (a.name < b.name ? -1 : 1))
+      .map((d) => [d.name, d.owner, d.allowConnections, d.aclNull, d.acl, d.publicConnect, d.publicTemporary, d.publicCreate].join("|"));
+    const schemaRows = EXPECTED_PRE_CHANGE_SCHEMAS.map((n) => [n.name, n.owner, n.aclNull, n.acl, n.publicUsage, n.publicCreate].join("|"));
+    for (const sql of [CREATE_SQL, SYNC_SQL]) {
+      const literal = (start: string) => {
+        const from = sql.indexOf(start);
+        const end = sql.indexOf(" THEN", from);
+        return [...sql.slice(from, end).matchAll(/'([^']*)'/g)].map((m) => m[1]).join("");
+      };
+      expect(literal("IF found IS DISTINCT FROM\n       'postgres|")).toBe(dbRows.join(";"));
+      expect(literal("IF found IS DISTINCT FROM\n       'public|")).toBe(schemaRows.join(";"));
+      expect(sql).toContain("IF found IS DISTINCT FROM 'katana_test,postgres,template0,template1' THEN");
+      expect(sql).toContain(`IS DISTINCT FROM '${EXPECTED_PRE_CHANGE_TEST_DATABASE.create.owner}|${EXPECTED_PRE_CHANGE_TEST_DATABASE.create.allowConnections}' THEN`);
+      // NULL の ACL は既定の ACL に展開して比べる（NULL と明示的な ACL を区別するため、未設定かどうかも行に含める）
+      expect(sql).toContain("pg_catalog.aclexplode(COALESCE(d.datacl, pg_catalog.acldefault('d', d.datdba)))");
+      expect(sql).toContain("pg_catalog.aclexplode(COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner)))");
+    }
+    // TS の固定の SELECT も、同じ展開の式と PUBLIC の実効権限を使う
+    expect(PRE_CHANGE_DATABASES_SQL).toContain("pg_catalog.aclexplode(COALESCE(d.datacl, pg_catalog.acldefault('d', d.datdba)))");
+    expect(PRE_CHANGE_DATABASES_SQL).toContain("pg_catalog.has_database_privilege('public', d.oid, 'TEMPORARY')");
+    expect(PRE_CHANGE_SCHEMAS_SQL).toContain("pg_catalog.aclexplode(COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner)))");
+    expect(PRE_CHANGE_SCHEMAS_SQL).toContain("NOT LIKE 'pg\\_%'");
+    for (const sql of [PRE_CHANGE_DATABASES_SQL, PRE_CHANGE_SCHEMAS_SQL]) {
+      expect(sql.trimStart().startsWith("SELECT ")).toBe(true);
+      expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|CREATE|ALTER|GRANT|REVOKE|DROP|SET)\b(?!')/);
+    }
   });
 
   it("初回作成は16テーブルちょうどを SQL の中でも求める（EXPECTED_INITIAL_TABLE_COUNT と同じ値）。補完は件数を固定しない", () => {
@@ -554,6 +605,147 @@ describe("runReadOnlyRoleCheck（偽のクライアント）", () => {
       runReadOnlyRoleCheck({ databaseUrl: APP_URL, developmentDatabaseUrl: undefined, connect: async () => ((connected = true), client(identity("x"), [])), expectedServer: { docker: DOCKER, server: SERVER } }),
     ).rejects.toThrow(/TARGET_REJECTED/);
     expect(connected).toBe(false);
+  });
+});
+
+// ---- A0（変更の前の ACL） ----
+
+// PostgreSQL 15 の initdb・初期化スクリプトの結果を、期待値の定数とは別に書いた観測（create の前）
+function observedAcl(): PreChangeAclObservation {
+  const pg = "postgres:CONNECT:postgres,postgres:CREATE:postgres,postgres:TEMPORARY:postgres";
+  const u = "katana_test_user";
+  return {
+    databases: [
+      { name: "katana_test", owner: u, allowConnections: true, aclNull: true, acl: `PUBLIC:CONNECT:${u},PUBLIC:TEMPORARY:${u},${u}:CONNECT:${u},${u}:CREATE:${u},${u}:TEMPORARY:${u}`, publicConnect: true, publicTemporary: true, publicCreate: false },
+      { name: "postgres", owner: "postgres", allowConnections: true, aclNull: false, acl: pg, publicConnect: false, publicTemporary: false, publicCreate: false },
+      { name: "template0", owner: "postgres", allowConnections: false, aclNull: false, acl: `PUBLIC:CONNECT:postgres,${pg}`, publicConnect: true, publicTemporary: false, publicCreate: false },
+      { name: "template1", owner: "postgres", allowConnections: true, aclNull: false, acl: `PUBLIC:CONNECT:postgres,${pg}`, publicConnect: true, publicTemporary: false, publicCreate: false },
+    ],
+    schemas: [
+      { name: "public", owner: "pg_database_owner", aclNull: false, acl: "PUBLIC:USAGE:pg_database_owner,pg_database_owner:CREATE:pg_database_owner,pg_database_owner:USAGE:pg_database_owner", publicUsage: true, publicCreate: false },
+    ],
+  };
+}
+
+describe("A0：変更の前の ACL の判定（preChangeAclViolations）", () => {
+  it("create の前の期待値（initdb と初期化スクリプトの結果）と一致すれば違反なし", () => {
+    expect(preChangeAclViolations(observedAcl(), "create")).toEqual([]);
+  });
+
+  it("grant-sync の前は、katana_test の PUBLIC の TEMPORARY を取り上げた形だけが一致する", () => {
+    const o = observedAcl();
+    expect(preChangeAclViolations(o, "grant-sync")).toEqual(["database katana_test: aclNull differs", "database katana_test: acl differs", "database katana_test: publicTemporary differs"]);
+    const u = "katana_test_user";
+    Object.assign(o.databases[0], { aclNull: false, acl: `PUBLIC:CONNECT:${u},${u}:CONNECT:${u},${u}:CREATE:${u},${u}:TEMPORARY:${u}`, publicTemporary: false });
+    expect(preChangeAclViolations(o, "grant-sync")).toEqual([]);
+    expect(preChangeAclViolations(o, "create")).not.toEqual([]);
+  });
+
+  const at = (o: PreChangeAclObservation, name: string) => o.databases.find((d) => d.name === name) ?? o.databases[0];
+  it.each<[string, (o: PreChangeAclObservation) => void, string]>([
+    ["template1 の ACL が未設定（既定の ACL では PUBLIC に TEMPORARY）", (o) => Object.assign(at(o, "template1"), { aclNull: true, acl: "PUBLIC:CONNECT:postgres,PUBLIC:TEMPORARY:postgres,postgres:CONNECT:postgres,postgres:CREATE:postgres,postgres:TEMPORARY:postgres", publicTemporary: true }), "database template1: aclNull differs"],
+    ["template1 の PUBLIC の TEMPORARY（ACL の文字列が同じでも実効権限で検出）", (o) => Object.assign(at(o, "template1"), { publicTemporary: true }), "database template1: publicTemporary differs"],
+    ["template1 の PUBLIC の CREATE", (o) => Object.assign(at(o, "template1"), { acl: `PUBLIC:CONNECT:postgres,PUBLIC:CREATE:postgres,${"postgres:CONNECT:postgres,postgres:CREATE:postgres,postgres:TEMPORARY:postgres"}` }), "database template1: acl differs"],
+    ["template1 への明示的な付与", (o) => Object.assign(at(o, "template1"), { acl: `${at(o, "template1").acl},katana_test_user:CONNECT:postgres` }), "database template1: acl differs"],
+    ["postgres の ACL が未設定（PUBLIC に CONNECT・TEMPORARY）", (o) => Object.assign(at(o, "postgres"), { aclNull: true }), "database postgres: aclNull differs"],
+    ["postgres の PUBLIC の CONNECT", (o) => Object.assign(at(o, "postgres"), { publicConnect: true }), "database postgres: publicConnect differs"],
+    ["postgres の PUBLIC の TEMPORARY", (o) => Object.assign(at(o, "postgres"), { publicTemporary: true }), "database postgres: publicTemporary differs"],
+    ["template0 が接続を受け付ける", (o) => Object.assign(at(o, "template0"), { allowConnections: true }), "database template0: allowConnections differs"],
+    ["katana_test の ACL が明示的（初期値でない）", (o) => Object.assign(at(o, "katana_test"), { aclNull: false }), "database katana_test: aclNull differs"],
+    ["katana_test の所有者", (o) => Object.assign(at(o, "katana_test"), { owner: "postgres" }), "database katana_test: owner differs"],
+    ["DB の所有者（template1）", (o) => Object.assign(at(o, "template1"), { owner: "katana_test_user" }), "database template1: owner differs"],
+    ["付与の権限（GRANTABLE）", (o) => Object.assign(at(o, "template1"), { acl: at(o, "template1").acl.replace("PUBLIC:CONNECT:postgres", "PUBLIC:CONNECT:postgres:GRANTABLE") }), "database template1: acl differs"],
+    ["想定外の DB", (o) => o.databases.push({ ...at(o, "template1"), name: "extra" }), "the databases are not the expected ones"],
+    ["DB が足りない", (o) => o.databases.splice(1, 1), "the databases are not the expected ones"],
+    ["public の ACL が未設定", (o) => Object.assign(o.schemas[0], { aclNull: true }), "schema public: aclNull differs"],
+    ["public の PUBLIC の CREATE", (o) => Object.assign(o.schemas[0], { publicCreate: true }), "schema public: publicCreate differs"],
+    ["public の所有者", (o) => Object.assign(o.schemas[0], { owner: "katana_test_user" }), "schema public: owner differs"],
+    ["public の ACL への追加", (o) => Object.assign(o.schemas[0], { acl: `${o.schemas[0].acl},katana_test_ro:USAGE:pg_database_owner` }), "schema public: acl differs"],
+    ["public 以外のスキーマ", (o) => o.schemas.push({ ...o.schemas[0], name: "extra" }), "the schemas are not the expected ones"],
+    ["public がない", (o) => o.schemas.splice(0, 1), "the schemas are not the expected ones"],
+  ])("%s は違反", (_, change, expected) => {
+    const o = observedAcl();
+    change(o);
+    expect(preChangeAclViolations(o, "create")).toContain(expected);
+  });
+});
+
+describe("runPreChangeAclCheck（偽のクライアント）", () => {
+  type Answer = (sql: string) => Record<string, unknown>[];
+  function client(answer: Answer, log: string[]): IntegrationDbClient {
+    return {
+      query: async (sql) => {
+        log.push(sql.split("\n")[0].trim());
+        return { rows: answer(sql) };
+      },
+      end: async () => {
+        log.push("end");
+      },
+    };
+  }
+  const answers = (user: string, acl: PreChangeAclObservation = observedAcl()): Answer => (sql) => {
+    if (sql.startsWith("BEGIN READ ONLY") || sql === "ROLLBACK") return [];
+    if (sql.includes("set_config('search_path'")) return [{ searchPath: "pg_catalog" }];
+    if (sql === "SHOW transaction_read_only") return [{ transaction_read_only: "on" }];
+    if (sql.includes("current_database() AS database")) return [{ database: "katana_test", currentUser: user, sessionUser: user, marker: "katana-test-db", serverPort: 5432 }];
+    if (sql.includes("inet_server_addr")) return [{ serverAddress: SERVER.serverAddress, serverPort: SERVER.serverPort, postmasterStartTime: SERVER.postmasterStartTime }];
+    if (sql === PRE_CHANGE_DATABASES_SQL) return acl.databases.map((d) => ({ ...d }));
+    if (sql === PRE_CHANGE_SCHEMAS_SQL) return acl.schemas.map((n) => ({ ...n }));
+    throw new Error(`unexpected SQL: ${sql.slice(0, 60)}`);
+  };
+  const input = (connect: () => Promise<IntegrationDbClient>, over: Partial<{ databaseUrl: string; server: typeof SERVER }> = {}) => ({
+    databaseUrl: over.databaseUrl ?? APP_URL,
+    developmentDatabaseUrl: undefined,
+    connect,
+    expectedServer: { docker: DOCKER, server: over.server ?? SERVER },
+  });
+
+  it("katana_test_user で、読み取り専用のトランザクションの中で固定の SELECT 2つだけを読み、ROLLBACK して接続を解放する", async () => {
+    const log: string[] = [];
+    const result = await runPreChangeAclCheck(input(async () => client(answers("katana_test_user"), log)));
+    expect(result).toEqual(observedAcl());
+    expect(preChangeAclViolations(result, "create")).toEqual([]);
+    expect(log[0]).toMatch(/^BEGIN READ ONLY/);
+    expect(log).toContain("ROLLBACK");
+    expect(log.at(-1)).toBe("end");
+    expect(log.filter((l) => /^(INSERT|UPDATE|DELETE|CREATE|ALTER|GRANT|REVOKE|DROP|COMMIT)\b/.test(l))).toEqual([]);
+  });
+
+  it("katana_test_user 以外なら、ACL を読まずに IDENTITY_CHECK_FAILED", async () => {
+    const log: string[] = [];
+    await expect(runPreChangeAclCheck(input(async () => client(answers("katana_test_ro"), log)))).rejects.toThrow(/IDENTITY_CHECK_FAILED/);
+    expect(log.some((l) => l.includes("datname::text AS name") || l.includes("nspname::text AS name"))).toBe(false);
+    expect(log.at(-1)).toBe("end");
+  });
+
+  it("別のサーバーなら、ACL を読まずに SERVER_IDENTITY_MISMATCH", async () => {
+    const log: string[] = [];
+    await expect(
+      runPreChangeAclCheck(input(async () => client(answers("katana_test_user"), log), { server: { ...SERVER, postmasterStartTime: "2026-11-06T22:46:51.123457Z" } })),
+    ).rejects.toThrow(/SERVER_IDENTITY_MISMATCH/);
+    expect(log.some((l) => l.includes("datname::text AS name"))).toBe(false);
+  });
+
+  it("katana_test_ro の URL は、接続する前に TARGET_REJECTED", async () => {
+    let connected = false;
+    await expect(runPreChangeAclCheck(input(async () => ((connected = true), client(answers("x"), [])), { databaseUrl: RO_URL }))).rejects.toThrow(/TARGET_REJECTED/);
+    expect(connected).toBe(false);
+  });
+
+  it("結果の形が違えば INVALID_RESULT（判定しない）", async () => {
+    const broken = observedAcl();
+    (broken.databases[0] as unknown as Record<string, unknown>).publicTemporary = "t";
+    await expect(runPreChangeAclCheck(input(async () => client(answers("katana_test_user", broken), [])))).rejects.toThrow(/INVALID_RESULT/);
+  });
+
+  it("照会の失敗は CHECK_QUERY_FAILED（メッセージに接続URL・パスワードを含めない）", async () => {
+    const failing: Answer = (sql) => {
+      if (sql === PRE_CHANGE_SCHEMAS_SQL) throw Object.assign(new Error(`boom ${APP_URL}`), { code: "42501" });
+      return answers("katana_test_user")(sql);
+    };
+    const error = await runPreChangeAclCheck(input(async () => client(failing, []))).catch((e: unknown) => e as Error);
+    expect(String(error)).toMatch(/CHECK_QUERY_FAILED/);
+    expect(String(error)).not.toContain(APP_PASSWORD);
   });
 });
 

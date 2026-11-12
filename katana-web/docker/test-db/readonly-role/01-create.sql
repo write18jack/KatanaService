@@ -92,6 +92,58 @@ BEGIN
 END
 $$;
 
+-- クラスタの DB と、スキーマの ACL の照合（変更の前。Step 3-12B-5E-5A）。DB は4つだけで、katana_test の所有者は katana_test_user。
+-- template0・template1・postgres の所有者・接続の可否・ACL（未設定なら acldefault で展開して比べる）・PUBLIC の実効権限が、
+-- PostgreSQL 15 の initdb（template0・template1 から PUBLIC の CREATE・TEMPORARY を取り上げる）と初期化スクリプト
+-- （postgres から PUBLIC の権限をすべて取り上げる）の結果と一致する。template1 の PUBLIC の CONNECT だけは許容する。
+-- 非システムのスキーマは public だけで、所有者・ACL・PUBLIC の実効権限が PostgreSQL 15 の既定と一致する。
+-- 期待値は lib/testing/testDbReadOnlyRole.ts の EXPECTED_PRE_CHANGE_SYSTEM_DATABASES・EXPECTED_PRE_CHANGE_SCHEMAS と同じ（テストで一致を確かめる）
+DO $$
+DECLARE
+  found text;
+BEGIN
+  SELECT pg_catalog.string_agg(d.datname::text, ',' ORDER BY d.datname::text COLLATE "C") INTO found FROM pg_catalog.pg_database d;
+  IF found IS DISTINCT FROM 'katana_test,postgres,template0,template1' THEN
+    RAISE EXCEPTION 'katana-ro-role: refusing: the cluster databases are not the expected ones';
+  END IF;
+  IF (SELECT pg_catalog.pg_get_userbyid(d.datdba)::text || '|' || d.datallowconn::text FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database())
+       IS DISTINCT FROM 'katana_test_user|true' THEN
+    RAISE EXCEPTION 'katana-ro-role: refusing: the test database owner is not the expected one';
+  END IF;
+  SELECT pg_catalog.string_agg(x, ';' ORDER BY x COLLATE "C") INTO found
+    FROM (SELECT d.datname::text || '|' || pg_catalog.pg_get_userbyid(d.datdba)::text || '|' || d.datallowconn::text || '|' || (d.datacl IS NULL)::text || '|'
+                 || COALESCE((SELECT pg_catalog.string_agg(i, ',' ORDER BY i COLLATE "C")
+                                FROM (SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END
+                                             || ':' || a.privilege_type || ':' || pg_catalog.pg_get_userbyid(a.grantor)::text
+                                             || CASE WHEN a.is_grantable THEN ':GRANTABLE' ELSE '' END AS i
+                                        FROM pg_catalog.aclexplode(COALESCE(d.datacl, pg_catalog.acldefault('d', d.datdba))) a) items), '')
+                 || '|' || pg_catalog.has_database_privilege('public', d.oid, 'CONNECT')::text
+                 || '|' || pg_catalog.has_database_privilege('public', d.oid, 'TEMPORARY')::text
+                 || '|' || pg_catalog.has_database_privilege('public', d.oid, 'CREATE')::text AS x
+            FROM pg_catalog.pg_database d WHERE d.datname IN ('postgres', 'template0', 'template1')) dbs;
+  IF found IS DISTINCT FROM
+       'postgres|postgres|true|false|postgres:CONNECT:postgres,postgres:CREATE:postgres,postgres:TEMPORARY:postgres|false|false|false;'
+       || 'template0|postgres|false|false|PUBLIC:CONNECT:postgres,postgres:CONNECT:postgres,postgres:CREATE:postgres,postgres:TEMPORARY:postgres|true|false|false;'
+       || 'template1|postgres|true|false|PUBLIC:CONNECT:postgres,postgres:CONNECT:postgres,postgres:CREATE:postgres,postgres:TEMPORARY:postgres|true|false|false' THEN
+    RAISE EXCEPTION 'katana-ro-role: refusing: the privileges of the other databases are not the expected ones';
+  END IF;
+  SELECT pg_catalog.string_agg(x, ';' ORDER BY x COLLATE "C") INTO found
+    FROM (SELECT n.nspname::text || '|' || pg_catalog.pg_get_userbyid(n.nspowner)::text || '|' || (n.nspacl IS NULL)::text || '|'
+                 || COALESCE((SELECT pg_catalog.string_agg(i, ',' ORDER BY i COLLATE "C")
+                                FROM (SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END
+                                             || ':' || a.privilege_type || ':' || pg_catalog.pg_get_userbyid(a.grantor)::text
+                                             || CASE WHEN a.is_grantable THEN ':GRANTABLE' ELSE '' END AS i
+                                        FROM pg_catalog.aclexplode(COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) a) items), '')
+                 || '|' || pg_catalog.has_schema_privilege('public', n.oid, 'USAGE')::text
+                 || '|' || pg_catalog.has_schema_privilege('public', n.oid, 'CREATE')::text AS x
+            FROM pg_catalog.pg_namespace n WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\_%') schemas;
+  IF found IS DISTINCT FROM
+       'public|pg_database_owner|false|PUBLIC:USAGE:pg_database_owner,pg_database_owner:CREATE:pg_database_owner,pg_database_owner:USAGE:pg_database_owner|true|false' THEN
+    RAISE EXCEPTION 'katana-ro-role: refusing: the schemas or their privileges are not the expected ones';
+  END IF;
+END
+$$;
+
 -- 初回作成だけの前提：すべてのテーブルが付与の対象（16件）、ロールが存在しない、DB の ACL が初期値のまま
 DO $$
 BEGIN

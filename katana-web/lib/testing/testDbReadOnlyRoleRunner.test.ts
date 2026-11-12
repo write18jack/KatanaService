@@ -16,10 +16,15 @@ import type { TestDatabaseServerIdentity, TestDbDockerIdentity } from "./testDbI
 import { type InspectDatabase, LIVE_DATABASE_DISABLED, type ReadDockerIdentity } from "./testDbMigrate";
 import {
   EXEC_ENV,
+  EXPECTED_PRE_CHANGE_SCHEMAS,
+  EXPECTED_PRE_CHANGE_SYSTEM_DATABASES,
+  EXPECTED_PRE_CHANGE_TEST_DATABASE,
   EXPECTED_ROLE_CONFIG_MD5,
   expectedReadOnlyRoleTables,
   READ_ONLY_ROLE_SQL_FILES,
+  type PreChangeAclObservation,
   type ReadOnlyRoleObservation,
+  type ReadOnlyRoleOperation,
   RO_ROLE_CREATE_DISABLED,
   RO_ROLE_GRANT_SYNC_DISABLED,
   sha256Hex,
@@ -120,6 +125,14 @@ function observation(granted: readonly string[] = TABLES): ReadOnlyRoleObservati
   };
 }
 
+/** A0 の観測（期待値どおり）。操作ごとに katana_test の行だけが違う */
+function aclObservation(operation: ReadOnlyRoleOperation): PreChangeAclObservation {
+  return {
+    databases: [...EXPECTED_PRE_CHANGE_SYSTEM_DATABASES, EXPECTED_PRE_CHANGE_TEST_DATABASE[operation]].map((d) => ({ ...d })),
+    schemas: EXPECTED_PRE_CHANGE_SCHEMAS.map((n) => ({ ...n })),
+  };
+}
+
 type ExecCall = { command: string; args: readonly string[]; env: Readonly<Record<string, string>>; input: string; shell: boolean };
 
 type Fake = {
@@ -128,6 +141,7 @@ type Fake = {
   inspectDb: Mock<InspectDatabase>;
   audit: Mock<TestDbReadOnlyRoleDeps["runAudit"]>;
   role: Mock<TestDbReadOnlyRoleDeps["checkReadOnlyRole"]>;
+  acl: Mock<TestDbReadOnlyRoleDeps["checkPreChangeAcl"]>;
   exec: Mock<TestDbReadOnlyRoleDeps["exec"]>;
   execCalls: ExecCall[];
   logs: string[];
@@ -149,6 +163,8 @@ function fake(
     dockers?: TestDbDockerIdentity[];
     states?: TestDatabaseState[];
     execResult?: ReadOnlyRoleExecResult;
+    /** A0 の観測（既定は、引数の操作の期待値どおり）。Error なら A0 の接続の失敗 */
+    acl?: PreChangeAclObservation | Error;
   } = {},
 ): Fake {
   const calls: string[] = [];
@@ -178,6 +194,11 @@ function fake(
     const list = o.observations ?? [observation()];
     return list[Math.min(n.role - 1, list.length - 1)];
   });
+  const acl = vi.fn<TestDbReadOnlyRoleDeps["checkPreChangeAcl"]>(async () => {
+    calls.push("A0");
+    if (o.acl instanceof Error) throw o.acl;
+    return o.acl ?? aclObservation((o.argv ?? ["--create"])[0] === "--grant-sync" ? "grant-sync" : "create");
+  });
   const exec = vi.fn<TestDbReadOnlyRoleDeps["exec"]>(async (command, args, options) => {
     calls.push("exec");
     execCalls.push({ command, args, env: options.env, input: options.input, shell: options.shell });
@@ -203,11 +224,12 @@ function fake(
     inspectDatabase: inspectDb,
     runAudit: auditFn,
     checkReadOnlyRole: role,
+    checkPreChangeAcl: acl,
     exec,
     createVerifier: () => VERIFIER,
     log: (text) => logs.push(text),
   };
-  return { deps, docker, inspectDb, audit: auditFn, role, exec, execCalls, logs, calls };
+  return { deps, docker, inspectDb, audit: auditFn, role, acl, exec, execCalls, logs, calls };
 }
 
 function noSecrets(f: Fake, error?: unknown) {
@@ -234,6 +256,7 @@ const touchedNothing = (f: Fake) => {
   expect(f.inspectDb).not.toHaveBeenCalled();
   expect(f.audit).not.toHaveBeenCalled();
   expect(f.role).not.toHaveBeenCalled();
+  expect(f.acl).not.toHaveBeenCalled();
   expect(f.exec).not.toHaveBeenCalled();
 };
 
@@ -316,10 +339,10 @@ describe("事前の検証（ゲートが有効でも、Docker・DB に触れる�
 });
 
 describe("初回作成（create。ゲートを有効にした偽の実行）", () => {
-  it("成功：D1 → F1 → FP0 → D2 → exec → D3 → F2 → FP1 → R-full の順。固定の引数・環境変数・標準入力", async () => {
+  it("成功：D1 → F1 → FP0 → A0 → D2 → exec → D3 → F2 → FP1 → R-full の順。固定の引数・環境変数・標準入力", async () => {
     const f = fake();
     expect(await runTestDbReadOnlyRole(f.deps)).toEqual({ mode: "applied", operation: "create", grantedTables: TABLES });
-    expect(f.calls).toEqual(["D1", "F1", "FP0", "D2", "exec", "D3", "F2", "FP1", "R1"]);
+    expect(f.calls).toEqual(["D1", "F1", "FP0", "A0", "D2", "exec", "D3", "F2", "FP1", "R1"]);
     const [call] = f.execCalls;
     expect(call.command).toBe("docker");
     expect(call.shell).toBe(false);
@@ -340,8 +363,8 @@ describe("初回作成（create。ゲートを有効にした偽の実行）", (
     ["F1 が状態 C でない", { states: [{ state: "A", reasons: [] } as unknown as TestDatabaseState] }, "DATABASE_STATE_NOT_C", ["D1", "F1"]],
     ["FP0 でロールが既に存在する", { fingerprints: [fp({ created: true, granted: TABLES })] }, "PRECONDITION_FAILED", ["D1", "F1", "FP0"]],
     ["FP0 でテーブルに権限がある", { fingerprints: [fp({ granted: TABLES.slice(0, 1) })] }, "PRECONDITION_FAILED", ["D1", "F1", "FP0"]],
-    ["D2 でコンテナが変わった", { dockers: [DOCKER, { ...DOCKER, startedAt: "2026-11-07T00:00:00.000000000Z" }] }, "DOCKER_IDENTITY_MISMATCH", ["D1", "F1", "FP0", "D2"]],
-    ["D2 で Container ID が変わった", { dockers: [DOCKER, { ...DOCKER, containerId: "d".repeat(64) }] }, "DOCKER_IDENTITY_MISMATCH", ["D1", "F1", "FP0", "D2"]],
+    ["D2 でコンテナが変わった", { dockers: [DOCKER, { ...DOCKER, startedAt: "2026-11-07T00:00:00.000000000Z" }] }, "DOCKER_IDENTITY_MISMATCH", ["D1", "F1", "FP0", "A0", "D2"]],
+    ["D2 で Container ID が変わった", { dockers: [DOCKER, { ...DOCKER, containerId: "d".repeat(64) }] }, "DOCKER_IDENTITY_MISMATCH", ["D1", "F1", "FP0", "A0", "D2"]],
   ])("%s なら exec を起動しない", async (_, options, expected, calls) => {
     const f = fake(options);
     await expectError(f, expected);
@@ -349,12 +372,71 @@ describe("初回作成（create。ゲートを有効にした偽の実行）", (
     expect(f.calls).toEqual(calls);
   });
 
+  // ---- A0（変更の前の ACL）。期待と違えば、D2・docker exec の前に止まる ----
+  const mutate = (op: ReadOnlyRoleOperation, change: (o: PreChangeAclObservation) => void) => {
+    const o = aclObservation(op);
+    change(o);
+    return o;
+  };
+  const db = (o: PreChangeAclObservation, name: string) => {
+    const found = o.databases.find((d) => d.name === name);
+    if (!found) throw new Error(name);
+    return found;
+  };
+  it.each<[string, PreChangeAclObservation, RegExp]>([
+    [
+      "template1 の ACL が未設定（PUBLIC に TEMPORARY が残る）",
+      mutate("create", (o) => Object.assign(db(o, "template1"), { aclNull: true, acl: "PUBLIC:CONNECT:postgres,PUBLIC:TEMPORARY:postgres,postgres:CONNECT:postgres,postgres:CREATE:postgres,postgres:TEMPORARY:postgres", publicTemporary: true })),
+      /database template1: aclNull differs.*database template1: publicTemporary differs/,
+    ],
+    ["template1 の PUBLIC の CREATE", mutate("create", (o) => Object.assign(db(o, "template1"), { publicCreate: true })), /database template1: publicCreate differs/],
+    ["postgres の PUBLIC の CONNECT", mutate("create", (o) => Object.assign(db(o, "postgres"), { acl: "PUBLIC:CONNECT:postgres,postgres:CONNECT:postgres,postgres:CREATE:postgres,postgres:TEMPORARY:postgres", publicConnect: true })), /database postgres: acl differs/],
+    ["postgres の PUBLIC の TEMPORARY", mutate("create", (o) => Object.assign(db(o, "postgres"), { publicTemporary: true })), /database postgres: publicTemporary differs/],
+    ["katana_test の ACL が初期値でない", mutate("create", (o) => Object.assign(db(o, "katana_test"), { aclNull: false })), /database katana_test: aclNull differs/],
+    ["katana_test の所有者", mutate("create", (o) => Object.assign(db(o, "katana_test"), { owner: "postgres" })), /database katana_test: owner differs/],
+    ["想定外の DB", mutate("create", (o) => o.databases.push({ ...db(o, "template1"), name: "other" })), /the databases are not the expected ones/],
+    ["DB が足りない", mutate("create", (o) => o.databases.splice(o.databases.findIndex((d) => d.name === "postgres"), 1)), /the databases are not the expected ones/],
+    ["public の PUBLIC の CREATE", mutate("create", (o) => Object.assign(o.schemas[0], { acl: "PUBLIC:CREATE:pg_database_owner,PUBLIC:USAGE:pg_database_owner,pg_database_owner:CREATE:pg_database_owner,pg_database_owner:USAGE:pg_database_owner", publicCreate: true })), /schema public: acl differs/],
+    ["public 以外のスキーマ", mutate("create", (o) => o.schemas.push({ ...o.schemas[0], name: "extra" })), /the schemas are not the expected ones/],
+    ["付与の権限（GRANTABLE）がある", mutate("create", (o) => Object.assign(o.schemas[0], { acl: o.schemas[0].acl.replace("PUBLIC:USAGE:pg_database_owner", "PUBLIC:USAGE:pg_database_owner:GRANTABLE") })), /schema public: acl differs/],
+  ])("A0：%s なら PRE_CHANGE_ACL_MISMATCH。D2・exec の前に止まる", async (_, acl, message) => {
+    const f = fake({ acl });
+    const error = await expectError(f, "PRE_CHANGE_ACL_MISMATCH");
+    expect(error.message).toMatch(message);
+    expect(error.message).toContain("Nothing was changed.");
+    expect(f.calls).toEqual(["D1", "F1", "FP0", "A0"]);
+    expect(f.exec).not.toHaveBeenCalled();
+  });
+
+  it("A0：grant-sync の期待値（katana_test の TEMPORARY を取り上げた後）は、create では一致しない", async () => {
+    const f = fake({ acl: aclObservation("grant-sync") });
+    await expectError(f, "PRE_CHANGE_ACL_MISMATCH");
+    expect(f.exec).not.toHaveBeenCalled();
+  });
+
+  it("A0：接続・照会の失敗は PRE_CHANGE_ACL_CHECK_FAILED。D2・exec の前に止まる", async () => {
+    const f = fake({ acl: Object.assign(new Error("x"), { code: "CHECK_QUERY_FAILED" }) });
+    const error = await expectError(f, "PRE_CHANGE_ACL_CHECK_FAILED");
+    expect(error.message).toContain("CHECK_QUERY_FAILED");
+    expect(f.calls).toEqual(["D1", "F1", "FP0", "A0"]);
+    expect(f.exec).not.toHaveBeenCalled();
+  });
+
+  it("A0：katana_test_user の検証済みの URL と、D1・F1 の識別情報を渡す", async () => {
+    const f = fake();
+    await runTestDbReadOnlyRole(f.deps);
+    expect(f.acl).toHaveBeenCalledTimes(1);
+    const [input] = f.acl.mock.calls[0];
+    expect(input.databaseUrl).toBe(APP_URL);
+    expect(input.expectedServer).toEqual({ docker: DOCKER, server: SERVER });
+  });
+
   it("exec が SQL のエラー（3）で、FP1 が FP0 と同じなら EXEC_FAILED。事後の検査は行い、R-full は行わない。出力の秘密は伏せる", async () => {
     const f = fake({ fingerprints: [fp(), fp()], execResult: { kind: "exit", code: 3, signal: null, stdout: "", stderr: `ERROR: katana-ro-role: refusing ${VERIFIER} ${RO_PASSWORD} ${APP_URL}` } });
     const error = await expectError(f, "EXEC_FAILED");
     expect(error.message).toContain("rolled back");
     expect(error.message).toContain("katana-ro-role: refusing");
-    expect(f.calls).toEqual(["D1", "F1", "FP0", "D2", "exec", "D3", "F2", "FP1"]);
+    expect(f.calls).toEqual(["D1", "F1", "FP0", "A0", "D2", "exec", "D3", "F2", "FP1"]);
   });
 
   it("exec が接続の切断（2）なら、COMMIT したかは不明と表示し、成功にしない", async () => {
@@ -371,7 +453,7 @@ describe("初回作成（create。ゲートを有効にした偽の実行）", (
   ])("%s でも事後の検査を行い、成功にしない", async (_, execResult) => {
     const f = fake({ fingerprints: [fp(), fp()], execResult });
     await expectError(f, "EXEC_FAILED");
-    expect(f.calls).toEqual(["D1", "F1", "FP0", "D2", "exec", "D3", "F2", "FP1"]);
+    expect(f.calls).toEqual(["D1", "F1", "FP0", "A0", "D2", "exec", "D3", "F2", "FP1"]);
   });
 
   it("exec が失敗したのにカタログが変わっていれば EXEC_FAILED_STATE_CHANGED（自動では直さない）", async () => {
@@ -435,13 +517,33 @@ describe("補完（grant-sync。ゲートを有効にした偽の実行）", () 
       observations: [observation(before), observation()],
     });
     expect(await runTestDbReadOnlyRole(f.deps)).toEqual({ mode: "applied", operation: "grant-sync", grantedTables: [...added].sort() });
-    expect(f.calls).toEqual(["D1", "F1", "FP0", "R1", "D2", "exec", "D3", "F2", "FP1", "R2"]);
+    expect(f.calls).toEqual(["D1", "F1", "FP0", "R1", "A0", "D2", "exec", "D3", "F2", "FP1", "R2"]);
     const [call] = f.execCalls;
     expect(call.input).toBe(SQL["grant-sync"]);
     expect(call.env[EXEC_ENV.grantTargets]).toBe([...added].sort().join(","));
     expect(call.env[EXEC_ENV.expectedTables]).toBe(TABLES.join(","));
     expect(call.env[EXEC_ENV.verifier]).toBeUndefined();
     expect(call.args).not.toContain(EXEC_ENV.verifier);
+  });
+
+  it("A0 が期待と違えば（template1 の TEMPORARY）、R-base の後・exec の前に止まる", async () => {
+    const acl = aclObservation("grant-sync");
+    Object.assign(acl.databases.find((d) => d.name === "template1") ?? {}, { publicTemporary: true });
+    const f = fake({
+      argv: ["--grant-sync", "--apply"],
+      fingerprints: [fp({ created: true, granted: before })],
+      observations: [observation(before)],
+      acl,
+    });
+    await expectError(f, "PRE_CHANGE_ACL_MISMATCH");
+    expect(f.calls).toEqual(["D1", "F1", "FP0", "R1", "A0"]);
+    expect(f.exec).not.toHaveBeenCalled();
+  });
+
+  it("補完の対象が0件のときは、変更しないので A0 も行わない", async () => {
+    const f = fake({ argv: ["--grant-sync", "--apply"], fingerprints: [fp({ created: true, granted: TABLES })], observations: [observation(), observation()] });
+    await runTestDbReadOnlyRole(f.deps);
+    expect(f.acl).not.toHaveBeenCalled();
   });
 
   it("R-base が失敗すれば exec しない（既存の権限は上書きしない）", async () => {

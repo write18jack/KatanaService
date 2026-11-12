@@ -23,7 +23,13 @@ import { loadCatalogAuditExpectation, runCatalogDefinitionAudit } from "../lib/t
 import { connectTestDatabase } from "../lib/testing/testDbConnection.ts";
 import { readTestDbDockerIdentity, runDockerCommand } from "../lib/testing/testDbDocker.ts";
 import { createTestDatabaseInspector } from "../lib/testing/testDbMigrate.ts";
-import { ReadOnlyRoleError, RO_ROLE_CREATE_DISABLED, RO_ROLE_GRANT_SYNC_DISABLED, runReadOnlyRoleCheck } from "../lib/testing/testDbReadOnlyRole.ts";
+import {
+  ReadOnlyRoleError,
+  RO_ROLE_CREATE_DISABLED,
+  RO_ROLE_GRANT_SYNC_DISABLED,
+  runPreChangeAclCheck,
+  runReadOnlyRoleCheck,
+} from "../lib/testing/testDbReadOnlyRole.ts";
 import {
   type ReadOnlyRoleExecOptions,
   type ReadOnlyRoleExecResult,
@@ -88,6 +94,7 @@ runTestDbReadOnlyRole({
   inspectDatabase: (input) => createTestDatabaseInspector({ root: ROOT, connect: connectTestDatabase })(input),
   runAudit: (input) => runCatalogDefinitionAudit({ ...input, connect: connectTestDatabase }),
   checkReadOnlyRole: (input) => runReadOnlyRoleCheck({ ...input, connect: connectTestDatabase }),
+  checkPreChangeAcl: (input) => runPreChangeAclCheck({ ...input, connect: connectTestDatabase }),
   exec: execWithInput,
   log: (text) => console.log(text),
 }).then(
