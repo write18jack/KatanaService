@@ -1,42 +1,62 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it, type Mock, vi } from "vitest";
-import { IntegrationDatabaseCheckError } from "./integrationDatabaseCheck";
+import { describe, expect, it, vi } from "vitest";
 import {
+  READ_ONLY_TEST_ENV_FILE,
+  SCHEMA_DIFF_CLI_ENTRY,
+  SCHEMA_DIFF_FIXED_ENV,
+  SCHEMA_DIFF_RO_URL_SHA256_ENV,
+  schemaDiffUrlSha256,
+} from "../db/prismaCliGuard";
+import {
+  assertSchemaDiffBinaries,
   assertSchemaDiffCommand,
   buildSchemaDiffCommand,
+  buildSchemaDiffEnv,
   buildSchemaDiffSpawnOptions,
   classifySchemaDiffResult,
+  createSchemaDiffInterruptController,
+  createSchemaDiffSpawnCapture,
   FORBIDDEN_SCHEMA_DIFF_ARGS,
-  prepareSchemaDiff,
-  readOnlyPrivilegeViolations,
+  NO_SCHEMA_DIFF_INTERRUPTS,
   redactSecrets,
-  runSchemaDiffCheck,
+  SCHEMA_DIFF_BINARY_SHA256,
   SCHEMA_DIFF_DISABLED,
+  SCHEMA_DIFF_GROUP_CHECK_INTERVAL_MS,
+  SCHEMA_DIFF_INTERRUPT_DEADLINE_MS,
+  SCHEMA_DIFF_KILL_GRACE_MS,
+  SCHEMA_DIFF_MAX_CAPTURE,
+  SCHEMA_DIFF_SCOPE_NOTE,
   SCHEMA_DIFF_TIMEOUT_MS,
-  type SchemaDiffDeps,
+  type SchemaDiffChild,
   SchemaDiffError,
-  type SchemaDiffErrorCode,
+  schemaDiffEnvViolations,
+  type SchemaDiffInterruptEvent,
+  type SchemaDiffInterrupts,
+  type SchemaDiffInterruptSignal,
+  type SchemaDiffProcessDeps,
   type SchemaDiffProcessResult,
   schemaDiffSucceeded,
+  SCHEMA_ENGINE_BINARY,
 } from "./schemaDiff";
-import type { TestDatabaseServerIdentity, TestDbDockerIdentity } from "./testDbIdentity";
-import { type InspectDatabase, LIVE_DATABASE_DISABLED, type ReadDockerIdentity } from "./testDbMigrate";
-import type { TestDatabasePrivileges, TestDatabaseState } from "./testDbState";
+import { LIVE_DATABASE_DISABLED, PRISMA_CLI_ENTRY } from "./testDbMigrate";
+import { READ_ONLY_ROLE_ENV_FILE } from "./testDbReadOnlyRole";
 
-// Prisma CLI を起動せず、DBにも Docker にも接続しない。子プロセス・DBの判定・Docker の読み取りは、すべて偽の関数で置き換える
+// Prisma CLI・schema engine を起動せず、DBにも Docker にも接続しない。子プロセスの起動・シグナル・タイマーは、すべて偽の関数で置き換える。
+// CLI・engine の実体は、SHA-256 の照合のために読むだけ（実行しない）
 const ROOT = "/fake/katana-web";
+const REPO_ROOT = path.resolve(__dirname, "../..");
 const EXEC_PATH = "/fake/bin/node";
-const PASSWORD = "diff-dummy-pass";
-const TEST_URL = `postgresql://katana_test_user:${PASSWORD}@127.0.0.1:5434/katana_test`;
+const APP_PASSWORD = "diff-dummy-app-pass";
+const ADMIN_PASSWORD = "diff-dummy-admin-pass";
+const RO_PASSWORD = "diff_dummy_ro_password_0123456789abcdef";
+const APP_URL = `postgresql://katana_test_user:${APP_PASSWORD}@127.0.0.1:5434/katana_test`;
+const RO_URL = `postgresql://katana_test_ro:${RO_PASSWORD}@127.0.0.1:5434/katana_test`;
 const DEV_PASSWORD = "dev-dummy-pass";
 const DEV_URL = `postgresql://katana:${DEV_PASSWORD}@localhost:5433/katana`;
-const ADMIN_PASSWORD = "diff-dummy-admin";
-const SECRETS = [PASSWORD, ADMIN_PASSWORD, DEV_PASSWORD, TEST_URL, DEV_URL, "postgresql://katana", "postgres://"];
-/** 伏せる値として渡すもの（prepareSchemaDiff の secrets と同じ種類。汎用の接頭辞は含めない） */
-const REDACT = [TEST_URL, PASSWORD, ADMIN_PASSWORD, DEV_URL, DEV_PASSWORD];
-const GOOD_TEST_ENV = { DATABASE_URL: TEST_URL, KATANA_TEST_DB_PASSWORD: PASSWORD, KATANA_TEST_DB_ADMIN_PASSWORD: ADMIN_PASSWORD };
-const REPO_ROOT = path.resolve(__dirname, "../..");
+/** 伏せる値として渡すもの（runner の secrets と同じ種類。汎用の接頭辞は含めない） */
+const REDACT = [APP_URL, APP_PASSWORD, ADMIN_PASSWORD, RO_URL, RO_PASSWORD, DEV_URL, DEV_PASSWORD];
+const SECRETS = [...REDACT, "postgresql://katana", "postgres://"];
 
 const EXPECTED_ARGS = [
   `${ROOT}/node_modules/prisma/build/index.js`,
@@ -47,123 +67,40 @@ const EXPECTED_ARGS = [
   `${ROOT}/prisma/schema.prisma`,
   "--exit-code",
   "--config",
-  `${ROOT}/prisma.config.ts`,
+  `${ROOT}/prisma.schemadiff.config.ts`,
 ];
 
-const STATE_C: TestDatabaseState = { state: "C", tables: ["Shop"], migrations: ["m1"], schemaDiff: "not-verified" };
-const STATE_A: TestDatabaseState = { state: "A" };
-const STATE_B: TestDatabaseState = { state: "B", reasons: ["unexpected objects"] };
-/** 仮の読み取り専用のロール（CREATE・所有者なし）。今の katana_test_user ではない */
-const READ_ONLY: TestDatabasePrivileges = { publicUsage: true, publicCreate: false, databaseOwner: false, databaseCreate: false };
-/** 今の katana_test_user（migration 用にすべてある） */
-const CURRENT_USER: TestDatabasePrivileges = { publicUsage: true, publicCreate: true, databaseOwner: true, databaseCreate: true };
-const DOCKER: TestDbDockerIdentity = {
-  containerId: "a".repeat(64),
-  imageId: `sha256:${"b".repeat(64)}`,
-  startedAt: "2026-11-06T22:46:49.619782389Z",
-  restartCount: 0,
-  networkId: "c".repeat(64),
-  networkIp: "172.18.0.2",
-  volumes: ["katana-web_postgres_data"],
-  developmentVolume: ["katana-web_postgres_data"],
-  portPublishers: ["katana-test-db"],
-};
-const SERVER: TestDatabaseServerIdentity = { serverAddress: "172.18.0.2", serverPort: 5432, postmasterStartTime: "2026-11-06T22:46:51.123456Z" };
-const exit = (code: number | null, stdout = "", stderr = "", signal: string | null = null): SchemaDiffProcessResult => ({ kind: "exit", code, signal, stdout, stderr });
-
-type Fake = { deps: SchemaDiffDeps; spawn: Mock<SchemaDiffDeps["spawnCapture"]>; inspectDb: Mock<InspectDatabase>; docker: Mock<ReadDockerIdentity>; logs: string[]; calls: string[] };
-
-function fake(
-  o: {
-    enabled?: boolean;
-    files?: Record<string, Record<string, string> | undefined>;
-    parentEnv?: Record<string, string | undefined>;
-    execArgv?: string[];
-    missingPaths?: string[];
-    states?: (TestDatabaseState | Error)[];
-    privileges?: TestDatabasePrivileges;
-    servers?: TestDatabaseServerIdentity[];
-    dockers?: (TestDbDockerIdentity | Error)[];
-    result?: SchemaDiffProcessResult | Error;
-    buildCommand?: SchemaDiffDeps["buildCommand"];
-  } = {},
-): Fake {
-  const calls: string[] = [];
-  const logs: string[] = [];
-  const files = { ".env.test": GOOD_TEST_ENV, ".env": { DATABASE_URL: DEV_URL }, ...o.files };
-  const states = [...(o.states ?? [STATE_C, STATE_C])];
-  const servers = [...(o.servers ?? [SERVER])];
-  const dockers = [...(o.dockers ?? [DOCKER])];
-  const inspectDb = vi.fn<InspectDatabase>(async () => {
-    calls.push("inspect");
-    const next = states.shift();
-    if (next === undefined) throw new Error("unexpected inspect call");
-    if (next instanceof Error) throw next;
-    const server = servers.length > 1 ? (servers.shift() as TestDatabaseServerIdentity) : servers[0];
-    return { state: next, privileges: o.privileges ?? READ_ONLY, server };
-  });
-  const docker = vi.fn<ReadDockerIdentity>(async () => {
-    calls.push("docker");
-    const next = dockers.length > 1 ? dockers.shift() : dockers[0];
-    if (next instanceof Error) throw next;
-    return next as TestDbDockerIdentity;
-  });
-  const spawn = vi.fn<SchemaDiffDeps["spawnCapture"]>(async () => {
-    calls.push("spawn");
-    const r = o.result ?? exit(0);
-    if (r instanceof Error) throw r;
-    return r;
-  });
-  const deps: SchemaDiffDeps = {
-    root: ROOT,
-    execArgv: o.execArgv ?? [],
-    execPath: EXEC_PATH,
-    parentEnv: o.parentEnv ?? { PATH: "/usr/bin", HOME: "/home/u" },
-    readEnvFile: (p) => files[path.relative(ROOT, p) as keyof typeof files],
-    pathExists: (p) => !(o.missingPaths ?? []).includes(path.relative(ROOT, p)),
-    access: o.enabled === false ? SCHEMA_DIFF_DISABLED : { mode: "enabled" },
-    readDockerIdentity: docker,
-    inspectDatabase: inspectDb,
-    spawnCapture: spawn,
-    buildCommand: o.buildCommand,
-    log: (t) => logs.push(t),
-  };
-  return { deps, spawn, inspectDb, docker, logs, calls };
-}
-
-async function expectError(f: Fake, code: SchemaDiffErrorCode): Promise<Error> {
-  const caught = await runSchemaDiffCheck(f.deps).catch((e: unknown) => e);
-  expect(caught).toBeInstanceOf(SchemaDiffError);
-  expect((caught as SchemaDiffError).code).toBe(code);
-  for (const s of SECRETS) {
-    expect((caught as Error).message).not.toContain(s);
-    for (const line of f.logs) expect(line).not.toContain(s);
-  }
-  return caught as Error;
-}
-
-async function expectStopsBeforeLive(f: Fake, code: SchemaDiffErrorCode) {
-  await expectError(f, code);
-  expect(f.spawn).not.toHaveBeenCalled();
-  expect(f.inspectDb).not.toHaveBeenCalled();
-  expect(f.docker).not.toHaveBeenCalled();
-}
+const exit = (code: number | null, stdout = "", stderr = "", signal: string | null = null): SchemaDiffProcessResult => ({ kind: "exit", code, signal, stdout, stderr, processGroup: "stopped" });
+const code = (file: string) =>
+  readFileSync(path.join(REPO_ROOT, file), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "")
+    .replace(/\s\/\/ .*$/gm, "");
 
 describe("固定のコマンド", () => {
-  it("1. 正しい固定コマンドを組み立てる（Prisma CLI のエントリ・migrate diff・--from-config-datasource・--to-schema・--exit-code・--config）", () => {
+  it("1. 正しい固定コマンドを組み立てる（専用の設定ファイル prisma.schemadiff.config.ts。--script・--output・migrations・shadow なし）", () => {
     const command = buildSchemaDiffCommand({ root: ROOT, execPath: EXEC_PATH });
     expect(command.command).toBe(EXEC_PATH);
     expect(command.args).toEqual(EXPECTED_ARGS);
-    for (const flag of ["--script", "--output", "-o", "--from-migrations", "--to-migrations"]) expect(command.args).not.toContain(flag);
+    for (const flag of ["--script", "--output", "-o", "--from-migrations", "--to-migrations", "--shadow-database-url", "--from-url", "--to-url"]) expect(command.args).not.toContain(flag);
+    expect(command.args.some((arg) => arg.endsWith("/prisma.config.ts"))).toBe(false);
+    expect(SCHEMA_DIFF_CLI_ENTRY).toBe(PRISMA_CLI_ENTRY);
   });
 
-  it("2. shell: false・標準入力なし・タイムアウト付きの起動オプション", () => {
-    const options = buildSchemaDiffSpawnOptions(ROOT, { PATH: "/usr/bin", DATABASE_URL: TEST_URL });
-    expect(options.shell).toBe(false);
-    expect(options.cwd).toBe(ROOT);
-    expect(options.stdio).toEqual(["ignore", "pipe", "pipe"]);
-    expect(options.timeoutMs).toBe(SCHEMA_DIFF_TIMEOUT_MS);
+  it("2. shell: false・detached（新しいプロセスグループ）・標準入力なし・タイムアウトと猶予付きの起動オプション", () => {
+    const options = buildSchemaDiffSpawnOptions(ROOT, { PATH: "/usr/bin" });
+    expect(options).toEqual({
+      cwd: ROOT,
+      env: { PATH: "/usr/bin" },
+      shell: false,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeoutMs: SCHEMA_DIFF_TIMEOUT_MS,
+      killGraceMs: SCHEMA_DIFF_KILL_GRACE_MS,
+      groupCheckIntervalMs: SCHEMA_DIFF_GROUP_CHECK_INTERVAL_MS,
+    });
     expect(Object.isFrozen(options)).toBe(true);
+    expect(Object.isFrozen(options.env)).toBe(true);
   });
 
   it("3. 引数を追加する経路がない（組み立ての関数は root・execPath だけを受け取り、結果は凍結されている）", () => {
@@ -174,7 +111,7 @@ describe("固定のコマンド", () => {
     expect(() => (command.args as string[]).push("--script")).toThrow();
   });
 
-  it("3. 固定のコマンドに引数を足した・差し替えたものは拒否する", () => {
+  it("3. 固定のコマンドに引数を足した・減らした・並べ替えた・コマンドを差し替えたものは拒否する", () => {
     const expected = buildSchemaDiffCommand({ root: ROOT, execPath: EXEC_PATH });
     for (const args of [[...EXPECTED_ARGS, "--script"], [...EXPECTED_ARGS, "--output", "/tmp/x"], EXPECTED_ARGS.slice(0, -1), [...EXPECTED_ARGS].reverse()]) {
       expect(() => assertSchemaDiffCommand({ command: EXEC_PATH, args }, expected)).toThrow(SchemaDiffError);
@@ -183,25 +120,119 @@ describe("固定のコマンド", () => {
     expect(() => assertSchemaDiffCommand(expected, expected)).not.toThrow();
   });
 
-  it("4. 変更系のコマンド（migrate deploy・migrate dev・migrate reset・migrate resolve・db push・db execute）は拒否する", () => {
+  it("4. diff 以外の Prisma コマンド・書き込み系（migrate deploy/dev/reset/resolve・db push/execute/pull・generate）・--script・--output は拒否する（期待値が改ざんされていても）", () => {
     const expected = buildSchemaDiffCommand({ root: ROOT, execPath: EXEC_PATH });
     const entry = EXPECTED_ARGS[0];
-    for (const sub of [["migrate", "deploy"], ["migrate", "dev"], ["migrate", "reset", "--force"], ["migrate", "resolve"], ["db", "push"], ["db", "execute", "--stdin"]]) {
-      const command = { command: EXEC_PATH, args: [entry, ...sub, "--config", EXPECTED_ARGS.at(-1) as string] };
+    const config = EXPECTED_ARGS.at(-1) as string;
+    for (const sub of [["migrate", "deploy"], ["migrate", "dev"], ["migrate", "reset", "--force"], ["migrate", "resolve"], ["db", "push"], ["db", "execute", "--stdin"], ["db", "pull"], ["generate"]]) {
+      const command = { command: EXEC_PATH, args: [entry, ...sub, "--config", config] };
       expect(() => assertSchemaDiffCommand(command, expected)).toThrow(/COMMAND_REJECTED/);
-      // 期待値そのものが改ざんされていても、禁止の引数で止まる
       expect(() => assertSchemaDiffCommand(command, command)).toThrow(/COMMAND_REJECTED/);
     }
-    for (const word of ["deploy", "dev", "push", "reset", "resolve", "--script", "--output", "--from-migrations", "--to-migrations"]) {
+    for (const extra of [["--script"], ["--output", "/tmp/x.sql"], ["-o", "x"], ["--shadow-database-url", "x"], ["--from-migrations", "prisma/migrations"]]) {
+      const command = { command: EXEC_PATH, args: [...EXPECTED_ARGS, ...extra] };
+      expect(() => assertSchemaDiffCommand(command, command)).toThrow(/COMMAND_REJECTED/);
+    }
+    for (const word of ["deploy", "dev", "push", "reset", "resolve", "execute", "pull", "generate", "--script", "--output", "--from-migrations", "--to-migrations", "--from-url", "--to-url"]) {
       expect(FORBIDDEN_SCHEMA_DIFF_ARGS.has(word)).toBe(true);
     }
   });
 
-  it("4. 組み立ての関数が改ざんされても、Prisma CLI を起動しない", async () => {
-    const f = fake({
-      buildCommand: ({ execPath }) => ({ command: execPath, args: [EXPECTED_ARGS[0], "migrate", "deploy"] }),
+  it("4. 開発用・migration 用の prisma.config.ts を使うコマンドは拒否する（期待値が改ざんされていても）", () => {
+    const withDefault = { command: EXEC_PATH, args: [...EXPECTED_ARGS.slice(0, -1), `${ROOT}/prisma.config.ts`] };
+    expect(() => assertSchemaDiffCommand(withDefault, withDefault)).toThrow(/COMMAND_REJECTED/);
+    const withoutConfig = { command: EXEC_PATH, args: EXPECTED_ARGS.slice(0, -2) };
+    expect(() => assertSchemaDiffCommand(withoutConfig, withoutConfig)).toThrow(/COMMAND_REJECTED/);
+  });
+});
+
+describe("子プロセスの環境変数（URL は入れず、SHA-256 だけ）", () => {
+  const parent = {
+    PATH: "/usr/bin",
+    HOME: "/home/u",
+    LC_ALL: "C",
+    CI: "false",
+    RUST_LOG: "debug",
+    RUST_BACKTRACE: "full",
+    DATABASE_URL: DEV_URL,
+    PRISMA_SCHEMA_ENGINE_BINARY: "/evil",
+    PRISMA_MIGRATION_ENGINE_BINARY: "/evil",
+    FORCE_PANIC_SCHEMA_ENGINE: "1",
+    DEBUG: "*",
+    NODE_OPTIONS: "--require x",
+    KATANA_DB_TARGET: "test",
+    KATANA_TEST_RO_DATABASE_URL: RO_URL,
+    SECRET_TOKEN: "t",
+  };
+
+  it("許可リスト・固定の値（CHECKPOINT_DISABLE=1・CI=1・RUST_LOG=error・RUST_BACKTRACE=0）・接続先モード・URL の SHA-256 だけ", () => {
+    const { childEnv, droppedKeys } = buildSchemaDiffEnv(parent, RO_URL);
+    expect(childEnv).toEqual({
+      PATH: "/usr/bin",
+      HOME: "/home/u",
+      LC_ALL: "C",
+      CHECKPOINT_DISABLE: "1",
+      CI: "1",
+      RUST_LOG: "error",
+      RUST_BACKTRACE: "0",
+      KATANA_DB_TARGET: "test-readonly",
+      [SCHEMA_DIFF_RO_URL_SHA256_ENV]: schemaDiffUrlSha256(RO_URL),
     });
-    await expectStopsBeforeLive(f, "COMMAND_REJECTED");
+    expect(SCHEMA_DIFF_FIXED_ENV).toEqual({ CHECKPOINT_DISABLE: "1", CI: "1", RUST_LOG: "error", RUST_BACKTRACE: "0" });
+    for (const key of ["DATABASE_URL", "PRISMA_SCHEMA_ENGINE_BINARY", "PRISMA_MIGRATION_ENGINE_BINARY", "FORCE_PANIC_SCHEMA_ENGINE", "DEBUG", "NODE_OPTIONS", "KATANA_TEST_RO_DATABASE_URL", "SECRET_TOKEN"]) {
+      expect(childEnv).not.toHaveProperty(key);
+      expect(droppedKeys).toContain(key);
+    }
+    const text = JSON.stringify(childEnv);
+    for (const s of SECRETS) expect(text).not.toContain(s);
+    expect(schemaDiffEnvViolations(childEnv, RO_URL, REDACT)).toEqual([]);
+  });
+
+  it("違反を検出する（許可しない名前・URL や秘密の値を含む値・固定の値の違い・接続先モード・SHA-256 の不一致）", () => {
+    const { childEnv } = buildSchemaDiffEnv({ PATH: "/usr/bin" }, RO_URL);
+    expect(schemaDiffEnvViolations({ ...childEnv, DATABASE_URL: RO_URL }, RO_URL, REDACT)).toEqual(["DATABASE_URL is not allowed", "DATABASE_URL contains a connection URL or a secret"]);
+    expect(schemaDiffEnvViolations({ ...childEnv, PATH: `/usr/bin:${RO_PASSWORD}` }, RO_URL, REDACT)).toEqual(["PATH contains a connection URL or a secret"]);
+    expect(schemaDiffEnvViolations({ ...childEnv, HOME: "postgres://x" }, RO_URL, REDACT)).toEqual(["HOME contains a connection URL or a secret"]);
+    expect(schemaDiffEnvViolations({ ...childEnv, CHECKPOINT_DISABLE: "0" }, RO_URL, REDACT)).toEqual(["CHECKPOINT_DISABLE is not 1"]);
+    expect(schemaDiffEnvViolations({ ...childEnv, RUST_LOG: "info" }, RO_URL, REDACT)).toEqual(["RUST_LOG is not error"]);
+    expect(schemaDiffEnvViolations({ ...childEnv, KATANA_DB_TARGET: "test" }, RO_URL, REDACT)).toEqual(["KATANA_DB_TARGET is not test-readonly"]);
+    expect(schemaDiffEnvViolations(childEnv, APP_URL, REDACT)).toEqual([`${SCHEMA_DIFF_RO_URL_SHA256_ENV} does not match the verified URL`]);
+    const withoutCi = Object.fromEntries(Object.entries(childEnv).filter(([key]) => key !== "CI"));
+    expect(schemaDiffEnvViolations(withoutCi, RO_URL, REDACT)).toEqual(["CI is not 1"]);
+  });
+});
+
+describe("CLI・engine の SHA-256（読むだけで、実行しない）", () => {
+  const readReal = (p: string) => readFileSync(path.join(REPO_ROOT, path.relative(ROOT, p)));
+
+  it("固定の値は、インストール済みの Prisma 7.2.0 の CLI のエントリと engine の実体と一致する", () => {
+    expect(SCHEMA_DIFF_BINARY_SHA256.cli.file).toBe(PRISMA_CLI_ENTRY);
+    expect(SCHEMA_DIFF_BINARY_SHA256.engine.file).toBe(SCHEMA_ENGINE_BINARY);
+    expect(() => assertSchemaDiffBinaries({ root: ROOT, platform: "darwin", arch: "arm64", readBinary: readReal })).not.toThrow();
+    expect(JSON.parse(readFileSync(path.join(REPO_ROOT, "node_modules/prisma/package.json"), "utf8")).version).toBe("7.2.0");
+  });
+
+  it("1バイトでも違えば・読めなければ・darwin-arm64 以外なら、起動しない", () => {
+    const tampered = (p: string) => (p.endsWith("index.js") ? Buffer.from("tampered") : readReal(p));
+    expect(() => assertSchemaDiffBinaries({ root: ROOT, platform: "darwin", arch: "arm64", readBinary: tampered })).toThrow(/BINARY_HASH_MISMATCH.*index\.js/);
+    const engineTampered = (p: string) => (p.endsWith("schema-engine-darwin-arm64") ? Buffer.concat([readReal(p), Buffer.from([0])]) : readReal(p));
+    expect(() => assertSchemaDiffBinaries({ root: ROOT, platform: "darwin", arch: "arm64", readBinary: engineTampered })).toThrow(/BINARY_HASH_MISMATCH.*schema-engine/);
+    const missing = () => {
+      throw Object.assign(new Error(`ENOENT ${RO_URL}`), { code: "ENOENT" });
+    };
+    const error = (() => {
+      try {
+        assertSchemaDiffBinaries({ root: ROOT, platform: "darwin", arch: "arm64", readBinary: missing });
+      } catch (e) {
+        return e as Error;
+      }
+      throw new Error("expected a throw");
+    })();
+    expect(error.message).toMatch(/BINARY_HASH_MISMATCH/);
+    expect(error.message).not.toContain(RO_PASSWORD);
+    for (const [platform, arch] of [["linux", "x64"], ["darwin", "x64"], ["linux", "arm64"], ["win32", "x64"]]) {
+      expect(() => assertSchemaDiffBinaries({ root: ROOT, platform, arch, readBinary: readReal })).toThrow(/PLATFORM_NOT_SUPPORTED/);
+    }
   });
 });
 
@@ -225,8 +256,8 @@ describe("終了コードの分類", () => {
   });
 
   it("8. 未知の終了コード（3・101・-1・null・小数）は想定外として拒否する", () => {
-    for (const code of [3, 101, -1, 255, null, 1.5]) {
-      const outcome = classifySchemaDiffResult(exit(code), REDACT);
+    for (const c of [3, 101, -1, 255, null, 1.5]) {
+      const outcome = classifySchemaDiffResult(exit(c), REDACT);
       expect(outcome.outcome).toBe("unexpected-exit");
       expect(schemaDiffSucceeded(outcome)).toBe(false);
     }
@@ -234,19 +265,31 @@ describe("終了コードの分類", () => {
 
   it("9. 起動の失敗は spawn-failed（コードだけ。パス・メッセージは含めない）", () => {
     expect(classifySchemaDiffResult({ kind: "spawn-error", errorCode: "ENOENT" }, REDACT)).toEqual({ outcome: "spawn-failed", errorCode: "ENOENT" });
-    expect(classifySchemaDiffResult({ kind: "spawn-error", errorCode: `bad ${TEST_URL}` }, REDACT)).toEqual({ outcome: "spawn-failed", errorCode: "unknown" });
+    expect(classifySchemaDiffResult({ kind: "spawn-error", errorCode: `bad ${RO_URL}` }, REDACT)).toEqual({ outcome: "spawn-failed", errorCode: "unknown" });
   });
 
   it("10. タイムアウト・シグナルでの終了は、どちらも成功ではない（終了コード 0 と一緒でもシグナルを優先する）", () => {
-    expect(classifySchemaDiffResult({ kind: "timeout", stdout: "", stderr: "" }, REDACT).outcome).toBe("timeout");
+    expect(classifySchemaDiffResult({ kind: "timeout", stdout: "", stderr: "", processGroup: "stopped" }, REDACT).outcome).toBe("timeout");
+    expect(classifySchemaDiffResult({ kind: "interrupted", signal: "SIGINT", stdout: "", stderr: "", processGroup: "stopped" }, REDACT)).toEqual({
+      outcome: "interrupted",
+      signal: "SIGINT",
+      output: "",
+    });
     expect(classifySchemaDiffResult(exit(null, "", "", "SIGKILL"), REDACT)).toEqual({ outcome: "signal", signal: "SIGKILL" });
     expect(classifySchemaDiffResult(exit(0, "", "", "SIGTERM"), REDACT).outcome).toBe("signal");
     expect(classifySchemaDiffResult(exit(null, "", "", "weird"), REDACT)).toEqual({ outcome: "signal", signal: "unknown" });
   });
 
-  it("12. CLI の出力の接続URL・パスワードを伏せる（知らない接続URLも伏せる。長い出力は切り詰める）", () => {
-    const noisy = `Error: P1000 Authentication failed for ${TEST_URL} password=${PASSWORD} admin=${ADMIN_PASSWORD} dev=${DEV_URL} other=postgres://x:y@h/db`;
-    for (const outcome of [classifySchemaDiffResult(exit(1, noisy, noisy), REDACT), classifySchemaDiffResult(exit(2, noisy), REDACT), classifySchemaDiffResult({ kind: "timeout", stdout: noisy, stderr: "" }, REDACT), classifySchemaDiffResult(exit(7, noisy), REDACT)]) {
+  it("12. CLI の出力の接続URL・パスワード（ro・アプリ用・管理用・開発用）を伏せる。知らない接続URL・JSON の中の URL も伏せる。長い出力は切り詰める", () => {
+    const engineJson = JSON.stringify({ fields: { message: `P1000 Authentication failed for ${RO_URL}`, datasource: { url: RO_URL } } });
+    const noisy = `Error: ${engineJson} password=${RO_PASSWORD} app=${APP_PASSWORD} admin=${ADMIN_PASSWORD} dev=${DEV_URL} other=postgres://x:y@h/db`;
+    for (const outcome of [
+      classifySchemaDiffResult(exit(1, noisy, noisy), REDACT),
+      classifySchemaDiffResult(exit(2, noisy), REDACT),
+      classifySchemaDiffResult({ kind: "timeout", stdout: noisy, stderr: noisy, processGroup: "stopped" }, REDACT),
+      classifySchemaDiffResult({ kind: "interrupted", signal: "SIGTERM", stdout: noisy, stderr: noisy, processGroup: "not-confirmed" }, REDACT),
+      classifySchemaDiffResult(exit(7, noisy), REDACT),
+    ]) {
       const text = JSON.stringify(outcome);
       for (const s of [...SECRETS, "x:y@h"]) expect(text).not.toContain(s);
     }
@@ -254,149 +297,478 @@ describe("終了コードの分類", () => {
   });
 });
 
-describe("接続先の保護（11. 接続先が不正なら、Docker・DB・Prisma CLI に触れない）", () => {
-  it("開発用DBと同じ接続先は拒否する", async () => {
-    await expectStopsBeforeLive(fake({ files: { ".env": { DATABASE_URL: TEST_URL } } }), "TARGET_REJECTED");
+// ---- プロセスグループごと止める起動（偽の spawn・kill・タイマー） ----
+
+type FakeChild = SchemaDiffChild & { emit: { stdout: (t: string) => void; stderr: (t: string) => void; error: (e: Error) => void; close: (code: number | null, signal: string | null) => void } };
+
+function fakeChild(pid: number | undefined): FakeChild {
+  const listeners: Record<string, ((...a: never[]) => void)[]> = {};
+  const add = (name: string, fn: (...a: never[]) => void) => (listeners[name] ??= []).push(fn);
+  const fire = (name: string, ...args: unknown[]) => (listeners[name] ?? []).forEach((fn) => (fn as (...a: unknown[]) => void)(...args));
+  return {
+    pid,
+    stdout: { on: (_e: "data", fn: (c: Buffer | string) => void) => add("stdout", fn as never) },
+    stderr: { on: (_e: "data", fn: (c: Buffer | string) => void) => add("stderr", fn as never) },
+    on: ((event: string, fn: (...a: never[]) => void) => add(event, fn)) as SchemaDiffChild["on"],
+    emit: {
+      stdout: (t) => fire("stdout", Buffer.from(t)),
+      stderr: (t) => fire("stderr", Buffer.from(t)),
+      error: (e) => fire("error", e),
+      close: (c, s) => fire("close", c, s),
+    },
+  };
+}
+
+type FakeTimer = { fn: () => void; ms: number; cleared: boolean };
+
+/** 偽の中断（createSchemaDiffInterruptController の代わり。fire で通知する） */
+function fakeInterrupts(): SchemaDiffInterrupts & { fire: (signal: SchemaDiffInterruptSignal, force?: boolean) => void; listenerCount: () => number } {
+  let received: SchemaDiffInterruptSignal | undefined;
+  const listeners = new Set<(event: SchemaDiffInterruptEvent) => void>();
+  return {
+    received: () => received,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    fire: (signal, force = false) => {
+      received ??= signal;
+      for (const listener of [...listeners]) listener({ signal, force });
+    },
+    listenerCount: () => listeners.size,
+  };
+}
+
+/** groupAlive：グループの確認（kill(-pgid, 0)）で「残っている」と答える回数。Infinity なら、ずっと残っている */
+function processHarness(child: FakeChild | Error, groupAlive = 0) {
+  const timers: FakeTimer[] = [];
+  const kills: [number, string][] = [];
+  let aliveLeft = groupAlive;
+  const deps: SchemaDiffProcessDeps = {
+    spawn: vi.fn(() => {
+      if (child instanceof Error) throw child;
+      return child;
+    }),
+    killGroup: vi.fn((pgid: number, signal: "SIGTERM" | "SIGKILL") => {
+      kills.push([pgid, signal]);
+    }),
+    groupExists: vi.fn(() => {
+      if (aliveLeft > 0) {
+        aliveLeft -= 1;
+        return true;
+      }
+      return false;
+    }),
+    setTimer: (fn, ms) => {
+      const t = { fn, ms, cleared: false };
+      timers.push(t);
+      return t;
+    },
+    clearTimer: (h) => {
+      (h as FakeTimer).cleared = true;
+    },
+  };
+  /** 消されていない最後のタイマー（ms が一致するもの）を進める */
+  const fire = (ms: number) => {
+    const timer = [...timers].reverse().find((t) => !t.cleared && t.ms === ms);
+    if (!timer) throw new Error(`no pending timer of ${ms} ms`);
+    timer.cleared = true;
+    timer.fn();
+  };
+  const pending = () => timers.filter((t) => !t.cleared);
+  return { deps, timers, kills, fire, pending, capture: createSchemaDiffSpawnCapture(deps) };
+}
+
+const OPTIONS = buildSchemaDiffSpawnOptions(ROOT, { PATH: "/usr/bin" });
+
+function track<T>(promise: Promise<T>) {
+  const state = { settled: false };
+  const done = promise.then((value) => {
+    state.settled = true;
+    return value;
+  });
+  return { state, done };
+}
+
+describe("起動とタイムアウト（新しいプロセスグループ。タイムアウトでは engine を含むグループごと止める）", () => {
+  it("shell なし・detached・標準入力なしで起動し、終了まで待って出力と終了コードを返す。終了後、グループの残り（engine など）に SIGKILL を送り、グループが消えたことを確かめる", async () => {
+    const child = fakeChild(4242);
+    const h = processHarness(child);
+    const pending = h.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS);
+    expect(h.deps.spawn).toHaveBeenCalledWith(EXEC_PATH, EXPECTED_ARGS, { cwd: ROOT, env: { PATH: "/usr/bin" }, shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    child.emit.stdout("No difference detected.\n");
+    child.emit.stderr("warn\n");
+    expect(h.kills).toEqual([]);
+    child.emit.close(0, null);
+    expect(await pending).toEqual({ kind: "exit", code: 0, signal: null, stdout: "No difference detected.\n", stderr: "warn\n", processGroup: "stopped" });
+    expect(h.kills).toEqual([[4242, "SIGKILL"]]);
+    expect(h.deps.groupExists).toHaveBeenCalledWith(4242);
+    expect(h.timers[0].ms).toBe(SCHEMA_DIFF_TIMEOUT_MS);
+    expect(h.pending()).toEqual([]);
   });
 
-  it("テストDB以外の接続先・クエリ文字列付きのURL（options=… を含む）は拒否する", async () => {
-    for (const url of [DEV_URL, `${TEST_URL}?options=-c%20default_transaction_read_only%3Don`, `postgresql://katana_test_user:${PASSWORD}@db.example.com:5434/katana_test`]) {
-      await expectStopsBeforeLive(fake({ files: { ".env.test": { ...GOOD_TEST_ENV, DATABASE_URL: url } } }), "TARGET_REJECTED");
+  it("終了後もグループが残っていれば、間隔をおいて SIGKILL と確認を繰り返す。消えたら stopped", async () => {
+    const child = fakeChild(4242);
+    const h = processHarness(child, 2);
+    const run = track(h.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS));
+    child.emit.close(0, null);
+    await Promise.resolve();
+    expect(run.state.settled).toBe(false);
+    h.fire(SCHEMA_DIFF_GROUP_CHECK_INTERVAL_MS);
+    h.fire(SCHEMA_DIFF_GROUP_CHECK_INTERVAL_MS);
+    expect(await run.done).toMatchObject({ kind: "exit", code: 0, processGroup: "stopped" });
+    expect(h.kills.filter(([, signal]) => signal === "SIGKILL").length).toBe(3);
+  });
+
+  it("終了後、上限（猶予）までにグループが消えなければ not-confirmed（無制限には待たない）", async () => {
+    const child = fakeChild(4242);
+    const h = processHarness(child, Infinity);
+    const run = track(h.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS));
+    child.emit.close(0, null);
+    let checks = 0;
+    while (!run.state.settled && checks < 1000) {
+      h.fire(SCHEMA_DIFF_GROUP_CHECK_INTERVAL_MS);
+      checks += 1;
+      await Promise.resolve();
     }
+    expect(await run.done).toMatchObject({ kind: "exit", code: 0, processGroup: "not-confirmed" });
+    expect(checks).toBe(SCHEMA_DIFF_KILL_GRACE_MS / SCHEMA_DIFF_GROUP_CHECK_INTERVAL_MS);
   });
 
-  it(".env.test がない・パスワードが不正なら止まる", async () => {
-    await expectStopsBeforeLive(fake({ files: { ".env.test": undefined } }), "TEST_ENV_MISSING");
-    await expectStopsBeforeLive(fake({ files: { ".env.test": { ...GOOD_TEST_ENV, KATANA_TEST_DB_PASSWORD: "other" } } }), "CREDENTIALS_REJECTED");
-  });
-
-  it("親の PG*・DOTENV_*・NODE_OPTIONS・Node の起動オプションは拒否する", async () => {
-    await expectStopsBeforeLive(fake({ parentEnv: { PATH: "/usr/bin", PGHOST: "elsewhere" } }), "UNSAFE_PARENT_ENV");
-    await expectStopsBeforeLive(fake({ parentEnv: { PATH: "/usr/bin", DOTENV_CONFIG_PATH: ".env" } }), "UNSAFE_PARENT_ENV");
-    await expectStopsBeforeLive(fake({ parentEnv: { NODE_OPTIONS: "--require x" } }), "NODE_OPTIONS_PRESENT");
-    await expectStopsBeforeLive(fake({ execArgv: ["--import", "x"] }), "NODE_EXEC_ARGV_PRESENT");
-  });
-
-  it("必要なファイルがなければ止まる", async () => {
-    await expectStopsBeforeLive(fake({ missingPaths: ["prisma/schema.prisma"] }), "REQUIRED_FILE_MISSING");
-  });
-
-  it("子プロセスの環境変数は、検証済みの DATABASE_URL・KATANA_DB_TARGET=test と許可リストだけ（親の DATABASE_URL・PRISMA_*・PG* は渡さない）", () => {
-    const prepared = prepareSchemaDiff({
-      testEnv: GOOD_TEST_ENV,
-      developmentEnv: { DATABASE_URL: DEV_URL },
-      parentEnv: { PATH: "/usr/bin", DATABASE_URL: DEV_URL, PRISMA_SCHEMA_ENGINE_BINARY: "/evil", KATANA_DB_TARGET: "x", SECRET_TOKEN: "t" },
+  it("グループの確認が例外を投げたら「残っている」とみなす（stopped にしない）", async () => {
+    const child = fakeChild(4242);
+    const h = processHarness(child);
+    h.deps.groupExists = vi.fn(() => {
+      throw Object.assign(new Error("kill EPERM"), { code: "EPERM" });
     });
-    expect(prepared.childEnv).toEqual({ PATH: "/usr/bin", DATABASE_URL: TEST_URL, KATANA_DB_TARGET: "test" });
-    expect(prepared.secrets).toEqual(expect.arrayContaining([TEST_URL, PASSWORD, ADMIN_PASSWORD, DEV_URL, DEV_PASSWORD]));
+    const capture = createSchemaDiffSpawnCapture(h.deps);
+    const run = track(capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS));
+    child.emit.close(0, null);
+    for (let i = 0; i < 100 && !run.state.settled; i += 1) {
+      h.fire(SCHEMA_DIFF_GROUP_CHECK_INTERVAL_MS);
+      await Promise.resolve();
+    }
+    expect(await run.done).toMatchObject({ processGroup: "not-confirmed" });
   });
 
-  it("固定のゲートが無効なら、検証の後で、Docker・DB・Prisma CLI に触れずに止まる", async () => {
-    const f = fake({ enabled: false });
-    await expectStopsBeforeLive(f, "SCHEMA_DIFF_LIVE_DISABLED");
+  it("タイムアウト：グループ（-pgid）に SIGTERM、猶予の後に SIGKILL を送り、終了を待ってから timeout を返す", async () => {
+    const child = fakeChild(4242);
+    const h = processHarness(child);
+    const run = track(h.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS));
+    child.emit.stdout("partial");
+    h.fire(SCHEMA_DIFF_TIMEOUT_MS);
+    expect(h.kills).toEqual([[4242, "SIGTERM"]]);
+    h.fire(SCHEMA_DIFF_KILL_GRACE_MS);
+    expect(h.kills).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]);
+    await Promise.resolve();
+    expect(run.state.settled).toBe(false);
+    child.emit.close(null, "SIGKILL");
+    expect(await run.done).toEqual({ kind: "timeout", stdout: "partial", stderr: "", processGroup: "stopped" });
+    expect(h.pending()).toEqual([]);
+  });
+
+  it("タイムアウトで SIGKILL を送っても CLI が終わらなければ、さらに猶予の後に not-confirmed で返す（無制限には待たない）", async () => {
+    const child = fakeChild(4242);
+    const h = processHarness(child);
+    const run = track(h.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS));
+    h.fire(SCHEMA_DIFF_TIMEOUT_MS);
+    h.fire(SCHEMA_DIFF_KILL_GRACE_MS);
+    await Promise.resolve();
+    expect(run.state.settled).toBe(false);
+    h.fire(SCHEMA_DIFF_KILL_GRACE_MS);
+    expect(await run.done).toEqual({ kind: "timeout", stdout: "", stderr: "", processGroup: "not-confirmed" });
+    // 返した後に close が来ても、結果は変わらない
+    child.emit.close(null, "SIGKILL");
+  });
+
+  it("グループへのシグナルの送信が失敗しても（ESRCH など）、例外にせず終了を待つ", async () => {
+    const child = fakeChild(4242);
+    const h = processHarness(child);
+    h.deps.killGroup = vi.fn(() => {
+      throw Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
+    });
+    const capture = createSchemaDiffSpawnCapture(h.deps);
+    const pending = capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS);
+    h.fire(SCHEMA_DIFF_TIMEOUT_MS);
+    child.emit.close(null, "SIGTERM");
+    expect(await pending).toEqual({ kind: "timeout", stdout: "", stderr: "", processGroup: "stopped" });
+  });
+
+  it("起動できない（spawn の例外・pid がないまま error）は spawn-error（コードだけ）。タイマーを置かない", async () => {
+    const thrown = processHarness(Object.assign(new Error(`spawn ${RO_URL}`), { code: "EACCES" }));
+    expect(await thrown.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS)).toEqual({ kind: "spawn-error", errorCode: "EACCES" });
+    expect(thrown.timers).toEqual([]);
+    const child = fakeChild(undefined);
+    const noPid = processHarness(child);
+    const pending = noPid.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS);
+    child.emit.error(Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }));
+    expect(await pending).toEqual({ kind: "spawn-error", errorCode: "ENOENT" });
+    expect(noPid.timers).toEqual([]);
+    expect(noPid.kills).toEqual([]);
+  });
+
+  it("shell・detached の指定が固定値でなければ、起動しない", async () => {
+    const h = processHarness(fakeChild(1234));
+    expect(await h.capture(EXEC_PATH, EXPECTED_ARGS, { ...OPTIONS, detached: false } as never)).toEqual({ kind: "spawn-error", errorCode: "OPTIONS_REJECTED" });
+    expect(await h.capture(EXEC_PATH, EXPECTED_ARGS, { ...OPTIONS, shell: true } as never)).toEqual({ kind: "spawn-error", errorCode: "OPTIONS_REJECTED" });
+    expect(h.deps.spawn).not.toHaveBeenCalled();
+  });
+
+  it("受け取る出力の量に上限がある", async () => {
+    const child = fakeChild(4242);
+    const h = processHarness(child);
+    const pending = h.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS);
+    for (let i = 0; i < 100; i += 1) child.emit.stderr("x".repeat(4096));
+    child.emit.close(1, null);
+    const result = await pending;
+    expect(result.kind === "exit" && result.stderr.length).toBeLessThan(SCHEMA_DIFF_MAX_CAPTURE + 4097);
+  });
+});
+
+describe("中断（親のプロセスへの SIGINT・SIGTERM）での CLI のプロセスグループの後始末", () => {
+  it.each(["SIGINT", "SIGTERM"] as const)("%s：グループに SIGTERM、猶予の後に SIGKILL を送り、CLI の終了とグループの消滅を確かめてから interrupted を返す", async (signal) => {
+    const child = fakeChild(4242);
+    const h = processHarness(child);
+    const interrupts = fakeInterrupts();
+    const run = track(h.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS, interrupts));
+    child.emit.stdout("partial");
+    interrupts.fire(signal);
+    expect(h.kills).toEqual([[4242, "SIGTERM"]]);
+    h.fire(SCHEMA_DIFF_KILL_GRACE_MS);
+    expect(h.kills).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]);
+    await Promise.resolve();
+    expect(run.state.settled).toBe(false);
+    child.emit.close(null, "SIGKILL");
+    expect(await run.done).toEqual({ kind: "interrupted", signal, stdout: "partial", stderr: "", processGroup: "stopped" });
+    // タイムアウトのタイマーも消え、購読も解除される
+    expect(h.pending()).toEqual([]);
+    expect(interrupts.listenerCount()).toBe(0);
+  });
+
+  it("SIGTERM の猶予の間に CLI が終われば、SIGKILL の予定を消し、終了後の確認だけをする", async () => {
+    const child = fakeChild(4242);
+    const h = processHarness(child);
+    const interrupts = fakeInterrupts();
+    const pending = h.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS, interrupts);
+    interrupts.fire("SIGINT");
+    child.emit.close(null, "SIGTERM");
+    expect(await pending).toMatchObject({ kind: "interrupted", signal: "SIGINT", processGroup: "stopped" });
+    expect(h.kills).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]);
+    expect(h.pending()).toEqual([]);
+  });
+
+  it("SIGKILL の後も CLI が終わらなければ、猶予の後に not-confirmed で返す。購読を残し、force で再び SIGKILL を送れる", async () => {
+    const child = fakeChild(4242);
+    const h = processHarness(child);
+    const interrupts = fakeInterrupts();
+    const run = track(h.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS, interrupts));
+    interrupts.fire("SIGINT");
+    h.fire(SCHEMA_DIFF_KILL_GRACE_MS);
+    h.fire(SCHEMA_DIFF_KILL_GRACE_MS);
+    expect(await run.done).toEqual({ kind: "interrupted", signal: "SIGINT", stdout: "", stderr: "", processGroup: "not-confirmed" });
+    expect(interrupts.listenerCount()).toBe(1);
+    interrupts.fire("SIGINT", true);
+    expect(h.kills.at(-1)).toEqual([4242, "SIGKILL"]);
+  });
+
+  it("force（2回目の中断・上限超え）では、すぐにグループに SIGKILL を送る", () => {
+    const child = fakeChild(4242);
+    const h = processHarness(child);
+    const interrupts = fakeInterrupts();
+    void h.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS, interrupts);
+    interrupts.fire("SIGINT");
+    interrupts.fire("SIGINT", true);
+    expect(h.kills).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]);
+  });
+
+  it("タイムアウトの停止中に中断を受けても、停止を最初からやり直さない（SIGTERM を重ねない）", async () => {
+    const child = fakeChild(4242);
+    const h = processHarness(child);
+    const interrupts = fakeInterrupts();
+    const pending = h.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS, interrupts);
+    h.fire(SCHEMA_DIFF_TIMEOUT_MS);
+    interrupts.fire("SIGINT");
+    expect(h.kills).toEqual([[4242, "SIGTERM"]]);
+    child.emit.close(null, "SIGTERM");
+    expect(await pending).toMatchObject({ kind: "timeout", processGroup: "stopped" });
+  });
+
+  it("起動の前に中断を受けていたら、起動しない（spawn-error: INTERRUPTED）", async () => {
+    const h = processHarness(fakeChild(4242));
+    const interrupts = fakeInterrupts();
+    interrupts.fire("SIGTERM");
+    expect(await h.capture(EXEC_PATH, EXPECTED_ARGS, OPTIONS, interrupts)).toEqual({ kind: "spawn-error", errorCode: "INTERRUPTED" });
+    expect(h.deps.spawn).not.toHaveBeenCalled();
+    expect(h.timers).toEqual([]);
+  });
+
+  it("中断を渡さなければ（NO_SCHEMA_DIFF_INTERRUPTS）、中断の通知を受けない", () => {
+    expect(NO_SCHEMA_DIFF_INTERRUPTS.received()).toBeUndefined();
+    expect(Object.isFrozen(NO_SCHEMA_DIFF_INTERRUPTS)).toBe(true);
+  });
+});
+
+function controllerHarness() {
+  const handlers = new Map<string, () => void>();
+  const timers: FakeTimer[] = [];
+  const logs: string[] = [];
+  const exits: number[] = [];
+  const controller = createSchemaDiffInterruptController({
+    onSignal: (signal, handler) => {
+      handlers.set(signal, handler);
+    },
+    forceExit: (code) => {
+      exits.push(code);
+    },
+    setTimer: (fn, ms) => {
+      const t = { fn, ms, cleared: false };
+      timers.push(t);
+      return t;
+    },
+    log: (text) => {
+      logs.push(text);
+    },
+    deadlineMs: SCHEMA_DIFF_INTERRUPT_DEADLINE_MS,
+  });
+  return { controller, handlers, timers, logs, exits };
+}
+
+describe("中断の受け付け（createSchemaDiffInterruptController）", () => {
+  it("SIGINT・SIGTERM の両方にハンドラを登録する", () => {
+    const h = controllerHarness();
+    expect([...h.handlers.keys()].sort()).toEqual(["SIGINT", "SIGTERM"]);
+    expect(h.controller.received()).toBeUndefined();
+  });
+
+  it("1回目：記録して通知する（force ではない）。終了はしない。上限のタイマーを置く", () => {
+    const h = controllerHarness();
+    const events: SchemaDiffInterruptEvent[] = [];
+    h.controller.subscribe((event) => events.push(event));
+    h.handlers.get("SIGTERM")?.();
+    expect(h.controller.received()).toBe("SIGTERM");
+    expect(events).toEqual([{ signal: "SIGTERM", force: false }]);
+    expect(h.exits).toEqual([]);
+    expect(h.timers.map((t) => t.ms)).toEqual([SCHEMA_DIFF_INTERRUPT_DEADLINE_MS]);
+    expect(h.logs.join("\n")).toContain('not "no difference"');
+  });
+
+  it("2回目の中断：force を通知してから、終了コード 1 で終了する。最初のシグナルは変わらない", () => {
+    const h = controllerHarness();
+    const events: SchemaDiffInterruptEvent[] = [];
+    h.controller.subscribe((event) => events.push(event));
+    h.handlers.get("SIGINT")?.();
+    h.handlers.get("SIGTERM")?.();
+    expect(events).toEqual([
+      { signal: "SIGINT", force: false },
+      { signal: "SIGTERM", force: true },
+    ]);
+    expect(h.exits).toEqual([1]);
+    expect(h.controller.received()).toBe("SIGINT");
+    expect(h.logs.join("\n")).toContain("not guaranteed that the database is unchanged");
+    // 3回目以降と上限のタイマーでは、重ねて終了しない
+    h.handlers.get("SIGINT")?.();
+    h.timers[0].fn();
+    expect(h.exits).toEqual([1]);
+  });
+
+  it("上限を超えたら：force を通知し、終了コード 1 で終了する（中断の処理が無制限に止まらない）", () => {
+    const h = controllerHarness();
+    const events: SchemaDiffInterruptEvent[] = [];
+    h.controller.subscribe((event) => events.push(event));
+    h.handlers.get("SIGINT")?.();
+    h.timers[0].fn();
+    expect(events.at(-1)).toEqual({ signal: "SIGINT", force: true });
+    expect(h.exits).toEqual([1]);
+  });
+
+  it("後始末の1つが例外を投げても、ほかの後始末と終了を止めない。解除した購読には通知しない", () => {
+    const h = controllerHarness();
+    const seen: string[] = [];
+    h.controller.subscribe(() => {
+      throw new Error("boom");
+    });
+    const off = h.controller.subscribe(() => seen.push("removed"));
+    h.controller.subscribe((event) => seen.push(event.force ? "force" : "first"));
+    off();
+    h.handlers.get("SIGINT")?.();
+    h.handlers.get("SIGINT")?.();
+    expect(seen).toEqual(["first", "force"]);
+    expect(h.exits).toEqual([1]);
+  });
+
+  it("表示に URL・パスワードを含めない", () => {
+    const h = controllerHarness();
+    h.handlers.get("SIGINT")?.();
+    h.handlers.get("SIGINT")?.();
+    const text = h.logs.join("\n");
+    expect(text).not.toMatch(/postgres(ql)?:/i);
+    for (const s of SECRETS) expect(text).not.toContain(s);
+  });
+});
+
+describe("ゲート・比較の範囲・定数", () => {
+  it("固定のゲート SCHEMA_DIFF_DISABLED は凍結された無効値で、migration 用とは別の値", () => {
     expect(SCHEMA_DIFF_DISABLED).toEqual({ mode: "disabled" });
     expect(Object.isFrozen(SCHEMA_DIFF_DISABLED)).toBe(true);
     expect(SCHEMA_DIFF_DISABLED).not.toBe(LIVE_DATABASE_DISABLED);
   });
-});
 
-describe("実行の手順（偽の関数だけ。D1 → F1 → 権限 → D2 → CLI → F2 → D3）", () => {
-  it("すべて通れば、この順で呼び、終了コード 0 を差分なしとする", async () => {
-    const f = fake();
-    expect(await runSchemaDiffCheck(f.deps)).toEqual({ outcome: "no-diff" });
-    expect(f.calls).toEqual(["docker", "inspect", "docker", "spawn", "inspect", "docker"]);
-    const [command, args, options] = f.spawn.mock.calls[0];
-    expect(command).toBe(EXEC_PATH);
-    expect(args).toEqual(EXPECTED_ARGS);
-    expect(options.shell).toBe(false);
-    expect(options.env).toEqual({ PATH: "/usr/bin", HOME: "/home/u", DATABASE_URL: TEST_URL, KATANA_DB_TARGET: "test" });
-    for (const line of f.logs) for (const s of SECRETS) expect(line).not.toContain(s);
+  it("比較の範囲の注記：終了コード 0 は「Prisma が比較できる範囲で差分なし」で、_prisma_migrations の除外・比較しない項目・未確認の項目を含む", () => {
+    const text = SCHEMA_DIFF_SCOPE_NOTE.join("\n");
+    expect(text).toContain("no difference within what Prisma compares");
+    expect(text).toContain("_prisma_migrations");
+    for (const word of ["column order", "collation", "CHECK/EXCLUDE", "partial index", "INCLUDE", "NULLS NOT DISTINCT", "DEFERRABLE", "unconfirmed"]) expect(text).toContain(word);
   });
 
-  it("差分あり（2）・CLI のエラー（1）を区別して返す", async () => {
-    expect((await runSchemaDiffCheck(fake({ result: exit(2, "[+] Added tables") }).deps)).outcome).toBe("diff");
-    expect((await runSchemaDiffCheck(fake({ result: exit(1) }).deps)).outcome).toBe("cli-error");
-  });
-
-  it("9. spawn が例外を投げても、成功とは扱わない（コードだけ）", async () => {
-    const outcome = await runSchemaDiffCheck(fake({ result: Object.assign(new Error(`spawn ${TEST_URL}`), { code: "ENOENT" }) }).deps);
-    expect(outcome).toEqual({ outcome: "spawn-failed", errorCode: "ENOENT" });
-  });
-
-  it("10. タイムアウト・シグナルでの終了は、成功ではない", async () => {
-    expect((await runSchemaDiffCheck(fake({ result: { kind: "timeout", stdout: "", stderr: "" } }).deps)).outcome).toBe("timeout");
-    expect((await runSchemaDiffCheck(fake({ result: exit(null, "", "", "SIGTERM") }).deps)).outcome).toBe("signal");
-  });
-
-  it("今の katana_test_user の権限（CREATE・所有者）では、読み取り専用が強制されていないので、Prisma CLI を起動しない", async () => {
-    const f = fake({ privileges: CURRENT_USER });
-    const error = await expectError(f, "READ_ONLY_NOT_ENFORCED");
-    expect(error.message).toContain("public CREATE");
-    expect(f.spawn).not.toHaveBeenCalled();
-    expect(readOnlyPrivilegeViolations(CURRENT_USER)).toEqual(["public CREATE", "database CREATE", "database owner"]);
-    expect(readOnlyPrivilegeViolations(READ_ONLY)).toEqual([]);
-  });
-
-  it("状態 C 以外（A・B）・F1 の失敗・D1 の失敗では、Prisma CLI を起動しない", async () => {
-    for (const state of [STATE_A, STATE_B]) {
-      const f = fake({ states: [state] });
-      await expectError(f, "DATABASE_STATE_NOT_C");
-      expect(f.spawn).not.toHaveBeenCalled();
-    }
-    const f1 = fake({ states: [new IntegrationDatabaseCheckError("CURRENT_USER_MISMATCH", `bad ${TEST_URL}`)] });
-    expect((await expectError(f1, "STATE_CHECK_FAILED")).message).toContain("CURRENT_USER_MISMATCH");
-    expect(f1.spawn).not.toHaveBeenCalled();
-    const d1 = fake({ dockers: [Object.assign(new Error(TEST_URL), { code: "DOCKER_UNAVAILABLE" })] });
-    await expectError(d1, "DOCKER_IDENTITY_FAILED");
-    expect(d1.spawn).not.toHaveBeenCalled();
-  });
-
-  it("F1 と D1 が合わない・D2 が D1 と違うなら、Prisma CLI を起動しない（防止）", async () => {
-    const port = fake({ servers: [{ ...SERVER, serverPort: 5433 }] });
-    await expectError(port, "SERVER_IDENTITY_MISMATCH");
-    expect(port.spawn).not.toHaveBeenCalled();
-    const d2 = fake({ dockers: [DOCKER, { ...DOCKER, containerId: "d".repeat(64) }] });
-    await expectError(d2, "DOCKER_IDENTITY_MISMATCH");
-    expect(d2.spawn).not.toHaveBeenCalled();
-  });
-
-  it("F2・D3 の不一致・失敗、CLI の後の状態の変化は、差分なし（0）でも成功と扱わない（事後の検出）", async () => {
-    await expectError(fake({ servers: [SERVER, { ...SERVER, postmasterStartTime: "2026-11-06T23:00:00.000000Z" }] }), "POST_DIFF_IDENTITY_MISMATCH");
-    await expectError(fake({ dockers: [DOCKER, DOCKER, { ...DOCKER, restartCount: 1 }] }), "POST_DIFF_IDENTITY_MISMATCH");
-    await expectError(fake({ dockers: [DOCKER, DOCKER, new Error("x")] }), "DOCKER_IDENTITY_FAILED");
-    await expectError(fake({ states: [STATE_C, new Error("lost")] }), "POST_DIFF_CHECK_FAILED");
-    await expectError(fake({ states: [STATE_C, STATE_B] }), "POST_DIFF_STATE_MISMATCH");
+  it("katana_test_ro の認証情報のファイル名は、読み取り専用ロールの準備と同じ", () => {
+    expect(READ_ONLY_TEST_ENV_FILE).toBe(READ_ONLY_ROLE_ENV_FILE);
   });
 });
 
 describe("静的な確認（ソース）", () => {
-  const code = (file: string) =>
-    readFileSync(path.join(REPO_ROOT, file), "utf8")
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/^\s*\/\/.*$/gm, "")
-      .replace(/\s\/\/ .*$/gm, "");
-
-  it("DB ドライバ・Prisma Client・child_process を読み込まず、ファイルに書き込まない", () => {
-    const source = code("lib/testing/schemaDiff.ts");
-    for (const forbidden of ['from "pg"', "@prisma/client", "@/lib/prisma", "testDbConnection", "child_process", "testDbDocker", "writeFile", "appendFile", "rmSync", "unlink", "mkdir"]) {
-      expect(source).not.toContain(forbidden);
+  it("本体のモジュールは DB ドライバ・Prisma Client・child_process・Docker を読み込まず、ファイルに書き込まない", () => {
+    for (const file of ["lib/testing/schemaDiff.ts", "lib/testing/testDbSchemaDiffRunner.ts"]) {
+      const source = code(file);
+      for (const forbidden of ['from "pg"', "@prisma/client", "@/lib/prisma", "testDbConnection", "child_process", "testDbDocker", "runDockerCommand", "writeFile", "appendFile", "rmSync", "unlink", "mkdir"]) {
+        expect(source, `${file}: ${forbidden}`).not.toContain(forbidden);
+      }
+      expect(source).not.toMatch(/shell:\s*true/);
     }
-    expect(source).not.toMatch(/shell:\s*true/);
   });
 
-  it("13. migration 用の固定ゲートは変えない（スクリプトは LIVE_DATABASE_DISABLED のまま、schemaDiff はゲートを参照しない）", () => {
+  it("13. スクリプトは固定のゲート SCHEMA_DIFF_DISABLED を渡す（引数・環境変数から決めない）。runner は承認済みの固定の文字列との一致だけで判定する", () => {
+    const script = code("scripts/testdb-schema-diff.mts");
+    expect(script).toMatch(/^ {2}access: SCHEMA_DIFF_DISABLED,$/m);
+    expect(script.match(/SCHEMA_DIFF_DISABLED/g)).toHaveLength(2);
+    expect(script.match(/process\.argv/g)).toHaveLength(1);
+    expect(script.match(/process\.env/g)).toHaveLength(1);
+    expect(script).toContain("  argv: process.argv.slice(2),");
+    expect(script).toContain("  parentEnv: process.env,");
+    expect(script).not.toMatch(/enabled-ro-schema-diff/);
+    const runner = code("lib/testing/testDbSchemaDiffRunner.ts");
+    expect(runner).toContain('const gateEnabled = deps.access.mode === "enabled-ro-schema-diff";');
+    expect(runner.match(/enabled-ro-schema-diff/g)).toHaveLength(1);
+    // migration 用のゲートは変えない
     expect(code("scripts/testdb-migrate.mts")).toMatch(/^ {2}liveDatabase: LIVE_DATABASE_DISABLED,$/m);
-    expect(code("lib/testing/schemaDiff.ts")).not.toContain("LIVE_DATABASE_DISABLED");
-    expect(LIVE_DATABASE_DISABLED).toEqual({ mode: "disabled" });
   });
 
-  it("14. どのスクリプト・runner からも呼ばない（実DBでの実行経路は Step 3-12B-5C で承認の後に組み込む）", () => {
-    for (const file of ["scripts/testdb-migrate.mts", "scripts/testdb.mts", "scripts/test-integration.mts", "lib/testing/testDbMigrate.ts", "lib/testing/integrationGlobalSetup.ts", "prisma.config.ts"]) {
+  it("スクリプトの起動は shell なし・detached・プロセスグループへのシグナル（-pgid）だけ", () => {
+    const script = code("scripts/testdb-schema-diff.mts");
+    expect(script).toContain("spawn: (command, args, options) => spawn(command, args, { ...options, env: options.env as NodeJS.ProcessEnv }),");
+    expect(script).toContain("process.kill(-pgid, signal);");
+    expect(script).not.toMatch(/execSync|exec\(|execFile|shell: true/);
+  });
+
+  it("14. npm のスクリプトは予行の1つだけ（--live 付きはない）。migration・統合テスト・開発用の経路と prisma.config.ts からは呼ばない", () => {
+    const pkg = JSON.parse(readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
+    expect(pkg.scripts["testdb:schema-diff"]).toBe("node scripts/testdb-schema-diff.mts");
+    expect(Object.values(pkg.scripts).filter((s) => s.includes("testdb-schema-diff"))).toHaveLength(1);
+    expect(Object.values(pkg.scripts).some((s) => s.includes("--live"))).toBe(false);
+    expect(Object.values(pkg.scripts).some((s) => /migrate diff|schemadiff\.config/.test(s))).toBe(false);
+    for (const file of ["scripts/testdb-migrate.mts", "scripts/testdb.mts", "scripts/test-integration.mts", "lib/testing/testDbMigrate.ts", "lib/testing/integrationGlobalSetup.ts", "prisma.config.ts", "lib/prisma.ts"]) {
       // testDbMigrate.ts・testDbState.ts には、状態 C の schemaDiff: "not-verified" という既存のフィールド名がある。import だけを調べる
-      expect(readFileSync(path.join(REPO_ROOT, file), "utf8")).not.toMatch(/["'][^"']*\/schemaDiff(\.ts)?["']/);
+      expect(readFileSync(path.join(REPO_ROOT, file), "utf8"), file).not.toMatch(/["'][^"']*\/(schemaDiff|testDbSchemaDiffRunner)(\.ts)?["']/);
+      expect(readFileSync(path.join(REPO_ROOT, file), "utf8"), file).not.toContain("schemadiff.config");
     }
-    const pkg = readFileSync(path.join(REPO_ROOT, "package.json"), "utf8");
-    expect(pkg).not.toMatch(/schemaDiff/i);
-    expect(pkg).not.toMatch(/migrate diff/);
   });
 });

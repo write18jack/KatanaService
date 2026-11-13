@@ -794,7 +794,7 @@ describe("静的な確認（ソース）", () => {
     }
   });
 
-  it("25. 呼び出し元はカタログの監査専用の経路（testDbCatalogRunner・testdb-catalog）と、読み取り専用ロールの準備の経路（testDbReadOnlyRole・testdb-ro-role。Step 3-12B-5E-3）だけで、schemaDiff・checksum・migration の経路からは呼ばない", () => {
+  it("25. 呼び出し元はカタログの監査専用の経路（testDbCatalogRunner・testdb-catalog）と、読み取り専用ロールの準備の経路（testDbReadOnlyRole・testdb-ro-role。Step 3-12B-5E-3）と、schemaDiff の runner（testDbSchemaDiffRunner・testdb-schema-diff。Step 3-12B-5E-9A-9-2）だけで、schemaDiff の部品（schemaDiff.ts）・checksum・migration の経路からは呼ばない", () => {
     const allowedCallers = [
       "lib/testing/testDbCatalogRunner.ts",
       "scripts/testdb-catalog.mts",
@@ -802,12 +802,17 @@ describe("静的な確認（ソース）", () => {
       "lib/testing/testDbReadOnlyRole.ts",
       "lib/testing/testDbReadOnlyRoleRunner.ts",
       "scripts/testdb-ro-role.mts",
+      // schemaDiff（Step 3-12B-5E-9A-9-2）：FP1・FP2（runCatalogDefinitionAudit）を、runner とスクリプトから使う。部品の schemaDiff.ts は使わない
+      "lib/testing/testDbSchemaDiffRunner.ts",
+      "scripts/testdb-schema-diff.mts",
     ];
     for (const file of allowedCallers) expect(readFileSync(path.join(REPO_ROOT, file), "utf8")).toContain("testDbCatalogAudit");
     const importers = [
       ...readdirSync(path.join(REPO_ROOT, "scripts")).map((f) => `scripts/${f}`),
       ...readdirSync(path.join(REPO_ROOT, "lib", "testing")).map((f) => `lib/testing/${f}`),
       "prisma.config.ts",
+      // schemaDiff 専用の Prisma の設定ファイル（Step 3-12B-5E-9A-9-3A）：Prisma CLI のプロセスの中で読まれる。カタログの監査は使わない
+      "prisma.schemadiff.config.ts",
       "package.json",
     ].filter((file) => file !== "lib/testing/testDbCatalogAudit.ts" && !allowedCallers.includes(file) && !file.endsWith(".test.ts") && /\.(m?ts|json)$/.test(file));
     expect(importers).toContain("lib/testing/schemaDiff.ts");
