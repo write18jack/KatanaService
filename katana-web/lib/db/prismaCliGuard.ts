@@ -49,6 +49,7 @@ export type PrismaCliGuardErrorCode =
   // 以下は schemaDiff 用（resolvePrismaCliReadOnlyTarget）だけ
   | "COMMAND_MISMATCH"
   | "ENV_NOT_ALLOWED"
+  | "ENV_VALUE_INVALID"
   | "ENV_NOT_FIXED"
   | "READ_ONLY_ENV_MISSING"
   | "READ_ONLY_TARGET_REJECTED"
@@ -230,9 +231,36 @@ export function schemaDiffUrlSha256(url: string): string {
   return createHash("sha256").update(url, "utf8").digest("hex");
 }
 
-/** CLI のプロセスに許す環境変数の名前（runner の許可リスト・固定の値・接続先モード・URL の SHA-256 だけ） */
-function isAllowedSchemaDiffEnvKey(key: string): boolean {
-  return isInheritedEnvKey(key) || Object.hasOwn(SCHEMA_DIFF_FIXED_ENV, key) || key === DB_TARGET_ENV || key === SCHEMA_DIFF_RO_URL_SHA256_ENV;
+/**
+ * macOS（darwin）の CoreFoundation が、プロセスの起動時に環境変数へ付け加える変数（Step 3-12B-5E-9A-9-6B）。
+ * runner が子プロセスの環境変数を空から組み立てても（env -i でも）、CLI のプロセスには付いている（9-6 で ENV_NOT_ALLOWED になった原因）。
+ * runner はこの変数を渡さない（runner の許可リストは広げない）。ここでは、darwin で、この名前と完全に一致するときだけ許し、値の形式も確かめる。
+ */
+export const MACOS_CF_TEXT_ENCODING_ENV = "__CF_USER_TEXT_ENCODING";
+/** 値の長さの上限（"0x" と32ビットの16進数8桁を3つ、区切りの ":" 2つ） */
+export const MACOS_CF_TEXT_ENCODING_MAX_LENGTH = 32;
+/** CoreFoundation が書く形式 "0x%X:0x%X:0x%X"（大文字の16進数3つ。各32ビット＝1〜8桁）。特定の UID・値には固定しない */
+const MACOS_CF_TEXT_ENCODING_PATTERN = /^0x[0-9A-F]{1,8}:0x[0-9A-F]{1,8}:0x[0-9A-F]{1,8}$/;
+
+/** macOS の特例として名前を許すか（darwin で、名前が完全に一致するときだけ。__CF_*・CF_* などの前方一致は許さない） */
+export function isMacOsTextEncodingEnvKey(key: string, platform: NodeJS.Platform): boolean {
+  return platform === "darwin" && key === MACOS_CF_TEXT_ENCODING_ENV;
+}
+
+/** __CF_USER_TEXT_ENCODING の値が、CoreFoundation の形式と長さの上限に合うか（空・小文字・余分な文字・改行は不可） */
+export function isValidMacOsTextEncodingValue(value: string): boolean {
+  return value.length <= MACOS_CF_TEXT_ENCODING_MAX_LENGTH && MACOS_CF_TEXT_ENCODING_PATTERN.test(value);
+}
+
+/** CLI のプロセスに許す環境変数の名前（runner の許可リスト・固定の値・接続先モード・URL の SHA-256、darwin の __CF_USER_TEXT_ENCODING だけ） */
+function isAllowedSchemaDiffEnvKey(key: string, platform: NodeJS.Platform): boolean {
+  return (
+    isInheritedEnvKey(key) ||
+    Object.hasOwn(SCHEMA_DIFF_FIXED_ENV, key) ||
+    key === DB_TARGET_ENV ||
+    key === SCHEMA_DIFF_RO_URL_SHA256_ENV ||
+    isMacOsTextEncodingEnvKey(key, platform)
+  );
 }
 
 export type PrismaCliReadOnlyGuardInput = {
@@ -245,6 +273,8 @@ export type PrismaCliReadOnlyGuardInput = {
   readTestEnv: () => EnvSource | undefined;
   readReadOnlyEnv: () => EnvSource | undefined;
   readDevelopmentEnv: () => EnvSource | undefined;
+  /** 省略時は process.platform（設定ファイルは渡さない）。__CF_USER_TEXT_ENCODING の特例を darwin に限るために使う */
+  platform?: NodeJS.Platform;
 };
 
 /**
@@ -252,7 +282,8 @@ export type PrismaCliReadOnlyGuardInput = {
  * 条件を1つでも満たさなければ PrismaCliGuardError を投げる（CLI は接続せずに終了する）。メッセージには URL・パスワード・値を含めない。
  *
  * 1. KATANA_DB_TARGET が test-readonly  2. NODE_OPTIONS がない  3. argv が固定の migrate diff のコマンドと完全に一致する
- * 4. 環境変数の名前が許可リストだけで、固定の値（CHECKPOINT_DISABLE など）が一致する（DATABASE_URL・PRISMA_*・DEBUG・PG* などは拒否）
+ * 4. 環境変数の名前が許可リストだけで、固定の値（CHECKPOINT_DISABLE など）が一致する（DATABASE_URL・PRISMA_*・DEBUG・PG* などは拒否）。
+ *    darwin だけは __CF_USER_TEXT_ENCODING を許し、ある場合は値の形式を確かめる（合わなければ ENV_VALUE_INVALID。値は表示しない）
  * 5. `.env.test` を検証する（katana_test_ro のパスワードの使い回しの検査に使う。接続には使わない）
  * 6. `.env.test.readonly` を検証する（katana_test_ro・ループバック・5434・katana_test・クエリなし・開発用DBと別・PG*・DOTENV_* なし）
  * 7. その URL の SHA-256 が、runner の渡した値と一致する（runner が検証したものと同じ URL だけを使う）
@@ -270,11 +301,17 @@ export function resolvePrismaCliReadOnlyTarget(input: PrismaCliReadOnlyGuardInpu
   if (actual.length !== expected.length || actual.some((arg, i) => arg !== expected[i])) {
     throw new PrismaCliGuardError("COMMAND_MISMATCH", "this config file may only be used by the fixed migrate diff command of the schema diff runner.");
   }
+  const platform = input.platform ?? process.platform;
   const keys = Object.keys(env).filter((key) => env[key] !== undefined);
-  const notAllowed = keys.filter((key) => !isAllowedSchemaDiffEnvKey(key));
+  const notAllowed = keys.filter((key) => !isAllowedSchemaDiffEnvKey(key, platform));
   if (notAllowed.length > 0) {
     // 名前は秘密情報ではないので表示する（値は表示しない）
     throw new PrismaCliGuardError("ENV_NOT_ALLOWED", `environment variables outside the allowlist are set: ${notAllowed.sort().join(", ")}.`);
+  }
+  // この変数があってここに来るのは darwin だけ（ほかの OS では、上の ENV_NOT_ALLOWED で止まる）。.env の読み込みより前に値を確かめる。値は表示しない
+  const textEncoding = env[MACOS_CF_TEXT_ENCODING_ENV];
+  if (textEncoding !== undefined && !isValidMacOsTextEncodingValue(textEncoding)) {
+    throw new PrismaCliGuardError("ENV_VALUE_INVALID", `${MACOS_CF_TEXT_ENCODING_ENV} does not have the expected format (the value is not shown).`);
   }
   const notFixed = Object.entries(SCHEMA_DIFF_FIXED_ENV).filter(([key, value]) => env[key] !== value).map(([key]) => key);
   if (notFixed.length > 0) {

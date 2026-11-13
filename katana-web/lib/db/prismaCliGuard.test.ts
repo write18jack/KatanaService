@@ -3,6 +3,10 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildSchemaDiffCliArgs,
+  isMacOsTextEncodingEnvKey,
+  isValidMacOsTextEncodingValue,
+  MACOS_CF_TEXT_ENCODING_ENV,
+  MACOS_CF_TEXT_ENCODING_MAX_LENGTH,
   type PrismaCliGuardErrorCode,
   type PrismaCliGuardInput,
   PrismaCliGuardError,
@@ -225,7 +229,7 @@ const RO_URL = `postgresql://katana_test_ro:${RO_PASSWORD}@127.0.0.1:5434/katana
 const CWD = "/fake/katana-web";
 const RO_SECRETS = [PASSWORD, ADMIN_PASSWORD, DEV_PASSWORD, RO_PASSWORD, TEST_URL, DEV_URL, RO_URL, "postgresql://", "postgres://"];
 
-function readOnlyInput(o: { env?: Record<string, string | undefined>; argv?: string[]; cwd?: string; testEnv?: Record<string, string> | undefined; roEnv?: Record<string, string | undefined> | undefined; devEnv?: Record<string, string> } = {}) {
+function readOnlyInput(o: { env?: Record<string, string | undefined>; argv?: string[]; cwd?: string; testEnv?: Record<string, string> | undefined; roEnv?: Record<string, string | undefined> | undefined; devEnv?: Record<string, string>; platform?: NodeJS.Platform } = {}) {
   const readTestEnv = vi.fn(() => ("testEnv" in o ? o.testEnv : testEnvFor()));
   const readReadOnlyEnv = vi.fn(() => ("roEnv" in o ? o.roEnv : { KATANA_TEST_RO_DATABASE_URL: RO_URL, KATANA_TEST_DB_RO_PASSWORD: RO_PASSWORD }));
   const readDevelopmentEnv = vi.fn(() => o.devEnv ?? { DATABASE_URL: DEV_URL });
@@ -246,6 +250,8 @@ function readOnlyInput(o: { env?: Record<string, string | undefined>; argv?: str
     readTestEnv,
     readReadOnlyEnv,
     readDevelopmentEnv,
+    // 省略時はガードが process.platform を使う（既存のテストは __CF_USER_TEXT_ENCODING を含まないので、OS に依らず同じ結果）
+    ...(o.platform !== undefined ? { platform: o.platform } : {}),
   };
   return { input, readTestEnv, readReadOnlyEnv };
 }
@@ -357,6 +363,141 @@ describe("resolvePrismaCliReadOnlyTarget：schemaDiff 専用（katana_test_ro �
     for (const value of [undefined, "", schemaDiffUrlSha256(TEST_URL), schemaDiffUrlSha256(RO_URL).toUpperCase(), "0".repeat(64)]) {
       expectReadOnlyRejected(readOnlyInput({ env: { [SCHEMA_DIFF_RO_URL_SHA256_ENV]: value } }).input, "READ_ONLY_URL_MISMATCH");
     }
+  });
+});
+
+// ---- macOS の __CF_USER_TEXT_ENCODING（Step 3-12B-5E-9A-9-6B。9-6 の ENV_NOT_ALLOWED の原因） ----
+
+/** 形式だけのダミー値（実機の値ではない。UID・末尾の値はさまざまに変える） */
+const CF_VALID = ["0x2A3:0x0:0x0", "0x0:0x0:0x0", "0x1F6:0x8000100:0xE", "0xFFFFFFFF:0xFFFFFFFF:0xFFFFFFFF", "0xA:0x1:0x2"];
+
+describe("__CF_USER_TEXT_ENCODING：macOS（darwin）だけの限定的な特例", () => {
+  it("名前の特例は darwin で、名前が完全に一致するときだけ（純粋関数）", () => {
+    expect(MACOS_CF_TEXT_ENCODING_ENV).toBe("__CF_USER_TEXT_ENCODING");
+    expect(isMacOsTextEncodingEnvKey("__CF_USER_TEXT_ENCODING", "darwin")).toBe(true);
+    for (const platform of ["linux", "win32", "freebsd", "openbsd", "sunos", "aix", "android"] as NodeJS.Platform[]) {
+      expect(isMacOsTextEncodingEnvKey("__CF_USER_TEXT_ENCODING", platform), platform).toBe(false);
+    }
+    for (const key of ["__CF_USER_TEXT_ENCODING ", " __CF_USER_TEXT_ENCODING", "__cf_user_text_encoding", "__CF_USER_TEXT_ENCODINGX", "_CF_USER_TEXT_ENCODING", "CF_USER_TEXT_ENCODING", "__CF_USER", "__CF_", "__CF_OTHER", "CF_OTHER"]) {
+      expect(isMacOsTextEncodingEnvKey(key, "darwin"), key).toBe(false);
+    }
+  });
+
+  it("値の形式は大文字の16進数3つ（各1〜8桁）で、長さは32文字まで（純粋関数）", () => {
+    expect(MACOS_CF_TEXT_ENCODING_MAX_LENGTH).toBe(32);
+    for (const value of CF_VALID) expect(isValidMacOsTextEncodingValue(value), value).toBe(true);
+    const invalid = [
+      "",
+      "0x2A3:0x0",
+      "0x2A3:0x0:0x0:0x0",
+      "0x2a3:0x0:0x0",
+      "0X2A3:0x0:0x0",
+      "1F5:0x0:0x0",
+      "0x:0x0:0x0",
+      "0x2A3:0x0:0xG",
+      "0x2A3;0x0;0x0",
+      " 0x2A3:0x0:0x0",
+      "0x2A3:0x0:0x0 ",
+      "0x2A3:0x0:0x0\n",
+      "0x2A3:0x0:0x0\nDATABASE_URL=x",
+      "0x123456789:0x0:0x0",
+      "0x2A3:0x0:0x0" + "0".repeat(40),
+      RO_URL,
+    ];
+    for (const value of invalid) expect(isValidMacOsTextEncodingValue(value), JSON.stringify(value)).toBe(false);
+  });
+
+  it.each(CF_VALID)("1. darwin で正しい名前・形式（%s）なら、ほかの検証をすべて通って URL を返す", (value) => {
+    const { input, readReadOnlyEnv } = readOnlyInput({ platform: "darwin", env: { [MACOS_CF_TEXT_ENCODING_ENV]: value } });
+    expect(resolvePrismaCliReadOnlyTarget(input)).toEqual({ mode: "test-readonly", url: RO_URL });
+    expect(readReadOnlyEnv).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["darwin", "linux"] as NodeJS.Platform[])("2. 変数がなければ（%s）、これまでどおり成功する", (platform) => {
+    const { input } = readOnlyInput({ platform });
+    expect(input.env[MACOS_CF_TEXT_ENCODING_ENV]).toBeUndefined();
+    expect(resolvePrismaCliReadOnlyTarget(input)).toEqual({ mode: "test-readonly", url: RO_URL });
+  });
+
+  it("3. darwin でも値が空なら ENV_VALUE_INVALID（.env を読まない）", () => {
+    const { input, readTestEnv, readReadOnlyEnv } = readOnlyInput({ platform: "darwin", env: { [MACOS_CF_TEXT_ENCODING_ENV]: "" } });
+    expectReadOnlyRejected(input, "ENV_VALUE_INVALID");
+    expect(readTestEnv).not.toHaveBeenCalled();
+    expect(readReadOnlyEnv).not.toHaveBeenCalled();
+  });
+
+  it.each(["0x2a3:0x0:0x0", "0x2A3:0x0", "0x2A3:0x0:0x0\n", "0x123456789:0x0:0x0", "abc"])("4. darwin でも値の形式が違えば（%j）ENV_VALUE_INVALID（.env を読まない）", (value) => {
+    const { input, readTestEnv } = readOnlyInput({ platform: "darwin", env: { [MACOS_CF_TEXT_ENCODING_ENV]: value } });
+    expectReadOnlyRejected(input, "ENV_VALUE_INVALID");
+    expect(readTestEnv).not.toHaveBeenCalled();
+  });
+
+  it.each(["__CF_USER_TEXT_ENCODINGX", "__cf_user_text_encoding", "_CF_USER_TEXT_ENCODING", "CF_USER_TEXT_ENCODING", "__CF_OTHER", "CF_OTHER"])(
+    "5. darwin でも、よく似た名前（%s）は ENV_NOT_ALLOWED（__CF_*・CF_* は許さない）",
+    (key) => {
+      const error = expectReadOnlyRejected(readOnlyInput({ platform: "darwin", env: { [key]: "0x2A3:0x0:0x0" } }).input, "ENV_NOT_ALLOWED");
+      expect(error.message).toContain(key);
+    },
+  );
+
+  it.each(["DATABASE_URL", "PRISMA_SCHEMA_ENGINE_BINARY", "DEBUG", "PGHOST", "PGPASSWORD"])(
+    "6. darwin で正しい __CF_USER_TEXT_ENCODING があっても、禁止の変数 %s が一緒なら ENV_NOT_ALLOWED（その名前だけを表示する）",
+    (key) => {
+      const { input, readTestEnv } = readOnlyInput({ platform: "darwin", env: { [MACOS_CF_TEXT_ENCODING_ENV]: "0x2A3:0x0:0x0", [key]: RO_URL } });
+      const error = expectReadOnlyRejected(input, "ENV_NOT_ALLOWED");
+      expect(error.message).toContain(key);
+      expect(error.message).not.toContain(MACOS_CF_TEXT_ENCODING_ENV);
+      expect(readTestEnv).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["linux", "win32", "freebsd"] as NodeJS.Platform[])("7. darwin 以外（%s）では、正しい形式でも ENV_NOT_ALLOWED（特例を使わない）", (platform) => {
+    const { input, readTestEnv } = readOnlyInput({ platform, env: { [MACOS_CF_TEXT_ENCODING_ENV]: "0x2A3:0x0:0x0" } });
+    const error = expectReadOnlyRejected(input, "ENV_NOT_ALLOWED");
+    expect(error.message).toContain(MACOS_CF_TEXT_ENCODING_ENV);
+    expect(readTestEnv).not.toHaveBeenCalled();
+  });
+
+  it("8. 値の形式が違うときのメッセージには、名前だけを出し、値（秘密の値を入れても）は出さない", () => {
+    for (const value of [RO_URL, RO_PASSWORD, `0x2A3:0x0:0x0${PASSWORD}`, `${DEV_URL}:0x0:0x0`]) {
+      const error = expectReadOnlyRejected(readOnlyInput({ platform: "darwin", env: { [MACOS_CF_TEXT_ENCODING_ENV]: value } }).input, "ENV_VALUE_INVALID");
+      for (const text of [error.message, String(error)]) {
+        expect(text).toContain(MACOS_CF_TEXT_ENCODING_ENV);
+        expect(text).not.toContain(value);
+      }
+    }
+  });
+
+  it("9. darwin で正しい __CF_USER_TEXT_ENCODING があっても、ほかのガードは変わらない", () => {
+    const cf = { [MACOS_CF_TEXT_ENCODING_ENV]: "0x2A3:0x0:0x0" };
+    const darwin = (o: Parameters<typeof readOnlyInput>[0] = {}) => readOnlyInput({ ...o, platform: "darwin", env: { ...cf, ...o.env } }).input;
+    // 接続先モード・NODE_OPTIONS・固定のコマンド
+    expectReadOnlyRejected(darwin({ env: { KATANA_DB_TARGET: "test" } }), "TARGET_INVALID");
+    expectReadOnlyRejected(darwin({ env: { NODE_OPTIONS: "" } }), "NODE_OPTIONS_PRESENT");
+    expectReadOnlyRejected(darwin({ argv: ["/usr/local/bin/node", buildSchemaDiffCliArgs(CWD)[0], "db", "push"] }), "COMMAND_MISMATCH");
+    // 固定の値（CHECKPOINT_DISABLE=1・CI=1・RUST_LOG=error・RUST_BACKTRACE=0）
+    for (const [key, value] of [["CHECKPOINT_DISABLE", "0"], ["CI", "false"], ["RUST_LOG", "debug"], ["RUST_BACKTRACE", "1"]]) {
+      expectReadOnlyRejected(darwin({ env: { [key]: value } }), "ENV_NOT_FIXED");
+    }
+    // ro の接続先・認証情報・URL の SHA-256
+    const devRo = { KATANA_TEST_RO_DATABASE_URL: DEV_URL, KATANA_TEST_DB_RO_PASSWORD: RO_PASSWORD };
+    expectReadOnlyRejected(darwin({ roEnv: devRo, env: { [SCHEMA_DIFF_RO_URL_SHA256_ENV]: schemaDiffUrlSha256(DEV_URL) } }), "READ_ONLY_TARGET_REJECTED", "PORT_NOT_ALLOWED");
+    const appUserRo = RO_URL.replace("katana_test_ro", "katana_test_user");
+    expectReadOnlyRejected(
+      darwin({ roEnv: { KATANA_TEST_RO_DATABASE_URL: appUserRo, KATANA_TEST_DB_RO_PASSWORD: RO_PASSWORD }, env: { [SCHEMA_DIFF_RO_URL_SHA256_ENV]: schemaDiffUrlSha256(appUserRo) } }),
+      "READ_ONLY_TARGET_REJECTED",
+      "USER_NOT_ALLOWED",
+    );
+    expectReadOnlyRejected(darwin({ env: { [SCHEMA_DIFF_RO_URL_SHA256_ENV]: schemaDiffUrlSha256(TEST_URL) } }), "READ_ONLY_URL_MISMATCH");
+    // 既存の resolvePrismaCliDatabaseTarget（prisma.config.ts）は、この特例と無関係で、test-readonly を受け付けないまま
+    expectRejected(testModeInput({ env: { KATANA_DB_TARGET: "test-readonly" } }).input, "TARGET_INVALID");
+  });
+
+  it("設定ファイルは platform を渡さない（ガードが process.platform を使う。引数・環境変数で OS を偽れない）", () => {
+    const config = readFileSync(path.resolve(__dirname, "../../prisma.schemadiff.config.ts"), "utf8").replace(/^\s*\/\/.*$/gm, "");
+    expect(config).not.toMatch(/platform/);
+    const guard = readFileSync(path.resolve(__dirname, "prismaCliGuard.ts"), "utf8");
+    expect(guard).toContain("const platform = input.platform ?? process.platform;");
   });
 });
 
