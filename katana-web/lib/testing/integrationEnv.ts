@@ -141,6 +141,11 @@ export function prepareIntegrationEnv(input: {
   return { childEnv, target, droppedKeys };
 }
 
+/** 許可リスト（inheritAllowedEnv が引き継ぐ名前）に入っているか。schemaDiff 用の設定ファイルが、CLI のプロセスの環境変数を照合するときに使う */
+export function isInheritedEnvKey(key: string): boolean {
+  return INHERITED_ENV_KEYS.has(key) || INHERITED_ENV_PATTERN.test(key);
+}
+
 /**
  * 親の環境変数のうち、許可リストのものだけを取り出す。runner と testdb-migrate の子プロセスで共通に使う。
  * PG*・DOTENV_*・NODE_OPTIONS・DATABASE_URL・PRISMA_* などは、すべて droppedKeys（名前順）に入る。
@@ -150,7 +155,7 @@ export function inheritAllowedEnv(parentEnv: EnvSource): { inherited: Record<str
   const droppedKeys: string[] = [];
   for (const [key, value] of Object.entries(parentEnv)) {
     if (value === undefined) continue;
-    if (INHERITED_ENV_KEYS.has(key) || INHERITED_ENV_PATTERN.test(key)) inherited[key] = value;
+    if (isInheritedEnvKey(key)) inherited[key] = value;
     else droppedKeys.push(key);
   }
   return { inherited, droppedKeys: droppedKeys.sort() };

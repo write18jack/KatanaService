@@ -2,10 +2,15 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildSchemaDiffCliArgs,
   type PrismaCliGuardErrorCode,
   type PrismaCliGuardInput,
   PrismaCliGuardError,
+  type PrismaCliReadOnlyGuardInput,
   resolvePrismaCliDatabaseTarget,
+  resolvePrismaCliReadOnlyTarget,
+  SCHEMA_DIFF_RO_URL_SHA256_ENV,
+  schemaDiffUrlSha256,
 } from "./prismaCliGuard";
 
 /** 純粋関数の単体テスト（DBに接続せず、Prisma CLI も prisma.config.ts も読み込まない）。URLはすべてダミー値 */
@@ -210,5 +215,166 @@ describe("prisma.config.ts（ソースの静的確認。読み込みはしない
   it("ガードは defineConfig より前（モジュールの読み込み時）に実行される", () => {
     expect(source.indexOf("resolvePrismaCliDatabaseTarget(")).toBeGreaterThan(-1);
     expect(source.indexOf("resolvePrismaCliDatabaseTarget({")).toBeLessThan(source.indexOf("export default defineConfig("));
+  });
+});
+
+// ---- schemaDiff 用（resolvePrismaCliReadOnlyTarget。Step 3-12B-5E-9A-9-2） ----
+
+const RO_PASSWORD = "cli_dummy_ro_password_0123456789abcdef";
+const RO_URL = `postgresql://katana_test_ro:${RO_PASSWORD}@127.0.0.1:5434/katana_test`;
+const CWD = "/fake/katana-web";
+const RO_SECRETS = [PASSWORD, ADMIN_PASSWORD, DEV_PASSWORD, RO_PASSWORD, TEST_URL, DEV_URL, RO_URL, "postgresql://", "postgres://"];
+
+function readOnlyInput(o: { env?: Record<string, string | undefined>; argv?: string[]; cwd?: string; testEnv?: Record<string, string> | undefined; roEnv?: Record<string, string | undefined> | undefined; devEnv?: Record<string, string> } = {}) {
+  const readTestEnv = vi.fn(() => ("testEnv" in o ? o.testEnv : testEnvFor()));
+  const readReadOnlyEnv = vi.fn(() => ("roEnv" in o ? o.roEnv : { KATANA_TEST_RO_DATABASE_URL: RO_URL, KATANA_TEST_DB_RO_PASSWORD: RO_PASSWORD }));
+  const readDevelopmentEnv = vi.fn(() => o.devEnv ?? { DATABASE_URL: DEV_URL });
+  const input: PrismaCliReadOnlyGuardInput = {
+    env: {
+      PATH: "/usr/bin",
+      HOME: "/home/u",
+      CHECKPOINT_DISABLE: "1",
+      CI: "1",
+      RUST_LOG: "error",
+      RUST_BACKTRACE: "0",
+      KATANA_DB_TARGET: "test-readonly",
+      [SCHEMA_DIFF_RO_URL_SHA256_ENV]: schemaDiffUrlSha256(RO_URL),
+      ...o.env,
+    },
+    argv: o.argv ?? ["/usr/local/bin/node", ...buildSchemaDiffCliArgs(CWD)],
+    cwd: o.cwd ?? CWD,
+    readTestEnv,
+    readReadOnlyEnv,
+    readDevelopmentEnv,
+  };
+  return { input, readTestEnv, readReadOnlyEnv };
+}
+
+function expectReadOnlyRejected(input: PrismaCliReadOnlyGuardInput, code: PrismaCliGuardErrorCode, targetCode?: string) {
+  let caught: unknown;
+  try {
+    resolvePrismaCliReadOnlyTarget(input);
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(PrismaCliGuardError);
+  const error = caught as PrismaCliGuardError;
+  expect(error.code).toBe(code);
+  if (targetCode) expect(error.targetCode).toBe(targetCode);
+  for (const text of [error.message, String(error)]) for (const secret of RO_SECRETS) expect(text).not.toContain(secret);
+  return error;
+}
+
+describe("resolvePrismaCliReadOnlyTarget：schemaDiff 専用（katana_test_ro だけ）", () => {
+  it("固定のコマンド・許可リストの環境変数・固定の値・検証済みの URL の SHA-256 がそろえば、.env.test.readonly の URL を返す", () => {
+    const { input } = readOnlyInput();
+    expect(resolvePrismaCliReadOnlyTarget(input)).toEqual({ mode: "test-readonly", url: RO_URL });
+  });
+
+  it.each([undefined, "test", "TEST-READONLY", "test-readonly "])("KATANA_DB_TARGET=%j は拒否する（ファイルを読まない）", (value) => {
+    const { input, readTestEnv, readReadOnlyEnv } = readOnlyInput({ env: { KATANA_DB_TARGET: value } });
+    expectReadOnlyRejected(input, "TARGET_INVALID");
+    expect(readTestEnv).not.toHaveBeenCalled();
+    expect(readReadOnlyEnv).not.toHaveBeenCalled();
+  });
+
+  it("既存の resolvePrismaCliDatabaseTarget（prisma.config.ts）は test-readonly を受け付けない（取り違えても接続しない）", () => {
+    expectRejected(testModeInput({ env: { KATANA_DB_TARGET: "test-readonly" } }).input, "TARGET_INVALID");
+  });
+
+  it("NODE_OPTIONS があれば拒否する（空文字でも）", () => {
+    expectReadOnlyRejected(readOnlyInput({ env: { NODE_OPTIONS: "" } }).input, "NODE_OPTIONS_PRESENT");
+  });
+
+  it.each([
+    ["migrate deploy", ["migrate", "deploy", "--config", `${CWD}/prisma.schemadiff.config.ts`]],
+    ["db push", ["db", "push", "--config", `${CWD}/prisma.schemadiff.config.ts`]],
+    ["db execute", ["db", "execute", "--stdin", "--config", `${CWD}/prisma.schemadiff.config.ts`]],
+    ["--script 付き", [...buildSchemaDiffCliArgs(CWD).slice(1), "--script"]],
+    ["--output 付き", [...buildSchemaDiffCliArgs(CWD).slice(1), "--output", "/tmp/x.sql"]],
+    ["--exit-code なし", buildSchemaDiffCliArgs(CWD).slice(1).filter((a) => a !== "--exit-code")],
+    ["dotenv_config_path 付き", [...buildSchemaDiffCliArgs(CWD).slice(1), "dotenv_config_path=.env"]],
+  ])("argv が固定の diff と違えば（%s）拒否する（ファイルを読まない）", (_label, rest) => {
+    const { input, readTestEnv } = readOnlyInput({ argv: ["/usr/local/bin/node", buildSchemaDiffCliArgs(CWD)[0], ...rest] });
+    expectReadOnlyRejected(input, "COMMAND_MISMATCH");
+    expect(readTestEnv).not.toHaveBeenCalled();
+  });
+
+  it("作業ディレクトリが違えば（別のチェックアウトの CLI・設定ファイル）拒否する", () => {
+    expectReadOnlyRejected(readOnlyInput({ cwd: "/other/katana-web" }).input, "COMMAND_MISMATCH");
+  });
+
+  it.each(["DATABASE_URL", "PRISMA_SCHEMA_ENGINE_BINARY", "PRISMA_MIGRATION_ENGINE_BINARY", "DEBUG", "FORCE_PANIC_SCHEMA_ENGINE", "KATANA_TEST_RO_DATABASE_URL", "npm_config_userconfig", "PGHOST"])(
+    "許可リストにない環境変数 %s があれば拒否する（名前だけを表示する）",
+    (key) => {
+      const error = expectReadOnlyRejected(readOnlyInput({ env: { [key]: RO_URL } }).input, "ENV_NOT_ALLOWED");
+      expect(error.message).toContain(key);
+    },
+  );
+
+  it.each([
+    ["CHECKPOINT_DISABLE", undefined],
+    ["CHECKPOINT_DISABLE", "0"],
+    ["CI", "false"],
+    ["RUST_LOG", "info"],
+    ["RUST_LOG", "debug"],
+    ["RUST_BACKTRACE", "1"],
+  ])("固定の値でなければ拒否する（%s=%j）", (key, value) => {
+    expectReadOnlyRejected(readOnlyInput({ env: { [key]: value } }).input, "ENV_NOT_FIXED");
+  });
+
+  it(".env.test・.env.test.readonly がなければ拒否する", () => {
+    expectReadOnlyRejected(readOnlyInput({ testEnv: undefined }).input, "TEST_ENV_MISSING");
+    expectReadOnlyRejected(readOnlyInput({ roEnv: undefined }).input, "READ_ONLY_ENV_MISSING");
+  });
+
+  it.each([
+    ["katana_test_user", RO_URL.replace("katana_test_ro", "katana_test_user"), "USER_NOT_ALLOWED"],
+    ["開発用DB", DEV_URL, "PORT_NOT_ALLOWED"],
+    ["ほかのホスト", RO_URL.replace("127.0.0.1", "db.example.com"), "HOST_NOT_ALLOWED"],
+    ["?schema= 付き", `${RO_URL}?schema=other`, "QUERY_NOT_ALLOWED"],
+  ])(".env.test.readonly の URL が %s なら拒否する", (_label, url, targetCode) => {
+    const roEnv = { KATANA_TEST_RO_DATABASE_URL: url, KATANA_TEST_DB_RO_PASSWORD: RO_PASSWORD };
+    expectReadOnlyRejected(readOnlyInput({ roEnv, env: { [SCHEMA_DIFF_RO_URL_SHA256_ENV]: schemaDiffUrlSha256(url) } }).input, "READ_ONLY_TARGET_REJECTED", targetCode);
+  });
+
+  it("katana_test_ro の認証情報が不正なら拒否する（パスワードの使い回し・短い・余分なキー）", () => {
+    const reused = { KATANA_TEST_RO_DATABASE_URL: RO_URL.replace(RO_PASSWORD, `${PASSWORD}_0123456789abcdefghij`), KATANA_TEST_DB_RO_PASSWORD: `${PASSWORD}_0123456789abcdefghij` };
+    const reusedInput = readOnlyInput({ roEnv: reused, testEnv: { ...testEnvFor(TEST_URL.replace(PASSWORD, reused.KATANA_TEST_DB_RO_PASSWORD)), KATANA_TEST_DB_PASSWORD: reused.KATANA_TEST_DB_RO_PASSWORD } }).input;
+    expectReadOnlyRejected(reusedInput, "READ_ONLY_CREDENTIALS_REJECTED", "RO_PASSWORD_REUSED");
+    const short = { KATANA_TEST_RO_DATABASE_URL: RO_URL.replace(RO_PASSWORD, "short_pw"), KATANA_TEST_DB_RO_PASSWORD: "short_pw" };
+    expectReadOnlyRejected(readOnlyInput({ roEnv: short }).input, "READ_ONLY_CREDENTIALS_REJECTED", "RO_PASSWORD_TOO_SHORT");
+    const extra = { KATANA_TEST_RO_DATABASE_URL: RO_URL, KATANA_TEST_DB_RO_PASSWORD: RO_PASSWORD, DATABASE_URL: TEST_URL };
+    expectReadOnlyRejected(readOnlyInput({ roEnv: extra }).input, "READ_ONLY_CREDENTIALS_REJECTED", "RO_ENV_UNEXPECTED_KEY");
+  });
+
+  it(".env.test が不正（開発用DBと同じ接続先・パスワードの不一致）なら拒否する", () => {
+    expectReadOnlyRejected(readOnlyInput({ devEnv: { DATABASE_URL: TEST_URL } }).input, "TARGET_REJECTED", "MATCHES_DEVELOPMENT_DATABASE");
+    expectReadOnlyRejected(readOnlyInput({ testEnv: { ...testEnvFor(), KATANA_TEST_DB_PASSWORD: "x" } }).input, "CREDENTIALS_REJECTED");
+  });
+
+  it("URL の SHA-256 が runner の値と違えば・なければ・形式が違えば拒否する（runner が検証したのと別の URL を使わない）", () => {
+    for (const value of [undefined, "", schemaDiffUrlSha256(TEST_URL), schemaDiffUrlSha256(RO_URL).toUpperCase(), "0".repeat(64)]) {
+      expectReadOnlyRejected(readOnlyInput({ env: { [SCHEMA_DIFF_RO_URL_SHA256_ENV]: value } }).input, "READ_ONLY_URL_MISMATCH");
+    }
+  });
+});
+
+describe("prisma.schemadiff.config.ts（ソースの静的確認。読み込みはしない）", () => {
+  const source = readFileSync(path.resolve(__dirname, "../../prisma.schemadiff.config.ts"), "utf8");
+  const codeOnly = source.replace(/^\s*\/\/.*$/gm, "");
+
+  it("dotenv/config を読み込まず、ガードの結果の URL だけを使う。migrations・shadowDatabaseUrl・env() は使わない", () => {
+    expect(codeOnly).not.toContain("dotenv");
+    expect(codeOnly).toContain("resolvePrismaCliReadOnlyTarget({");
+    expect(codeOnly).toContain("url: readOnlyTarget.url,");
+    for (const forbidden of ["shadowDatabaseUrl", "migrations", "env(", "DATABASE_URL", "resolvePrismaCliDatabaseTarget"]) expect(codeOnly).not.toContain(forbidden);
+    expect(codeOnly.indexOf("resolvePrismaCliReadOnlyTarget({")).toBeLessThan(codeOnly.indexOf("export default defineConfig("));
+  });
+
+  it("既存の prisma.config.ts は変えない（開発用・migration 用の経路）", () => {
+    const config = readFileSync(path.resolve(__dirname, "../../prisma.config.ts"), "utf8");
+    expect(config).not.toContain("resolvePrismaCliReadOnlyTarget");
+    expect(config).not.toContain("schemadiff");
   });
 });
