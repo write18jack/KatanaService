@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import {
   READ_ONLY_TEST_ENV_FILE,
@@ -736,20 +737,59 @@ describe("静的な確認（ソース）", () => {
     }
   });
 
-  it("13. スクリプトは固定のゲート SCHEMA_DIFF_DISABLED を渡す（引数・環境変数から決めない）。runner は承認済みの固定の文字列との一致だけで判定する", () => {
+  it("13. スクリプトは固定のゲートを、一時的に有効の固定値 { mode: \"enabled-ro-schema-diff\" } で渡す（Step 3-12B-5E-9A-9-5。Step 9-8 で SCHEMA_DIFF_DISABLED に戻し、このテストも戻す）。引数・環境変数から決めない。runner は承認済みの固定の文字列との一致だけで判定する", () => {
+    // 実際の access の設定を構文木で確かめる（コメントの中の文字列は数えない）
+    const source = readFileSync(path.join(REPO_ROOT, "scripts/testdb-schema-diff.mts"), "utf8");
+    const file = ts.createSourceFile("testdb-schema-diff.mts", source, ts.ScriptTarget.Latest, true);
+    const nameOf = (node: ts.ObjectLiteralElementLike) => (node.name !== undefined && ts.isIdentifier(node.name) ? node.name.text : undefined);
+    const runnerCalls: ts.CallExpression[] = [];
+    const accessProperties: ts.ObjectLiteralElementLike[] = [];
+    const disabledIdentifiers: ts.Identifier[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "runTestDbSchemaDiff") runnerCalls.push(node);
+      if (ts.isObjectLiteralElementLike(node) && nameOf(node) === "access") accessProperties.push(node);
+      if (ts.isIdentifier(node) && node.text === "SCHEMA_DIFF_DISABLED") disabledIdentifiers.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    // runner の呼び出しは1つだけで、引数はオブジェクトリテラル1つ（スプレッドで access を上書きできない）
+    expect(runnerCalls).toHaveLength(1);
+    expect(runnerCalls[0].arguments).toHaveLength(1);
+    const options = runnerCalls[0].arguments[0];
+    if (!ts.isObjectLiteralExpression(options)) throw new Error("the runner options must be an object literal");
+    expect(options.properties.filter(ts.isSpreadAssignment)).toHaveLength(0);
+    // access の設定は、ファイル全体でこの1か所だけ
+    const access = options.properties.filter((p) => nameOf(p) === "access");
+    expect(access).toHaveLength(1);
+    expect(accessProperties).toEqual(access);
+    // 値は、mode だけを持つオブジェクトリテラルで、mode は文字列リテラル "enabled-ro-schema-diff"（変数・式・型の変換・テンプレートではない）
+    const [accessProperty] = access;
+    if (!ts.isPropertyAssignment(accessProperty)) throw new Error("access must be a plain property assignment");
+    const value = accessProperty.initializer;
+    if (!ts.isObjectLiteralExpression(value)) throw new Error("access must be an object literal");
+    expect(value.properties).toHaveLength(1);
+    const [mode] = value.properties;
+    if (!ts.isPropertyAssignment(mode) || nameOf(mode) !== "mode") throw new Error("access must have only the mode property");
+    if (!ts.isStringLiteral(mode.initializer)) throw new Error("access.mode must be a string literal");
+    expect(mode.initializer.text).toBe("enabled-ro-schema-diff");
+    // SCHEMA_DIFF_DISABLED は使わない（import もしない）。有効の値はコードの中でこの1か所だけ
+    expect(disabledIdentifiers).toHaveLength(0);
     const script = code("scripts/testdb-schema-diff.mts");
-    expect(script).toMatch(/^ {2}access: SCHEMA_DIFF_DISABLED,$/m);
-    expect(script.match(/SCHEMA_DIFF_DISABLED/g)).toHaveLength(2);
+    expect(script.match(/SCHEMA_DIFF_DISABLED/g)).toBeNull();
+    expect(script.match(/enabled-ro-schema-diff/g)).toHaveLength(1);
     expect(script.match(/process\.argv/g)).toHaveLength(1);
     expect(script.match(/process\.env/g)).toHaveLength(1);
     expect(script).toContain("  argv: process.argv.slice(2),");
     expect(script).toContain("  parentEnv: process.env,");
-    expect(script).not.toMatch(/enabled-ro-schema-diff/);
     const runner = code("lib/testing/testDbSchemaDiffRunner.ts");
     expect(runner).toContain('const gateEnabled = deps.access.mode === "enabled-ro-schema-diff";');
     expect(runner.match(/enabled-ro-schema-diff/g)).toHaveLength(1);
-    // migration 用のゲートは変えない
+    // migration 用のゲートは変えない。ほかの固定のゲート（checksum・catalog・ro-role の作成と補完）も無効のまま
     expect(code("scripts/testdb-migrate.mts")).toMatch(/^ {2}liveDatabase: LIVE_DATABASE_DISABLED,$/m);
+    expect(code("scripts/testdb-checksums.mts")).toMatch(/^ {2}checksumDatabase: CHECKSUM_DATABASE_DISABLED,$/m);
+    expect(code("scripts/testdb-catalog.mts")).toMatch(/^ {2}catalogDatabase: CATALOG_AUDIT_DATABASE_DISABLED,$/m);
+    expect(code("scripts/testdb-ro-role.mts")).toMatch(/^ {2}createGate: RO_ROLE_CREATE_DISABLED,$/m);
+    expect(code("scripts/testdb-ro-role.mts")).toMatch(/^ {2}grantSyncGate: RO_ROLE_GRANT_SYNC_DISABLED,$/m);
   });
 
   it("スクリプトの起動は shell なし・detached・プロセスグループへのシグナル（-pgid）だけ", () => {

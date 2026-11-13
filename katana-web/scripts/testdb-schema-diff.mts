@@ -2,11 +2,12 @@
  * Prisma schema とテストDBの定義の差分の検証（schemaDiff。Step 3-12B-5E-9A-9-2。方式A：Prisma CLI と専用の設定ファイル）。
  *
  *   npm run testdb:schema-diff                 … 予行（引数なし）。事前の検証と、実行予定のコマンドの表示だけ（Docker・DB・Prisma CLI に触れない）
- *   node scripts/testdb-schema-diff.mts --live … 実行の意思表示。固定のゲートが無効なので、今は Docker・DB・Prisma CLI に触れる前に
- *                                                SCHEMA_DIFF_LIVE_DISABLED で止まる
+ *   node scripts/testdb-schema-diff.mts --live … 実行の意思表示。固定のゲートは一時的に有効（Step 3-12B-5E-9A-9-5）なので、--live は
+ *                                                ランナーの検証を通れば Prisma CLI の起動まで進む（実行は別の承認を得てから。Step 9-6）
  *
  * 手順と検証の内容は lib/testing/testDbSchemaDiffRunner.ts・lib/testing/schemaDiff.ts。このファイルは、実際の入出力をつなぐだけ。
- * ゲートは固定の SCHEMA_DIFF_DISABLED（環境変数・引数では変えられない）。有効にするのは、承認を得た後続の工程で、このファイルを変えたときだけ。
+ * ゲートは固定の値（環境変数・引数では変えられない）。今は一時的に有効の固定値 { mode: "enabled-ro-schema-diff" }（Step 3-12B-5E-9A-9-5）で、
+ * Step 9-8 で SCHEMA_DIFF_DISABLED に戻す予定。変えるのは、承認を得た工程で、このファイルを変えたときだけ。ゲートの有効化と実行（--live）は、別々に承認を得る。
  *
  * Prisma CLI の起動（createSchemaDiffSpawnCapture）は、shell なし・新しいプロセスグループ（detached）・標準入力なし。
  * タイムアウトでは、CLI と、CLI が起動した schema engine をプロセスグループごと止める。出力は伏せてから表示する。
@@ -23,7 +24,6 @@ import { IntegrationRunnerError, readEnvFile } from "../lib/testing/integrationE
 import {
   createSchemaDiffInterruptController,
   createSchemaDiffSpawnCapture,
-  SCHEMA_DIFF_DISABLED,
   SCHEMA_DIFF_INTERRUPT_DEADLINE_MS,
   SchemaDiffError,
 } from "../lib/testing/schemaDiff.ts";
@@ -77,8 +77,9 @@ runTestDbSchemaDiff({
   pathExists: existsSync,
   readBinary: (absolutePath) => readFileSync(absolutePath),
   loadExpectation: () => loadCatalogAuditExpectation(ROOT),
-  // schemaDiff の実DB・Docker・Prisma CLI への到達の許可は無効（固定）。--live でも、Docker の読み取り・DBへの接続・CLI の起動の前に止まる
-  access: SCHEMA_DIFF_DISABLED,
+  // schemaDiff の実DB・Docker・Prisma CLI への到達の許可は、一時的に有効（固定。Step 3-12B-5E-9A-9-5。Step 9-8 で SCHEMA_DIFF_DISABLED に戻す）。
+  // 引数なし（予行）では、これまでどおり Docker・DB・CLI に触れない。--live のときだけ、ランナーの検証の後で D1 以降に進む
+  access: { mode: "enabled-ro-schema-diff" },
   readDockerIdentity: (input) => readTestDbDockerIdentity({ ...input, run: runDockerCommand }),
   inspectDatabase: (input) => createTestDatabaseInspector({ root: ROOT, connect: connectTestDatabase })(input),
   runAudit: (input) => runCatalogDefinitionAudit({ ...input, connect: connectTestDatabase }),
