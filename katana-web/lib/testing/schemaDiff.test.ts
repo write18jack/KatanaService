@@ -737,7 +737,7 @@ describe("静的な確認（ソース）", () => {
     }
   });
 
-  it("13. スクリプトは固定のゲートを、一時的に有効の固定値 { mode: \"enabled-ro-schema-diff\" } で渡す（Step 3-12B-5E-9A-9-6D で再び有効にした。Step 9-8 で SCHEMA_DIFF_DISABLED に戻し、このテストも戻す）。引数・環境変数から決めない。runner は承認済みの固定の文字列との一致だけで判定する", () => {
+  it("13. スクリプトは固定のゲート SCHEMA_DIFF_DISABLED を渡す（Step 3-12B-5E-9A-9-8A で最終的に無効に戻した）。引数・環境変数から決めない。runner は承認済みの固定の文字列との一致だけで判定する", () => {
     // 実際の access の設定を構文木で確かめる（コメントの中の文字列は数えない）
     const source = readFileSync(path.join(REPO_ROOT, "scripts/testdb-schema-diff.mts"), "utf8");
     const file = ts.createSourceFile("testdb-schema-diff.mts", source, ts.ScriptTarget.Latest, true);
@@ -762,21 +762,29 @@ describe("静的な確認（ソース）", () => {
     const access = options.properties.filter((p) => nameOf(p) === "access");
     expect(access).toHaveLength(1);
     expect(accessProperties).toEqual(access);
-    // 値は、mode だけを持つオブジェクトリテラルで、mode は文字列リテラル "enabled-ro-schema-diff"（変数・式・型の変換・テンプレートではない）
+    // 値は識別子 SCHEMA_DIFF_DISABLED そのもの（オブジェクトリテラル・式・型の変換・条件ではない）
     const [accessProperty] = access;
     if (!ts.isPropertyAssignment(accessProperty)) throw new Error("access must be a plain property assignment");
     const value = accessProperty.initializer;
-    if (!ts.isObjectLiteralExpression(value)) throw new Error("access must be an object literal");
-    expect(value.properties).toHaveLength(1);
-    const [mode] = value.properties;
-    if (!ts.isPropertyAssignment(mode) || nameOf(mode) !== "mode") throw new Error("access must have only the mode property");
-    if (!ts.isStringLiteral(mode.initializer)) throw new Error("access.mode must be a string literal");
-    expect(mode.initializer.text).toBe("enabled-ro-schema-diff");
-    // SCHEMA_DIFF_DISABLED は使わない（import もしない）。有効の値はコードの中でこの1か所だけ
-    expect(disabledIdentifiers).toHaveLength(0);
+    if (!ts.isIdentifier(value)) throw new Error("access must be the SCHEMA_DIFF_DISABLED identifier");
+    expect(value.text).toBe("SCHEMA_DIFF_DISABLED");
+    // SCHEMA_DIFF_DISABLED は lib/testing/schemaDiff.ts から別名なしで import したもの。出現は import と access の2か所だけ（同名の宣言で置き換えられない）
+    const importSpecifiers = file.statements
+      .filter(ts.isImportDeclaration)
+      .filter((d) => ts.isStringLiteral(d.moduleSpecifier) && d.moduleSpecifier.text === "../lib/testing/schemaDiff.ts")
+      .flatMap((d) => (d.importClause?.namedBindings && ts.isNamedImports(d.importClause.namedBindings) ? [...d.importClause.namedBindings.elements] : []))
+      .filter((e) => e.name.text === "SCHEMA_DIFF_DISABLED");
+    expect(importSpecifiers).toHaveLength(1);
+    expect(importSpecifiers[0].propertyName).toBeUndefined();
+    expect(importSpecifiers[0].isTypeOnly).toBe(false);
+    expect(disabledIdentifiers).toHaveLength(2);
+    expect(disabledIdentifiers).toContain(importSpecifiers[0].name);
+    expect(disabledIdentifiers).toContain(value);
+    // 有効の値は、スクリプトのコードのどこにもない
     const script = code("scripts/testdb-schema-diff.mts");
-    expect(script.match(/SCHEMA_DIFF_DISABLED/g)).toBeNull();
-    expect(script.match(/enabled-ro-schema-diff/g)).toHaveLength(1);
+    expect(script).toMatch(/^ {2}access: SCHEMA_DIFF_DISABLED,$/m);
+    expect(script.match(/SCHEMA_DIFF_DISABLED/g)).toHaveLength(2);
+    expect(script).not.toMatch(/enabled-ro-schema-diff/);
     expect(script.match(/process\.argv/g)).toHaveLength(1);
     expect(script.match(/process\.env/g)).toHaveLength(1);
     expect(script).toContain("  argv: process.argv.slice(2),");
