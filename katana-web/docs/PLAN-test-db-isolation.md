@@ -2905,6 +2905,117 @@ npm run test:integration ─► 専用runner
 12. 保存されたパスワードそのものは確かめられない。根拠は、ro でのログインが成功したことだけ。
 13. 解消したこと：固定 SQL の中の検査、Unix ソケットの trust 認証、SCRAM の検証子がそのまま保存されること、aclitem の表記、ro による pg_shdepend の読み取り（どれも工程6で、実DBで動作した）。PostgreSQL 15 に依存する期待値（5E-7A-3 で実DBと一致した）。
 
+#### Step 3-12B-5E-9A：Prisma CLI による schemaDiff（実施済み。2026-11-13〜2026-11-15。最終の commit は `241d7d8`）
+
+上の「次工程の方針：Prisma CLI による schemaDiff の安全設計の確認」は、この Step で実施した。工程ごとの結果は次のとおり（日時は UTC）。
+
+| 工程 | 内容 | 結果 | commit |
+|---|---|---|---|
+| 9-0 | Prisma 7.2.0 の CLI と schema engine（engines の commit `0c8ef2ce…`）の公開ソースの静的調査 | 方式B（engine の RPC `diff` に標準入力で URL を渡す）は条件付きで成立するが、7.2.0 の CLI が使っていない deprecated の API（`UrlContainer`）に依存する。diff の経路で DB を変え得るのは、`public` スキーマがないときの `CREATE SCHEMA` だけで、ro では権限不足で失敗する。推奨は方式A。公開ソースは Web の取得ツールの要約で読んだ（全文の目視照合はしていない） | なし |
+| 9-1 | 方式の決定（ユーザーの決定） | **方式A（Prisma CLI ＋ 専用の設定ファイル）を採用。** 方式Bは不採用。argv・環境変数への認証情報の露出は、ローカルの専用テストDBと `katana_test_ro` に限った残余リスクとして受け入れる。本番DB・開発用DBへの適用は承認しない | なし |
+| 9-2 | ガード・runner の実装、モックテスト、静的検査 | 15ファイル・1,448件が成功。判定を16か所壊すと16件とも失敗。設計からの変更：URL を子プロセスの環境変数に入れない（SHA-256 だけを渡す）、`RUST_LOG=error`・`RUST_BACKTRACE=0` に固定、旧 `schemaDiff.ts` の手順（`katana_test_user` で接続する前提のもの）を削除 | なし（9-3B で commit） |
+| 9-3A | SIGINT・SIGTERM の処理の追加とレビュー | 判定 `interrupted`・`cleanup-failed` を追加（終了コード1）。中断の後の事後の検査に60秒の期限。`spawnCapture` が例外を投げたときは `cleanup-failed`。15ファイル・1,488件が成功。中断処理を18か所壊すと18件とも失敗 | なし（9-3B で commit） |
+| 9-3B | 2件の commit | ガード・設定ファイル（commit 1）と、runner・部品・スクリプト（commit 2）。commit 1 だけの状態でも型検査と17ファイル・1,334件が成功 | `95b7a6d`・`d16ad0e` |
+| 9-4 | テストの件数の差の調査と、実DBの読み取り専用の事前検証 | 件数の差は、実行したファイルの組み合わせの違いだった（共通13ファイル1,195件。9-3Aだけの2ファイル293件、9-3Bだけの5ファイル238件。合わせた20ファイル・1,726件はすべて成功で、スキップ・欠落なし）。`testdb:status`・`testdb:identity`・`testdb:verify`・`testdb:ro-role:verify-created`・schemaDiff の予行がすべて成功し、事後の再実行の出力は事前と同一 | なし |
+| 9-5 | schemaDiff ゲートの一時有効化 | 最初は、静的テスト13がゲートの無効を固定で求めていたため、commit せずに停止した。対象を2ファイル（スクリプトとテスト13）に広げる承認を得て再開。テスト13は、構文木で `access` の実際の値を確かめる形にした（7種類の壊し方ですべて失敗） | `9e1c751` |
+| 9-6 | `--live` の1回目（2026-11-13T15:12:03Z〜15:12:05Z） | **`cli-failed`（終了コード1）。** Prisma CLI が専用の設定ファイルを読み込む段階で、設定ファイルのガードが `ENV_NOT_ALLOWED`（`__CF_USER_TEXT_ENCODING`）を出して止まった。macOS は、環境変数を空にして起動したプロセスにもこの変数を付け加える（`env -i` で確認）。事前の D1〜D2 と事後の D3・F2・FP2・R2 はすべて成功。残ったプロセスなし。schema engine は起動していないと考えられるが、直接は確認していない | なし |
+| 9-6A | ゲートの無効化 | テスト13を、構文木で無効の値（別名なしの import）を確かめる形に戻した（6種類の壊し方ですべて失敗） | `7777587` |
+| 9-6B | macOS の環境変数への対応とモックテスト | `lib/db/prismaCliGuard.ts` だけを変更（下の「実装の構成」）。実機で観測した値の形式は、大文字の16進数3つ。テストを32件追加（20ファイル・1,758件が成功）。判定を9種類壊すとすべて失敗 | なし（9-6C で commit） |
+| 9-6C | レビューと commit | 9-6 と同じ子プロセスの環境変数で、変更前のガードは `ENV_NOT_ALLOWED`、変更後は受理することを、Prisma CLI を起動せずに確かめた。レビューでの指摘：テストの値の1つが、この Mac で実際に付く値と同じだったので、実機と一致しない値に差し替えた | `93b42b6` |
+| 9-6D | ゲートの再有効化 | スクリプトのコードは `9e1c751` と同じ（コメントだけが違う）。テスト13は `9e1c751` の内容に戻した（6種類の壊し方ですべて失敗） | `e65abfc` |
+| 9-6E | `--live` の2回目（2026-11-14T14:12:35Z〜14:12:37Z） | **`no-diff`（終了コード0）。** 下の「実DBでの schemaDiff の結果」 | なし |
+| 9-7 | 独立した読み取り専用の事後検証 | 4つのコマンドがすべて成功し、出力は 9-4 と同一。下の「独立した事後検証」 | なし |
+| 9-8A | ゲートの最終的な無効化 | スクリプトのコードは `7777587` と同じ（コメントだけが違う）。テスト13は `7777587` の内容に戻した（6種類の壊し方ですべて失敗） | `241d7d8` |
+
+#### schemaDiff の実装の構成（Step 3-12B-5E-9A）
+
+- **`prisma.schemadiff.config.ts`**：schemaDiff 専用の Prisma の設定ファイル。`dotenv/config` を読み込まない。モジュールの読み込み時に `resolvePrismaCliReadOnlyTarget` を呼び、ガードを通った `katana_test_ro` の URL だけを datasource に使う。`platform` は渡さない。既存の `prisma.config.ts`（開発用・migration 用の経路）は変えていない。
+- **`lib/db/prismaCliGuard.ts` の `resolvePrismaCliReadOnlyTarget`**：Prisma CLI のプロセスの中で、次の順に確かめる。1つでも外れたら例外を投げ、CLI は接続せずに終わる。メッセージには URL・パスワード・値を含めない。
+  1. `KATANA_DB_TARGET=test-readonly`（既存の `prisma.config.ts` はこの値を `TARGET_INVALID` で拒否する）
+  2. `NODE_OPTIONS` がない
+  3. argv が、固定の `migrate diff --from-config-datasource --to-schema <schema.prisma> --exit-code --config <prisma.schemadiff.config.ts>` と完全に一致する
+  4. 環境変数の名前が許可リストだけ（`DATABASE_URL`・`PRISMA_*`・`DEBUG`・`PG*` などは拒否）。darwin だけ `__CF_USER_TEXT_ENCODING` を名前の完全一致で許し、値が `0x` 付きの大文字の16進数3つ（各1〜8桁、32文字以下）でなければ `ENV_VALUE_INVALID`（`.env` を読む前。値は表示しない）。`__CF_*`・`CF_*` の前方一致は許さない。`platform` は省略時に `process.platform`
+  5. 固定の値：`CHECKPOINT_DISABLE=1`・`CI=1`・`RUST_LOG=error`・`RUST_BACKTRACE=0`
+  6. `.env.test` と `.env.test.readonly` を既存のガードで検証する（`katana_test_ro`・ループバック・5434・`katana_test`・クエリなし・開発用DBと別・パスワードの使い回しなし）
+  7. `.env.test.readonly` の URL の SHA-256 が、runner の渡した値と一致する
+- **`lib/testing/schemaDiff.ts`**：部品。固定のコマンドの組み立てと照合（diff 以外のコマンド・`--script`・`--output`・書き込み系を拒否）、子プロセスの環境変数（runner の許可リストと固定の値だけ。URL は入れない）、CLI・engine の SHA-256 の照合、プロセスグループごとの起動（shell なし・detached・標準入力なし）とタイムアウト（120秒。SIGTERM → 猶予 → SIGKILL）、中断の受け付け、出力の伏せ字、終了コードの分類（0 `no-diff`・1 `cli-error`・2 `diff`）、固定ゲート `SCHEMA_DIFF_DISABLED`。
+- **`lib/testing/testDbSchemaDiffRunner.ts`**：手順と最終判定。引数は「なし」（予行）か `--live` だけ。予行は、ゲートに関わらず Docker・DB・子プロセスに触れない。`--live` でも、ゲートが無効なら Docker・DB に触れる前に `SCHEMA_DIFF_LIVE_DISABLED` で止まる。手順は次のとおり。
+  - 事前の検証（ファイルの読み取り、CLI・engine の SHA-256）→ D1（Docker の識別）→ F1（状態 C・本人確認）→ FP1（カタログの監査と fingerprint）→ A1（ACL）→ R1（`katana_test_ro` 本人の権限）→ D2（D1 と一致）→ CLI・engine の SHA-256 の再照合 → Prisma CLI の起動
+  - CLI の後は、成否にかかわらず D3・F2・FP2（FP1 と一致）・R2 をすべて試す
+  - 判定の優先順は `post-check-failed` → `cleanup-failed` → `interrupted` → CLI の結果。`no-diff` 以外では「DB が変わっていないことは保証しない」と表示する
+  - 中断（SIGINT・SIGTERM）は、CLI の起動前なら起動せずに止め、起動後ならプロセスグループを止めて終了を確かめ、事後の検査を試す（判定は `interrupted`）。中断の後の事後の検査は60秒が上限。2回目の中断か上限を超えたら、グループに SIGKILL を送って終了コード1で終わる
+- **`scripts/testdb-schema-diff.mts`**：実際の入出力をつなぐだけ。固定ゲート（今は `SCHEMA_DIFF_DISABLED`）を渡し、最初に SIGINT・SIGTERM の受け付けを登録する。npm のスクリプトは予行の `testdb:schema-diff` だけで、`--live` 付きはない。
+- **関連テスト**：`lib/db/prismaCliGuard.test.ts`（115件）、`lib/testing/schemaDiff.test.ts`（テスト13：構文木でゲートの値と他の5つのゲートの無効を確かめる）、`lib/testing/testDbSchemaDiffRunner.test.ts`、`testDbCatalogAudit.test.ts`・`dbConnectionPaths.test.ts`（呼んでよいモジュール・接続経路の静的検査）。確認に使った20ファイルで1,758件（2026-11-15 時点）。
+
+#### 実DBでの schemaDiff の結果（Step 3-12B-5E-9A-9-6E）
+
+- **9-6（2026-11-13）と 9-6E（2026-11-14）は別の実行。** 9-6 は `cli-failed` で、比較は行われていない。以下は 9-6E の結果。
+- `--live` の実行は1回、Prisma CLI の起動は1回。再実行・Prisma CLI の直接の実行はしていない。
+- 実行前の確認：Git の状態、ゲート、`.env*`・compose・設定ファイルのハッシュ（9-5 のときと同じ）、`testdb:identity`（9-4 と同一）、予行（CLI・engine の SHA-256 の照合を含む）が、すべて成功。
+- Prisma CLI の終了コードは0、判定は **`no-diff`**。事前の D1・F1・FP1・A1・R1・D2 と、事後の D3・F2・FP2・R2 がすべて成功し、検査の範囲で DB の状態の変化は検出されなかった。中断・タイムアウトはなく、実行の後に Prisma CLI・schema engine のプロセスは残っていない。出力に `.env*` の秘密の値（9つを照合）と `postgres://` は含まれなかった。
+- **「差分なし」は、Prisma が比較できる範囲だけ。** 比較する：テーブル、列の型（ネイティブ型の引数を含む）、NULL 可否、既定値（例外あり）、autoincrement、主キー、外部キー（列・参照先・ON DELETE/UPDATE・名前）、インデックス（列・順序・ソート・長さ・一意・アルゴリズム・opclass・名前）、拡張機能。比較しない：`_prisma_migrations` と PostGIS のテーブル、列の順序、collation、identity・generated の詳細、CHECK・EXCLUDE の式、部分インデックスの条件、INCLUDE 列、NULLS NOT DISTINCT、一意制約と一意インデックスの違い、NOT VALID、MATCH の種類、所有者と ACL。DateTime の値の既定値と一部の JSON の既定値は同じとみなされる。DEFERRABLE・コメント・enum の値を比較するかは未確認。
+- **直接は観測していないこと：** schema engine の起動、`katana_test_ro` での接続、比較の SQL の実行。根拠は、`migrate diff --exit-code` が比較の結果が空のときだけ終了コード0を返すこと、設定ファイルのガードが返す接続先が `katana_test_ro` の URL だけであること、CLI の環境変数に別の接続先がないこと、からの推論（engine のプロセスや DB のセッションは確かめていない）。
+
+#### 独立した事後検証（Step 3-12B-5E-9A-9-7。2026-11-14）
+
+- 実行したコマンド（各1回）：`testdb:status`・`testdb:identity`・`testdb:verify`・`testdb:ro-role:verify-created`。4つとも成功し、出力は 9-4 と同一。`testdb:identity` は 9-6E の実行前とも同一。出力に `.env*` の秘密の値（9つを照合）と `postgres://` は含まれなかった。
+- 結果：コンテナ `katana-test-db`（稼働中・healthy、`127.0.0.1:5434` だけ、tmpfs、再起動0回、開発用コンテナなし）、本人確認（`katana_test`・`katana_test_user`・コメント `katana-test-db`）、状態 C（8件すべて適用済み、失敗・不足・余分・重複なし、テーブルは空）、カタログの監査 `passed`、`katana_test_ro` の属性・設定・ACL と実効権限（16テーブルの SELECT だけ）。
+- `testdb:identity` は Docker の識別情報だけを読む。DB の本人確認は `testdb:verify`、fingerprint は `testdb:ro-role:verify-created` で行う。
+
+| 項目 | 9-4 との比較 | 9-6E の runner の事後検査との比較 |
+|---|---|---|
+| Docker のコンテナの識別情報 | 一致 | 一致（9-6E の実行前の identity と同一。runner の D3 は D1 との一致で成功） |
+| DB の本人確認 | 一致 | 比較不能（runner は値を表示しない） |
+| 状態 C・migration の適用状態 | 一致 | 一致（F2 は状態 C で成功） |
+| カタログの監査 | 一致（`passed`） | 一致（`passed`） |
+| fingerprint（期待値と照合する14区分） | 一致（どちらも期待値と完全一致） | 比較不能（FP2 は FP1 との前後の比較だけで、値を表示しない） |
+| fingerprint（限定的な4区分） | 比較不能（実行ごとの不変条件と実行内の不変性だけで、実行をまたいだ値の比較はしていない） | 比較不能 |
+| ACL・ro の権限 | 一致 | 比較不能（R2 は成功の判定だけ。runner に A2 はない） |
+
+#### fingerprint の検証範囲（2026-11-15 時点）
+
+- **期待値との照合に成功した14区分：** database、dbRoleSettings、defaultPrivileges、enumValues、extensions、largeObjects、policies、roleMemberships、roles、routines、schemas、sequences、triggers、types。
+- **限定的な検証にとどまる4区分：** columns、constraints、indexes、relations。前後の不変性と一部の不変条件（上の「作成後の検証範囲と、schemaDiff への引き継ぎ」）は確かめたが、すべての値を期待値と照合してはいない。
+- **4区分の未確認の項目と、schemaDiff での扱い：**
+  - Prisma が比較する項目（列の型・NULL 可否・既定値、主キー・外部キー・インデックスの列と名前など）は、9-6E の `no-diff` を根拠にする（Prisma の比較の範囲で、実行した時点の結果）。
+  - カタログの監査で0件と確かめた項目（CHECK・EXCLUDE・制約トリガー、部分インデックス・式インデックス、行セキュリティ）、所有者と ACL（A1・カタログの監査）、enum の値と順序（enumValues）は、期待値と照合済み。
+  - 列の位置、collation、identity・generated の詳細、制約の DEFERRABLE・validated、インデックスの定義の細部は、FP1・FP2 の前後の比較だけで、期待値とは照合していない（未確認）。
+
+#### 残余リスク（Step 3-12B-5E-9A の後。2026-11-15）
+
+1. migration の checksum の照合は、Step 3-12B-5C-3C（2026-11-09）で8件すべて一致したが、それ以降の実DBでの再照合はしていない（checksum のゲートは無効のまま）。schemaDiff の `no-diff` は、migration の履歴全体の整合性の証明ではない。
+2. Prisma の schemaDiff の比較の対象外の定義（上の「実DBでの schemaDiff の結果」の「比較しない」）のうち、カタログの監査・fingerprint で期待値と照合していないものは、未確認。
+3. fingerprint の4区分（columns・constraints・indexes・relations）の期待値との照合は限定的。
+4. 方式Aでは、Prisma CLI が `katana_test_ro` のパスワードを含む URL を、schema engine の起動引数（`--datasource`）に渡す。9-6E では engine が起動したと考えられるので、約2秒の間、ローカルのプロセスの一覧に露出した可能性が高い（受け入れ済みの残余リスク）。CLI・engine の環境変数には URL を入れていない。
+5. schema engine の起動と DB への接続を、直接は観測していない（終了コードと実装の経路からの推論）。
+6. CLI・engine の SHA-256 は、事前の検証と起動の直前に照合するが、照合と実行の間の差し替えは防げない（TOCTOU）。
+7. SIGKILL・OOM などで親のプロセスが突然終わると、後始末（プロセスグループの停止）と事後の検査を行えない。
+8. 検証の結果は、どれも実行した時点のスナップショット。実行と実行の間の DB の変化は検出しない。
+9. `__CF_USER_TEXT_ENCODING` の値の形式は、この Mac 1台で観測したものに基づく。形式が違う環境では `ENV_VALUE_INVALID` で止まる（止まる方向で、安全性は損なわない）。ガードの入力の `platform` は呼び出し側から指定できるが、設定ファイルは指定しない（静的テストで確認）。
+10. 9-6・9-6E・9-7 の出力のログは、作業用の一時領域にだけ置き、リポジトリには残していない。この節が記録。
+
+#### schemaDiff の今後の運用（2026-11-15）
+
+- 通常は、6つの固定ゲート（migration・checksum・schemaDiff・catalog・ro-role の作成・ro-role の補完）をすべて無効にしておく。
+- **毎回の実行で必要な手順：**
+  1. ゲートの一時有効化を承認されてから、スクリプトの `access` と静的テスト13を変える commit を作る（テストと型検査・静的検査を通す）。
+  2. 実行の前に、Git の状態・ゲート・`.env*` などのハッシュ・`testdb:identity`・予行（CLI・engine の SHA-256 の照合）を確かめる。想定と違えば実行しない。
+  3. `--live` の実行は、明示的な承認を得てから1回だけ行う。失敗しても、自動の再実行・引数や環境変数を変えた再試行・DB の修復はしない。
+  4. 実行の後に、独立した読み取り専用の事後検証（`testdb:status`・`testdb:identity`・`testdb:verify`・`testdb:ro-role:verify-created`）を行う。
+  5. 終わったらゲートを無効に戻す commit を作り、結果を本ファイルに記録する。
+- **今回の初回の導入でだけ必要だった手順：** schema engine の公開ソースの静的調査（9-0）、方式の選定（9-1）、ガード・runner の実装とレビュー（9-2〜9-3B）、テストの件数の照合（9-4）、macOS の環境変数への対応（9-6B・9-6C）。`katana_test_ro` の作成（Step 3-12B-5E）は、コンテナを作り直したとき（tmpfs のためロールが消える）にだけ、もう一度必要になる。
+- migration の checksum の再照合と、fingerprint の4区分の期待値との照合は、別の工程の課題として管理する（完了していない）。
+
+#### Step 3-12B-5E-9A の完了判定（2026-11-15）
+
+- schemaDiff のガード・runner の実装：完了
+- モックテスト・型検査・静的検査：完了（20ファイル・1,758件）
+- 実DBでの schemaDiff の比較：完了（9-6E。`no-diff`。Prisma が比較できる範囲だけ）
+- 独立した事後検証：完了（9-7）
+- 固定ゲートの最終的な無効化：完了（9-8A。`241d7d8`。6つとも無効）
+- 未確認の事項：上の「残余リスク（Step 3-12B-5E-9A の後）」で管理する
+- **これは Step 3-12B-5E-9A の完了で、テストDBの完全な分離（このプロジェクト全体）の完了ではない。** Step 3-13（ドキュメント）、Phase 4（検証）、5章の R13・R14 などは残っている。
+
 ### Step 3-0：読み取りだけの事前確認（実施済み。Dockerの記録は未記録）
 
 - **作業内容:**
@@ -3057,6 +3168,7 @@ npm run test:integration ─► 専用runner
 - **2026-11-11 追記:** PostgreSQL 固有の定義と enum の値・順序のカタログ監査は、Step 3-12B-5D-3 で実施済み（`passed`。条件2-B の一部）。`migrate diff` による定義の一致（条件2-B の残り）は未実施。3-Aの「条件2の整理（2026-11-11）」。
 - **2026-11-13 追記:** schemaDiff 用の読み取り専用ロール `katana_test_ro` は、Step 3-12B-5E-6 で作成した（1回。事後の検査は成功）。create ゲートは 5E-8（`b762535`）で無効に戻した。作成後の独立した検証は未完了で、次の 5E-7A（`--verify-created`。設計案）で行う。`migrate diff`（条件2-B の残り）は未実施。
 - **2026-11-13 追記（5E-7A-3）:** 作成後の独立した検証（`--verify-created`。`711b276`）を実DBで1回実行し、成功した（14区分は完全照合、4区分は部分照合）。部分照合の区分の名前・件数・定義は未確認で、schemaDiff に引き継ぐ（3-Aの「作成後の検証範囲と、schemaDiff への引き継ぎ」）。`migrate diff` は未実施。
+- **2026-11-15 追記（5E-9A）:** `migrate diff` を Step 3-12B-5E-9A-9-6E で1回実行し、`no-diff`（Prisma が比較できる範囲で差分なし。事前・事後の検査はすべて成功）。9-6 の1回目は `cli-failed`（macOS の `__CF_USER_TEXT_ENCODING`。9-6C で対応）。schemaDiff のゲートは 9-8A（`241d7d8`）で無効に戻した。Prisma の比較の対象外の定義と、fingerprint の4区分は、残余リスクとして残る（3-Aの「Step 3-12B-5E-9A」以降の節）。
 
 ### Step 3-13：ドキュメント
 
@@ -3113,7 +3225,7 @@ npm run test:integration ─► 専用runner
 
 | ID | 内容 | 状態・対応 |
 |---|---|---|
-| R1 | migrationを空のDBに適用できるか、`schema.prisma` と一致するか | 適用は確認済み（Step 3-12B-3。8件・状態 C。ユーザーの報告に基づく記録で、最後に確認した時点の状態）。`schema.prisma` との定義の一致（`migrate diff`）と checksum の実DB照合は未検証（Step 3-12B-5 以降）。（2026-11-10 追記）checksum の実DB照合は Step 3-12B-5C-3C で8件すべて完全一致（条件2-A 達成。実行した時点の結果）。`schema.prisma` との定義の一致（条件2-B）は未検証。（2026-11-11 追記）Step 3-12B-5D-3 のカタログ監査で、PostgreSQL 固有の定義と enum 5件の値・順序が期待値と一致（`passed`。実行した時点の結果）。列・型・NULL・既定値・キー・インデックス・外部キーの一致（`migrate diff`）は未検証で、条件2-B の全体は未完了 |
+| R1 | migrationを空のDBに適用できるか、`schema.prisma` と一致するか | 適用は確認済み（Step 3-12B-3。8件・状態 C。ユーザーの報告に基づく記録で、最後に確認した時点の状態）。`schema.prisma` との定義の一致（`migrate diff`）と checksum の実DB照合は未検証（Step 3-12B-5 以降）。（2026-11-10 追記）checksum の実DB照合は Step 3-12B-5C-3C で8件すべて完全一致（条件2-A 達成。実行した時点の結果）。`schema.prisma` との定義の一致（条件2-B）は未検証。（2026-11-11 追記）Step 3-12B-5D-3 のカタログ監査で、PostgreSQL 固有の定義と enum 5件の値・順序が期待値と一致（`passed`。実行した時点の結果）。列・型・NULL・既定値・キー・インデックス・外部キーの一致（`migrate diff`）は未検証で、条件2-B の全体は未完了。（2026-11-15 追記）`migrate diff` は Step 3-12B-5E-9A-9-6E で `no-diff`（Prisma が比較できる範囲だけ。実行した時点の結果）。Prisma の比較の対象外の定義と、fingerprint の4区分（columns・constraints・indexes・relations）の期待値との照合は、未完了 |
 | R2 | 開発用DBの `_prisma_migrations` と、手元のファイルのchecksumが一致するか | 解消（Step 3-0で一致を確認） |
 | R3 | `KATANA_DB_TARGET=test` を設定せずにPrisma CLIを直接実行すると、開発用DBに接続する | 残余リスク（2-7）。運用ルールとCLAUDE.mdで対処する。Step 3-8Bで、テストDBに見えるURLをテストモードなしで使う場合は拒否するようにした（ほかの経路は3-Aの3-8B） |
 | R4 | `prisma/seed.ts` と Prisma Studio はガードの外にある | 範囲外 |
@@ -3136,13 +3248,14 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：PLAN の記録の commit（`docs: record independent verification of the read-only role`。親は `711b276`（`test: add read-only verification of the created read-only role`。Step 3-12B-5E-7A-2））
+   - HEAD：PLAN の記録の commit（`docs: record schema diff verification and remaining risks`。親は `241d7d8`（`test: disable schema diff gate after successful verification`。Step 3-12B-5E-9A-9-8A））
    - `.env.test.readonly` はユーザーが作成済み（`-rw-------`。キーは2つ。中身は表示しない）
    - 変更済み（未commit）：なし
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
    - `.env.test` はユーザーが作成済み（`-rw-------`。中身は表示しない）
    - テストDBのコンテナ `katana-test-db` が起動している場合がある（Step 3-11。データは tmpfs）。`docker ps -a` で確かめる
 3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。Step 3-11 で、ユーザーがテストDBを初めて起動した（R7 は今回の起動で合格。3-Aの「Step 3-11」）。`down` はまだ実行していない。Step 3-11の実施前レビューの結果（3-Aの「Step 3-11の実施前レビュー」。前提条件の表 C、R7 の D、失敗時の E、DB検証の F、TOCTOU の G、`.env.test` の I）を先に読む。レビューの時点では Docker のデーモンが停止中だったが、Step 3-11A でユーザーが Docker Desktop を起動し、前提条件 C の2〜9 を満たすことを確かめた（3-Aの「Step 3-11A」）。初期化スクリプトのログ漏洩の対策も 3-11A で済んだ。初回の up の後に問題が起きたときは、自動で削除せず、読み取りで調べて報告し、個別の承認を待つ（3-11A で確定）。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
+   - （2026-11-15 更新・5E-9A）Prisma CLI による schemaDiff を実装し（`95b7a6d`・`d16ad0e`・`93b42b6`）、9-6E で実DBで1回実行して `no-diff`（Prisma が比較できる範囲だけ）。9-7 の独立した事後検証も成功し、ゲートは 9-8A（`241d7d8`）で無効に戻した。**固定ゲートは6つとも無効。** Step 3-12B-5E-9A は完了したが、プロジェクト全体は未完了。次の候補（どれも承認が必要）：Step 3-13（ドキュメント）、Phase 4 の計画、checksum の再照合と fingerprint の4区分の扱い、R13（build）・R14 の残課題、`reset` の実装。3-Aの「Step 3-12B-5E-9A」〜「Step 3-12B-5E-9A の完了判定」
    - （2026-11-09 更新）migration は Step 3-12B-3 で適用済み（最後に確認した時点で状態 C）。3つの固定ゲート（migration・checksum・schemaDiff）はすべて無効。
    - （2026-11-10 更新）checksum の実DB照合は Step 3-12B-5C-3C で完了（8件すべて完全一致。条件2-A 達成）。ゲートは 5C-4（`fc45fc0`）で無効に戻した。3つの固定ゲートはすべて無効。条件2-B（定義の一致）は未完了。3-Aの「条件2の整理」
    - （2026-11-11 更新）PostgreSQL 固有の定義のカタログ監査は Step 3-12B-5D-3 で完了（`passed`。条件2-B の一部）。catalog ゲートは 5D-4（`f390846`）で無効に戻した。4つの固定ゲート（migration・checksum・schemaDiff・catalog）はすべて無効。条件2-B の全体は未完了。3-Aの「条件2の整理（2026-11-11）」
