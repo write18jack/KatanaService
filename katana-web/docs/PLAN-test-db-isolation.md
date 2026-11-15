@@ -394,6 +394,7 @@ npm run test:integration ─► 専用runner
 | 3-12B-5D-2 | catalog 専用ゲートの一時有効化：`scripts/testdb-catalog.mts` の `catalogDatabase` を固定の `{ mode: "enabled-read-only" }` に（静的テストの期待値も合わせて変更）。migration・checksum・schemaDiff のゲートは無効のまま。通常テスト38ファイル・1,554件成功。この時点では実DBでの監査は未実施。push・merge なし | `21de539`（`test: temporarily enable read-only catalog audit`。親は `b3ac3f7`） |
 | 3-12B-5D-3 | 実DBでのカタログ監査：`npm run testdb:catalog -- --verify` を1回だけ実行し、終了コード0・`passed`（failed・unverified なし）。D1・F1・D2・F2・D3 が成功、前後とも状態 C。DB 固有の定義は期待値と一致、enum 5件の値と順序が一致、fingerprint 18区分を取得。Docker・DB の変更操作なし。**条件2-B は一部だけ達成**（全体は未完了） | なし（読み取り専用の監査。コードの変更なし） |
 | 3-12B-5D-4 | catalog 専用ゲートを固定の `CATALOG_AUDIT_DATABASE_DISABLED` に戻した（コメントを除くコードは `b3ac3f7` と同じ。静的テストも戻した）。4つのゲートはすべて無効。通常テスト38ファイル・1,554件成功、tsc・ESLint・構文・静的検査が成功。Docker・DB の操作なし。push・merge なし | `f390846`（`test: disable live catalog audit after successful verification`。親は `21de539`） |
+| 3-13・3-13A | ドキュメント：`docs/TESTING.md` を新規に作成し、`CLAUDE.md` に「Testing and Test Database」の節を追加した（`CLAUDE.md` の変更は、Step 3-13 の指示による例外。共通の禁止事項は変えていない）。コマンド・引数・承認の区分・ゲートの状態を実装と照合した。6つのゲートはすべて無効。Docker・DB・Prisma CLI の操作なし。push・merge なし。詳細は下の「Step 3-13・3-13A」 | `e9d520d`（`docs: document test database isolation and testing procedures`。親は `0c1702b`） |
 
 **commitの状態：** Step 3-3〜3-6の変更（本ファイルを含む）は、Step 3-6の後処理で1つのcommit `824d54b`（`test: isolate unit and integration database access`）にまとめた。5ファイルのリネームもこのcommitに含む。各Stepの記録にある「未commit」「未追跡」は、記録した時点の状態。期待する `git status` は末尾の節。
 
@@ -3016,6 +3017,73 @@ npm run test:integration ─► 専用runner
 - 未確認の事項：上の「残余リスク（Step 3-12B-5E-9A の後）」で管理する
 - **これは Step 3-12B-5E-9A の完了で、テストDBの完全な分離（このプロジェクト全体）の完了ではない。** Step 3-13（ドキュメント）、Phase 4（検証）、5章の R13・R14 などは残っている。
 
+#### Step 3-13・3-13A：ドキュメント（実施済み。2026-11-15。commit `e9d520d`）
+
+- **作業内容：** `docs/TESTING.md` を新規に作成し（215行）、`CLAUDE.md` に「Testing and Test Database」の節を追加した（18行。既存の行の削除・変更なし）。Step 3-13 で作成・整理し、Step 3-13A で最終レビューをして commit した。
+- **`docs/TESTING.md` の内容：** 承認の原則（本ファイルの「全Phase共通の禁止事項」）、開発用DB とテストDB の構成、テストDB の識別（接続前のガード・接続後の本人確認・Docker の照合）、状態 A・B・C、migration 履歴の検証の範囲、`katana_test_ro` の用途、6つの固定ゲート、コマンドの3区分（承認なしで実行できるもの／承認が必要な読み取り／承認が必要な変更、またはゲートが必要なもの）、使わないもの（テストDB への Prisma CLI・`docker compose` の直接実行）、失敗したときの対応、schemaDiff の運用（方式A・手順・判定・比較の範囲・残余リスク）。
+- **`CLAUDE.md` の追加内容：** DB の接続先、操作ごとの承認、引数なしの `npm test` の扱い、テストDB への Prisma CLI の直接実行の禁止（R3）、`docker compose` の直接実行の禁止（R14）、固定ゲートの扱い、ガードを緩めないこと（R10）、失敗時の扱い、秘密情報の扱い。
+- **`CLAUDE.md` の例外：** 「全Phase共通の禁止事項」では `CLAUDE.md` の変更を禁止している（提案だけにする）。今回は、Step 3-13 の指示で明示的に例外として変更を許可された。**この例外は Step 3-13 の変更だけに限るもので、今後の `CLAUDE.md` の変更を許すものではない。** 共通の禁止事項は変えていない。
+- **検証（実装との照合。DB・Docker・Prisma CLI には触れていない）：**
+  - 記載した npm のスクリプト17種は、すべて `package.json` にある（`testdb:reset` は未実装として記載し、`npm run testdb:*` はワイルドカードの表記）。スクリプトのファイル6つと、引数（`--live`・`--verify`・`--apply`・`--create`・`--grant-sync`・`--preflight-create`・`--verify-created`・`--check`・`--status`・`--identity-check`・`--up`・`--down`）は、実装の引数の解析と一致する。
+  - 承認の区分：承認なしの区分には、Docker・DB に触れないものだけを入れた。`testdb:check`、`--apply` なしの `testdb:up`・`testdb:down` は、最初に Docker の読み取り（`context show`・`compose config`）を行うので、承認が必要な区分に入れた。
+  - `npm test`：`vitest.config.ts` が統合テストを除外し、ダミーの `DATABASE_URL` と `KATANA_DB_TEST_MODE=unit` を設定していることと、実行のたびに承認を得ることを記載した。
+  - `test:integration`：globalSetup（`lib/testing/integrationGlobalSetup.ts`）がテストを始めずに必ず停止するので、「まだ使えない」と記載した。
+  - schemaDiff：判定6種と終了コードは `SchemaDiffVerdict`・`decideSchemaDiffVerdict` に一致する。タイムアウト120秒・中断の後の上限60秒は定数と一致する。比較の範囲と残余リスクは、runner の表示と本ファイルの記録に一致する。
+  - migration の checksum：Step 3-12B-5C-3C（2026-11-09）で8件すべて一致し、それ以降は再照合していない、と区別して記載した。
+  - `reset`：未実装と記載した。
+  - 固定ゲート：6つともすべて無効と記載し、実際の状態と一致する。
+  - 秘密情報：`.env*` の秘密の値9つ、認証情報を含む URL、実機の `__CF_USER_TEXT_ENCODING` の値は、差分に0件。`git diff --check` は成功し、行末の空白はない。
+- **将来の改善候補（今回の完了を妨げない）：**
+  1. `docs/TESTING.md` の判定の表に、事前の検査で止まる場合（CLI を起動せず、終了コード1。判定ではなく、エラーで止まる経路）を載せていない。
+  2. `cli-failed` に、CLI のエラーのほか、タイムアウト・シグナル・起動の失敗・想定外の終了コードがまとめられていることを、個別には書いていない（記載の「CLI または engine の実行に失敗」で範囲は表せている）。
+- **判定：** Step 3-13（Step 3-13・3-13A・3-13B）は完了。**テストDB の完全な分離（このプロジェクト全体）は未完了。** 固定ゲートは6つとも無効。
+
+#### 残工程の整理（Step 3-13 の後。2026-11-15）
+
+本ファイルの既存の記述を根拠に分けた（新しい要件は加えていない）。
+
+| 項目 | 分類 | 根拠 |
+|---|---|---|
+| 1. globalSetup への接続処理の組み込み | 必須 | 3-Aの「Step 3-10の実施前レビュー」（2026-11-03）の「次に実装すべきもの」の3「globalSetup への接続処理の組み込みと、R14 の残課題1の対策（Phase 4 の前）」。2-3（開始前の読み取り確認）。これがないと統合テストを実行できない |
+| 2. setupFiles での各ワーカーの接続先の照合 | 必須 | 同じレビューの「B. 未実装」（「globalSetup への接続処理の組み込み…と、setupFiles での各ワーカーの照合」）。2-2 |
+| 3. R14 の残課題1（runner を通さずに globalSetup・`lib/prisma.ts` の統合テストモードを起動する経路） | 必須 | 5章の R14。同じレビューの「次に実装すべきもの」の3（「Phase 4 の前」） |
+| 4. R13（`npm run build`） | 必須 | 5章の R13（「Phase 4 までに実施する」）。DB に接続しないことを確認できる方法が先に必要 |
+| 5. Phase 4 の開発用DB の件数の照合 | 必須 | Phase 4 の1と完了条件 |
+| 6. 単体テスト（`npm test`） | 必須 | Phase 4 の3 |
+| 7. 統合テスト6件 | 必須 | 0章の目的2・3、Phase 4 の4。1〜3が先に必要 |
+| 8. F-01 の E2E（E2E-01〜06） | 必須（プロジェクト全体の完成には） | 0章の目的4、Phase 4 の5。F-01 は CONDITIONAL PASS のまま |
+| 9. `reset` の実装 | 判断保留 | 2-3 の設計（データが残っていれば `testdb:reset` を案内して停止する）に含まれる一方、R9 は「利便性の問題であり、安全性の問題ではない」としている |
+| 10. checksum の再照合・fingerprint の4区分 | 延期可能 | checksum の照合（条件2-A）は 5C-3C で達成済みで、再照合は要件にない。4区分は、残余リスクとして管理する方針（3-Aの「作成後の検証範囲と、schemaDiff への引き継ぎ」と「残余リスク（Step 3-12B-5E-9A の後）」） |
+
+**R14 の残課題2・3**（`docker compose` の直接実行、外部の道具からの接続）は、運用で守る・対象外とされているので、延期可能（`CLAUDE.md` と `docs/TESTING.md` に運用のルールを書いた）。
+
+#### 通常の機能開発への復帰条件と、プロジェクト全体の完成条件（整理案。2026-11-15）
+
+**この2つの区別は、Step 3-13B の指示による整理案で、本ファイルの既存の記述には「通常の機能開発を再開する条件」の定義はない。** 完成条件は変えていない。
+
+- **通常の機能開発を再開するための最小条件（整理案）：**
+  1. 開発用DB に影響がないことの確認（Phase 4 の1の件数の照合。DB への接続なので承認が必要）
+  2. 単体テストの成功（Phase 4 の3。引数なしの実行は承認が必要）
+  3. build の成功（R13。DB に接続しないことの確認が先）
+  4. 固定ゲートが6つとも無効（今は満たしている）
+- **プロジェクト全体の完成条件（本ファイルの既存の記述）：**
+  1. 上の表の1〜3（globalSetup・setupFiles・R14 の残課題1）
+  2. R13 の build
+  3. Phase 4 の1〜5（開発用DB の件数の照合、ガードの確認、`npm test`、統合テスト6件、F-01 の E2E）と、Phase 4 の完了条件（開発用DB の件数が開始時と一致、成功・失敗・未実施の区別、F-01 の判定を更新できる状態）
+  4. Step 3-13 の完了条件（ドキュメントの内容が実装と一致）：満たした
+- **既存の記述との相違点：** なし（最小条件は、既存の項目の一部を先に行う順序の案で、新しい要件ではない）。ただし、最小条件の1〜3は Phase 4 の項目そのもの（または Phase 4 までの項目）なので、先に行う場合は Phase 4 の一部を前倒しすることになる。どの時点で機能開発を再開するかは、ユーザーが決める。作業ブランチ（`chore/test-db-isolation`）と `Develop` の統合の時期も同じ。
+
+#### 次工程の方針：Phase 4 の準備（残工程・依存関係・受け入れ条件の最終整理。未着手）
+
+- いきなり globalSetup の実装や Phase 4 に進まず、先に次を整理して提示し、承認を得る（実装・実DB での検証は、それぞれ別の承認）。
+  - globalSetup と setupFiles の実装の範囲（2-2・2-3、3-Aの3-7・3-8A の記録と「Step 3-10の実施前レビュー」の申し送り、`verifyIntegrationDatabase()` の扱い）
+  - R14 の残課題1の対策
+  - build を実行したときに DB へ接続するかどうか（R13）と、その確かめ方
+  - 開発用DB の件数の照合の方法（Phase 4 の1。`BEGIN READ ONLY` の中の SELECT だけ）
+  - 統合テスト・E2E の実行の条件（テストDB の状態 C、データが残っていないこと、Playwright の導入の承認、`reset` の要否）
+  - 通常の機能開発を再開する時期
+- 依存関係：globalSetup・setupFiles・R14 の残課題1 → 統合テスト6件 → E2E。R13 と開発用DB の件数の照合は、それらと独立に行える。
+
 ### Step 3-0：読み取りだけの事前確認（実施済み。Dockerの記録は未記録）
 
 - **作業内容:**
@@ -3178,6 +3246,7 @@ npm run test:integration ─► 専用runner
 - **完了条件:** ドキュメントの内容が、実装と一致している。
 - **承認が必要な操作:** `CLAUDE.md` の変更。
 - **停止条件:** なし。
+- **2026-11-15 追記:** 実施済み（Step 3-13・3-13A。commit `e9d520d`）。`docs/TESTING.md` を作り、`CLAUDE.md` の変更は Step 3-13 の指示で例外として許可された（この Step に限る）。本ファイルの更新は Step 3-13B で行った。3-Aの「Step 3-13・3-13A」。
 
 統合テストを実際に動かすのは、Phase 4で行う。
 
@@ -3227,7 +3296,7 @@ npm run test:integration ─► 専用runner
 |---|---|---|
 | R1 | migrationを空のDBに適用できるか、`schema.prisma` と一致するか | 適用は確認済み（Step 3-12B-3。8件・状態 C。ユーザーの報告に基づく記録で、最後に確認した時点の状態）。`schema.prisma` との定義の一致（`migrate diff`）と checksum の実DB照合は未検証（Step 3-12B-5 以降）。（2026-11-10 追記）checksum の実DB照合は Step 3-12B-5C-3C で8件すべて完全一致（条件2-A 達成。実行した時点の結果）。`schema.prisma` との定義の一致（条件2-B）は未検証。（2026-11-11 追記）Step 3-12B-5D-3 のカタログ監査で、PostgreSQL 固有の定義と enum 5件の値・順序が期待値と一致（`passed`。実行した時点の結果）。列・型・NULL・既定値・キー・インデックス・外部キーの一致（`migrate diff`）は未検証で、条件2-B の全体は未完了。（2026-11-15 追記）`migrate diff` は Step 3-12B-5E-9A-9-6E で `no-diff`（Prisma が比較できる範囲だけ。実行した時点の結果）。Prisma の比較の対象外の定義と、fingerprint の4区分（columns・constraints・indexes・relations）の期待値との照合は、未完了 |
 | R2 | 開発用DBの `_prisma_migrations` と、手元のファイルのchecksumが一致するか | 解消（Step 3-0で一致を確認） |
-| R3 | `KATANA_DB_TARGET=test` を設定せずにPrisma CLIを直接実行すると、開発用DBに接続する | 残余リスク（2-7）。運用ルールとCLAUDE.mdで対処する。Step 3-8Bで、テストDBに見えるURLをテストモードなしで使う場合は拒否するようにした（ほかの経路は3-Aの3-8B） |
+| R3 | `KATANA_DB_TARGET=test` を設定せずにPrisma CLIを直接実行すると、開発用DBに接続する | 残余リスク（2-7）。運用ルールとCLAUDE.mdで対処する。Step 3-8Bで、テストDBに見えるURLをテストモードなしで使う場合は拒否するようにした（ほかの経路は3-Aの3-8B）。（2026-11-15 追記）`CLAUDE.md` と `docs/TESTING.md` に、テストDB に Prisma CLI を直接実行しないことを明記した（`e9d520d`） |
 | R4 | `prisma/seed.ts` と Prisma Studio はガードの外にある | 範囲外 |
 | R5 | `lib/generated/prisma/` が、Gitの除外対象なのに管理されたまま残っている | importは静的検査で防ぐ。整理は別タスク |
 | R6 | 静的検査はASTの解析だが、文字列を組み立てたimport、パッケージ経由の読み込み、`@/*` 以外の別名などはすり抜けられる（3-Aの3-4B・3-5Bに一覧）。判定できない動的importなどは、規則4で「未確認」として失敗させる | 低。レビューで補う |
@@ -3238,7 +3307,7 @@ npm run test:integration ─► 専用runner
 | R15 | Composeの変数展開では、シェルの環境変数が `--env-file` より優先される | 対策済み（Step 3-9B）。Composeの子プロセスには、許可リストの変数と検証済みのパスワードだけを渡す。親に `COMPOSE_*` や同名のパスワードを設定しても結果が変わらないことを、`config` で確認した |
 | R13 | Step 3-3の完了条件の `npm run build` を実施していない | DBに接続しないことを確認できる方法が見つかるまで保留。Phase 4までに実施する |
 | R9 | テストが途中で落ちた後は、`testdb:reset` が必要になる | 利便性の問題であり、安全性の問題ではない |
-| R10 | ガードのコードそのものを書き換えられると防げない | CLAUDE.mdとレビューで対処する |
+| R10 | ガードのコードそのものを書き換えられると防げない | CLAUDE.mdとレビューで対処する。（2026-11-15 追記）`CLAUDE.md` に、ガードとそのテストを緩めないことを明記した（`e9d520d`） |
 | R11 | 開発用DBの認証情報が `docker-compose.yml` に直接書かれている | 範囲外 |
 
 ---
@@ -3248,13 +3317,14 @@ npm run test:integration ─► 専用runner
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
    - ブランチ：`chore/test-db-isolation`
-   - HEAD：PLAN の記録の commit（`docs: record schema diff verification and remaining risks`。親は `241d7d8`（`test: disable schema diff gate after successful verification`。Step 3-12B-5E-9A-9-8A））
+   - HEAD：PLAN の記録の commit（`docs: record Step 3-13 completion and remaining verification tasks`。親は `e9d520d`（`docs: document test database isolation and testing procedures`。Step 3-13・3-13A））
    - `.env.test.readonly` はユーザーが作成済み（`-rw-------`。キーは2つ。中身は表示しない）
    - 変更済み（未commit）：なし
    - 未追跡（commitの対象外）：`docs/presentations/KatanaService_プロジェクト構成.pptx`、`test-data/`
    - `.env.test` はユーザーが作成済み（`-rw-------`。中身は表示しない）
    - テストDBのコンテナ `katana-test-db` が起動している場合がある（Step 3-11。データは tmpfs）。`docker ps -a` で確かめる
 3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。Step 3-11 で、ユーザーがテストDBを初めて起動した（R7 は今回の起動で合格。3-Aの「Step 3-11」）。`down` はまだ実行していない。Step 3-11の実施前レビューの結果（3-Aの「Step 3-11の実施前レビュー」。前提条件の表 C、R7 の D、失敗時の E、DB検証の F、TOCTOU の G、`.env.test` の I）を先に読む。レビューの時点では Docker のデーモンが停止中だったが、Step 3-11A でユーザーが Docker Desktop を起動し、前提条件 C の2〜9 を満たすことを確かめた（3-Aの「Step 3-11A」）。初期化スクリプトのログ漏洩の対策も 3-11A で済んだ。初回の up の後に問題が起きたときは、自動で削除せず、読み取りで調べて報告し、個別の承認を待つ（3-11A で確定）。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
+   - （2026-11-15 更新・3-13B）Step 3-13 は完了（`docs/TESTING.md`・`CLAUDE.md` の追加は `e9d520d`。`CLAUDE.md` の変更は Step 3-13 に限った例外）。**固定ゲートは6つとも無効。** プロジェクト全体は未完了。**次は「Phase 4 の準備（残工程・依存関係・受け入れ条件の最終整理）」の提示で、承認が必要。** globalSetup・setupFiles・R14 の残課題1・R13 の build・Phase 4 の実施は、それぞれ別の承認。3-Aの「残工程の整理（Step 3-13 の後）」〜「次工程の方針：Phase 4 の準備」
    - （2026-11-15 更新・5E-9A）Prisma CLI による schemaDiff を実装し（`95b7a6d`・`d16ad0e`・`93b42b6`）、9-6E で実DBで1回実行して `no-diff`（Prisma が比較できる範囲だけ）。9-7 の独立した事後検証も成功し、ゲートは 9-8A（`241d7d8`）で無効に戻した。**固定ゲートは6つとも無効。** Step 3-12B-5E-9A は完了したが、プロジェクト全体は未完了。次の候補（どれも承認が必要）：Step 3-13（ドキュメント）、Phase 4 の計画、checksum の再照合と fingerprint の4区分の扱い、R13（build）・R14 の残課題、`reset` の実装。3-Aの「Step 3-12B-5E-9A」〜「Step 3-12B-5E-9A の完了判定」
    - （2026-11-09 更新）migration は Step 3-12B-3 で適用済み（最後に確認した時点で状態 C）。3つの固定ゲート（migration・checksum・schemaDiff）はすべて無効。
    - （2026-11-10 更新）checksum の実DB照合は Step 3-12B-5C-3C で完了（8件すべて完全一致。条件2-A 達成）。ゲートは 5C-4（`fc45fc0`）で無効に戻した。3つの固定ゲートはすべて無効。条件2-B（定義の一致）は未完了。3-Aの「条件2の整理」
