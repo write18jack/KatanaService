@@ -1,18 +1,19 @@
+import { ProductStatus } from "@prisma/client";
 import { TableCell, TableRow } from "@/components/ui/table";
 
 import ProductStatusBadge from "./ProductStatusBadge";
 import ProductRowActions from "./ProductRowActions";
 
-type Product = {
+export type ProductRowData = {
   id: string;
-  managementNumber: string;
-  name: string;
+  productCode: string;
+  title: string;
   price: number | null;
-  status: string;
+  status: ProductStatus;
 };
 
 type ProductRowProps = {
-  product: Product;
+  product: ProductRowData;
   onDelete: (productId: string) => void;
 };
 
@@ -20,10 +21,10 @@ export default function ProductRow({ product, onDelete }: ProductRowProps) {
   return (
     <TableRow>
       {/* 管理番号 */}
-      <TableCell className="font-medium">{product.managementNumber}</TableCell>
+      <TableCell className="font-medium">{product.productCode}</TableCell>
 
       {/* 銘 */}
-      <TableCell>{product.name}</TableCell>
+      <TableCell>{product.title}</TableCell>
 
       {/* 価格 */}
       <TableCell>
@@ -39,7 +40,9 @@ export default function ProductRow({ product, onDelete }: ProductRowProps) {
       <TableCell>
         <ProductRowActions
           productId={product.id}
-          productName={product.name}
+          productCode={product.productCode}
+          productTitle={product.title}
+          status={product.status}
           onDelete={() => onDelete(product.id)}
         />
       </TableCell>
