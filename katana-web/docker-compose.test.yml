@@ -1,0 +1,46 @@
+# テスト専用DB（docs/PLAN-test-db-isolation.md の 2-1・2-5）。開発用の docker-compose.yml とは別のプロジェクト。
+#
+# 操作は scripts/testdb.mts からだけ行う。ラッパーは、次の形で必ず -p・-f・--project-directory・--env-file を（絶対パスで）付ける:
+#   docker compose -p katana-test -f docker-compose.test.yml --project-directory . --env-file .env.test <config|ps|up|down>
+# - npm run testdb:check・testdb:status：読み取りだけ。
+# - npm run testdb:up -- --apply：実装済み（実際の起動は未検証）。`--apply` がなければ、確認と予定のコマンドの表示だけ。
+# - npm run testdb:down -- --apply：実装済み（実際の停止は未検証）。`--apply` がなければ、確認と予定のコマンドの表示だけ。
+# - reset：未実装。
+# `down -v`・`--remove-orphans`・`--rmi`・volume の削除は使わない。
+#
+# - データは tmpfs に置く。コンテナを作り直すと消える。名前付きボリュームは使わない（トップレベルに volumes を書かない）。
+# - パスワードはこのファイルに書かない。.env.test の値を Compose の変数展開で受け取る（未設定なら起動前にエラー）。
+#   Compose の変数展開では、シェルの環境変数が --env-file の値より優先される。ラッパーは同名の環境変数を取り除いてから実行する。
+# - アプリが使う katana_test_user は、スーパーユーザーではなく、katana_test の所有者だけにする（docker/test-db/init/）。
+name: katana-test
+
+services:
+  test-db:
+    image: postgres:15
+    container_name: katana-test-db
+    # 自動では起動し直さない（Docker の再起動などで、知らないうちにテストDBが立ち上がらないようにする）
+    restart: "no"
+    environment:
+      # 初期化だけに使う管理用のスーパーユーザー（アプリ・テストからは使わない）
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${KATANA_TEST_DB_ADMIN_PASSWORD:?set KATANA_TEST_DB_ADMIN_PASSWORD in .env.test}
+      POSTGRES_DB: katana_test
+      # docker/test-db/init/01-app-role.sh が katana_test_user のパスワードに使う。.env.test の DATABASE_URL のパスワードと同じ値にする
+      KATANA_TEST_DB_PASSWORD: ${KATANA_TEST_DB_PASSWORD:?set KATANA_TEST_DB_PASSWORD in .env.test}
+    ports:
+      # 自分のPCからだけ接続できるようにする
+      - "127.0.0.1:5434:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      # 初期化スクリプト（読み取り専用の bind マウント。データの保存先ではない）
+      - type: bind
+        source: ./docker/test-db/init
+        target: /docker-entrypoint-initdb.d
+        read_only: true
+    healthcheck:
+      # TCP で確認する。初期化中の一時的なサーバーは TCP で待ち受けないので、初期化の完了前に healthy にならない
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "katana_test_user", "-d", "katana_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

@@ -34,5 +34,7 @@ yarn-error.log*
 # --- OS & Env ---
 .DS_Store
 .env*
+# テストDBの設定の見本（秘密情報を含まない）だけは管理する。.env.test などは .env* で除外されたまま
+!katana-web/.env.test.example
 *.pem
 .vercel
