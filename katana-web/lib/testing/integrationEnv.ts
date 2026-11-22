@@ -2,8 +2,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { parse } from "dotenv";
 import {
+  assertIntegrationRuntime,
   assertTestDatabaseCredentials,
   assertTestDatabaseTarget,
+  IntegrationRuntimeError,
   TestDatabaseCredentialsError,
   TestDatabaseGuardError,
   type TestDatabaseTarget,
@@ -169,6 +171,46 @@ export function assertIntegrationProcessEnv(env: EnvSource, developmentEnv: EnvS
     throw new IntegrationRunnerError("integration tests must be started through scripts/test-integration.mts.");
   }
   return verifyTarget(env.DATABASE_URL, env, developmentEnv);
+}
+
+export type IntegrationRuntimeFiles = {
+  /** `.env.test` を dotenv.parse した結果。ファイルがなければ undefined */
+  testEnv: Record<string, string> | undefined;
+  /** `.env` を dotenv.parse した結果。ファイルがなければ undefined */
+  developmentEnv: Record<string, string> | undefined;
+};
+
+/**
+ * 接続前の検証（assertIntegrationRuntimeEnv）に渡す `.env.test`・`.env` を読む。読むだけで、値は検証しない。
+ * read は既定で readEnvFile（dotenv.parse。process.env は変えない）。単体テストでは、ファイルを読まない偽の関数を渡す。
+ */
+export function readIntegrationRuntimeFiles(root: string, read: (filePath: string) => Record<string, string> | undefined = readEnvFile): IntegrationRuntimeFiles {
+  return {
+    testEnv: read(path.join(root, TEST_ENV_FILE)),
+    developmentEnv: read(path.join(root, DEVELOPMENT_ENV_FILE)),
+  };
+}
+
+/**
+ * 統合テストのプロセス（globalSetup）で、DBに接続する前に起動経路・接続先・`.env.test` のパスワードを検証する（R14-1）。DBには接続しない。
+ * 中核は lib/db/testDatabaseGuard.ts の assertIntegrationRuntime（純粋関数）。ここでは、失敗をエラーコードだけを含む
+ * IntegrationRunnerError に置き換える（拒否された値・パスワード・接続URLを表示しない）。
+ */
+export function assertIntegrationRuntimeEnv(env: EnvSource, files: IntegrationRuntimeFiles): TestDatabaseTarget {
+  try {
+    return assertIntegrationRuntime({ env, testEnv: files.testEnv, developmentDatabaseUrl: files.developmentEnv?.DATABASE_URL });
+  } catch (error) {
+    if (error instanceof IntegrationRuntimeError) {
+      throw new IntegrationRunnerError(`the integration test process was rejected (${error.code}).`);
+    }
+    if (error instanceof TestDatabaseGuardError) {
+      throw new IntegrationRunnerError(`the test database target was rejected (${error.code}).`);
+    }
+    if (error instanceof TestDatabaseCredentialsError) {
+      throw new IntegrationRunnerError(`the test database credentials in ${TEST_ENV_FILE} were rejected (${error.code}).`);
+    }
+    throw error;
+  }
 }
 
 /** 統合テスト用の設定が選ぶはずのテストファイル（確認モード用。ファイル名の照合だけで、読み込まない） */

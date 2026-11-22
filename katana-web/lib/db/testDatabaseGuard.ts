@@ -257,6 +257,92 @@ export function assertTestDatabaseCredentials(testEnv: Readonly<Record<string, s
   return { appPassword, adminPassword };
 }
 
+/** runner（scripts/test-integration.mts）が子プロセスに設定する、統合テストの実行モードと runner の目印 */
+export const INTEGRATION_TEST_MODE_KEY = "KATANA_DB_TEST_MODE";
+export const INTEGRATION_TEST_MODE = "integration";
+export const INTEGRATION_RUNNER_KEY = "KATANA_TEST_RUNNER";
+export const INTEGRATION_RUNNER = "script";
+/** 統合テストのプロセスに設定されていてはいけない環境変数（PG*・DOTENV_* は assertTestDatabaseTarget が別に拒否する） */
+export const INTEGRATION_FORBIDDEN_ENV_KEYS: readonly string[] = ["NODE_OPTIONS"];
+
+export type IntegrationRuntimeErrorCode =
+  | "TEST_MODE_MISSING"
+  | "RUNNER_MARKER_MISSING"
+  | "FORBIDDEN_ENV_PRESENT"
+  | "TEST_ENV_MISSING"
+  | "TEST_ENV_URL_MISSING"
+  | "DATABASE_URL_MISMATCH";
+
+export class IntegrationRuntimeError extends Error {
+  readonly code: IntegrationRuntimeErrorCode;
+  /** コードを除いた説明（パスワード・接続URL・環境変数の値を含まない） */
+  readonly detail: string;
+
+  constructor(code: IntegrationRuntimeErrorCode, detail: string) {
+    super(`[testDatabaseGuard] ${code}: ${detail}`);
+    this.name = "IntegrationRuntimeError";
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+export type IntegrationRuntimeInput = {
+  /** 検査するプロセスの環境変数（globalSetup・lib/prisma.ts では process.env） */
+  env: Readonly<Record<string, string | undefined>>;
+  /** `.env.test` を dotenv.parse した結果。ファイルがなければ undefined（読み込みは呼び出し側が行う） */
+  testEnv: Readonly<Record<string, string | undefined>> | undefined;
+  /** `.env` の DATABASE_URL（開発用DBとの比較だけに使う）。`.env` がなければ undefined */
+  developmentDatabaseUrl: string | undefined;
+};
+
+/**
+ * 統合テストのプロセス（globalSetup・lib/prisma.ts の統合テストモード）で、DBに接続する前に呼ぶ検証（R14-1）。DBには接続しない。
+ *
+ * runner は同じ検証（接続先・`.env.test` のパスワード）をしてから子プロセスを起動するが、目印の環境変数は誰でも設定できる。
+ * そのため、runner を通さずに起動された場合にも同じ条件を満たすことを、ここでもう一度確かめる。順序（最初の失敗で止まる）:
+ *
+ * 1. 実行モード（KATANA_DB_TEST_MODE=integration）と runner の目印（KATANA_TEST_RUNNER=script）
+ * 2. 禁止する環境変数（NODE_OPTIONS）がないこと
+ * 3. `.env.test` が存在すること
+ * 4. プロセスの DATABASE_URL がテストDBを指すこと（assertTestDatabaseTarget。PG*・DOTENV_*・開発用DBとの比較を含む）
+ * 5. プロセスの DATABASE_URL が `.env.test` の DATABASE_URL と完全に一致すること（親から渡された別の値を使わない）
+ * 6. `.env.test` のパスワード（assertTestDatabaseCredentials。見本の値・文字種・URLとの一致・管理用との共用）
+ *
+ * 失敗したときは IntegrationRuntimeError・TestDatabaseGuardError・TestDatabaseCredentialsError を投げる。
+ * どのメッセージにも、パスワード・接続URL・環境変数の値を含めない。成功したら、表示してよい接続先の情報を返す。
+ */
+export function assertIntegrationRuntime(input: IntegrationRuntimeInput): TestDatabaseTarget {
+  const { env, testEnv, developmentDatabaseUrl } = input;
+
+  if (env[INTEGRATION_TEST_MODE_KEY] !== INTEGRATION_TEST_MODE) {
+    throw new IntegrationRuntimeError("TEST_MODE_MISSING", `${INTEGRATION_TEST_MODE_KEY} is not "${INTEGRATION_TEST_MODE}".`);
+  }
+  if (env[INTEGRATION_RUNNER_KEY] !== INTEGRATION_RUNNER) {
+    throw new IntegrationRuntimeError("RUNNER_MARKER_MISSING", `${INTEGRATION_RUNNER_KEY} is not "${INTEGRATION_RUNNER}".`);
+  }
+  const forbidden = INTEGRATION_FORBIDDEN_ENV_KEYS.filter((key) => env[key] !== undefined && env[key] !== "");
+  if (forbidden.length > 0) {
+    // 変数の名前だけを示す（値は表示しない）
+    throw new IntegrationRuntimeError("FORBIDDEN_ENV_PRESENT", `forbidden variables are set: ${forbidden.join(", ")}.`);
+  }
+  if (testEnv === undefined) {
+    throw new IntegrationRuntimeError("TEST_ENV_MISSING", ".env.test was not found.");
+  }
+
+  const target = assertTestDatabaseTarget({ databaseUrl: env.DATABASE_URL, env, developmentDatabaseUrl });
+
+  const expectedUrl = testEnv.DATABASE_URL;
+  if (expectedUrl === undefined || expectedUrl === "") {
+    throw new IntegrationRuntimeError("TEST_ENV_URL_MISSING", ".env.test does not define DATABASE_URL.");
+  }
+  if (env.DATABASE_URL !== expectedUrl) {
+    throw new IntegrationRuntimeError("DATABASE_URL_MISMATCH", "DATABASE_URL does not match the DATABASE_URL in .env.test.");
+  }
+
+  assertTestDatabaseCredentials(testEnv);
+  return target;
+}
+
 /** `.env.test.readonly` の、katana_test_ro の接続URL（Step 3-12B-5E-3。`.env.test` には置かない） */
 export const TEST_DB_RO_URL_KEY = "KATANA_TEST_RO_DATABASE_URL";
 /** `.env.test.readonly` の、katana_test_ro のパスワード（KATANA_TEST_RO_DATABASE_URL のパスワードと同じ値） */
