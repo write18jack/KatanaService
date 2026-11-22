@@ -7,6 +7,7 @@ import {
   prepareIntegrationEnv,
   readIntegrationRuntimeFiles,
 } from "./integrationEnv";
+import { assertIntegrationRuntime } from "../db/testDatabaseGuard";
 
 // 統合テスト用runnerの環境変数の準備（scripts/test-integration.mts から呼ぶ）の単体テスト。
 // ファイルは読まず、DBにも接続せず、Vitest の子プロセスも起動しない。値はすべてダミー
@@ -188,5 +189,120 @@ describe("integrationGlobalSetup の静的検査（R14-1）", () => {
 
   it("古い検証（.env.test を見ない assertIntegrationProcessEnv）は使わない", () => {
     expect(source).not.toContain("assertIntegrationProcessEnv");
+  });
+});
+
+// lib/prisma.ts（ワーカー側。Step 4-2）。lib/prisma.ts は import すると本物の Prisma Client を作るので、読み込まない。
+// 検証の中身は、lib/prisma.ts と同じ形の入力で共通の関数を呼んで確かめ、呼び出し方はソースを文字列として確かめる
+describe("ワーカー側（lib/prisma.ts）の接続前の検証（R14-1）", () => {
+  /** Vitest のワーカーで lib/prisma.ts が見る process.env と同じ形（値はすべてダミー） */
+  const WORKER_ENV = {
+    PATH: "/usr/bin",
+    NODE_ENV: "test",
+    VITEST: "true",
+    VITEST_WORKER_ID: "1",
+    VITEST_POOL_ID: "1",
+    DATABASE_URL: TEST_URL,
+    KATANA_DB_TEST_MODE: "integration",
+    KATANA_TEST_RUNNER: "script",
+  };
+  const FILES = { testEnv: GOOD_TEST_ENV, developmentEnv: DEVELOPMENT_ENV };
+
+  /** lib/prisma.ts と同じ形で呼ぶ（testEnv は .env.test、developmentDatabaseUrl は .env の DATABASE_URL） */
+  function worker(env: Record<string, string | undefined>, files: { testEnv: Record<string, string | undefined> | undefined; developmentEnv: Record<string, string> | undefined }) {
+    return assertIntegrationRuntime({ env, testEnv: files.testEnv, developmentDatabaseUrl: files.developmentEnv?.DATABASE_URL });
+  }
+
+  function codeOf(run: () => unknown): string {
+    try {
+      run();
+    } catch (error) {
+      const message = String((error as Error).message);
+      for (const secret of SECRETS) expect(message).not.toContain(secret);
+      return (error as { code: string }).code;
+    }
+    return "passed";
+  }
+
+  it("runner が作る子プロセスの環境変数（Vitest が足す変数を含む）と同じ .env.test なら通る", () => {
+    expect(worker({ ...prepare().childEnv, VITEST: "true", VITEST_WORKER_ID: "1" }, FILES)).toEqual({
+      host: "127.0.0.1",
+      port: "5434",
+      database: "katana_test",
+      user: "katana_test_user",
+    });
+  });
+
+  it.each([
+    ["runner の目印がない", { ...WORKER_ENV, KATANA_TEST_RUNNER: undefined }, FILES, "RUNNER_MARKER_MISSING"],
+    ["実行モードが integration でない", { ...WORKER_ENV, KATANA_DB_TEST_MODE: "unit" }, FILES, "TEST_MODE_MISSING"],
+    [".env.test がない", WORKER_ENV, { testEnv: undefined, developmentEnv: DEVELOPMENT_ENV }, "TEST_ENV_MISSING"],
+    ["DATABASE_URL が .env.test と違う", { ...WORKER_ENV, DATABASE_URL: TEST_URL.replace(PASSWORD, "other-dummy-pass") }, FILES, "DATABASE_URL_MISMATCH"],
+    ["接続先が開発用DB", { ...WORKER_ENV, DATABASE_URL: DEV_URL }, { testEnv: { ...GOOD_TEST_ENV, DATABASE_URL: DEV_URL }, developmentEnv: DEVELOPMENT_ENV }, "PORT_NOT_ALLOWED"],
+    ["DB名が違う", { ...WORKER_ENV, DATABASE_URL: TEST_URL.replace(/\/katana_test$/, "/katana") }, FILES, "DATABASE_NOT_ALLOWED"],
+    ["パスワードが URL と違う", WORKER_ENV, { testEnv: { ...GOOD_TEST_ENV, KATANA_TEST_DB_PASSWORD: `${PASSWORD}x` }, developmentEnv: DEVELOPMENT_ENV }, "URL_PASSWORD_MISMATCH"],
+    [
+      "パスワードが見本の値",
+      { ...WORKER_ENV, DATABASE_URL: TEST_URL.replace(PASSWORD, "CHANGE_ME_x") },
+      {
+        testEnv: { DATABASE_URL: TEST_URL.replace(PASSWORD, "CHANGE_ME_x"), KATANA_TEST_DB_PASSWORD: "CHANGE_ME_x", KATANA_TEST_DB_ADMIN_PASSWORD: ADMIN_PASSWORD },
+        developmentEnv: DEVELOPMENT_ENV,
+      },
+      "PASSWORD_PLACEHOLDER",
+    ],
+    ["管理用とアプリ用のパスワードを共用", WORKER_ENV, { testEnv: { ...GOOD_TEST_ENV, KATANA_TEST_DB_ADMIN_PASSWORD: PASSWORD }, developmentEnv: DEVELOPMENT_ENV }, "ADMIN_PASSWORD_SAME_AS_APP"],
+    ["NODE_OPTIONS がある", { ...WORKER_ENV, NODE_OPTIONS: "--require x" }, FILES, "FORBIDDEN_ENV_PRESENT"],
+    ["PGHOST がある", { ...WORKER_ENV, PGHOST: "db.example.com" }, FILES, "PG_ENV_PRESENT"],
+  ])("%s なら拒否し、globalSetup と同じコードになる（条件の一致）", (_label, env, files, code) => {
+    expect(codeOf(() => worker(env, files))).toBe(code);
+    const message = expectRejected(() => assertIntegrationRuntimeEnv(env, files), code);
+    expect(message).toContain(`(${code})`);
+  });
+
+  describe("lib/prisma.ts の静的検査", () => {
+    const source = readFileSync(path.join(__dirname, "..", "prisma.ts"), "utf8");
+    const guardFn = source.slice(source.indexOf("function assertVitestDatabaseAccess"), source.indexOf("\n}\n", source.indexOf("function assertVitestDatabaseAccess")));
+    const guardCall = "\nassertVitestDatabaseAccess();\n";
+
+    it("共通の検証関数を、.env.test・.env を読んだ結果と process.env で呼ぶ（古い assertTestDatabaseTarget は呼ばない）", () => {
+      expect(source).toContain('import { assertIntegrationRuntime } from "./db/testDatabaseGuard";');
+      expect(guardFn.split("assertIntegrationRuntime({")).toHaveLength(2);
+      expect(guardFn).toMatch(/assertIntegrationRuntime\(\{\s*env,\s*testEnv: readEnvFileInCwd\("\.env\.test"\),\s*developmentDatabaseUrl: readEnvFileInCwd\("\.env"\)\?\.DATABASE_URL,\s*\}\);/);
+      expect(source).not.toContain("assertTestDatabaseTarget");
+    });
+
+    it("検証は、モジュールの本体で、PrismaPg・PrismaClient の生成と既存クライアントの再利用より前に、無条件で1回だけ呼ぶ", () => {
+      expect(source.split(guardCall)).toHaveLength(2);
+      const callAt = source.indexOf(guardCall);
+      for (const later of ["new PrismaPg(", "new PrismaClient(", "globalForPrisma.prisma ||", "const globalForPrisma"]) {
+        expect(source.indexOf(later), later).toBeGreaterThan(callAt);
+      }
+      // 呼び出しの行は、分岐（if・三項演算子・&&）の中にない
+      // callAt は guardCall の先頭の改行の位置なので、その次の文字から行末までが呼び出しの行
+      const line = source.slice(callAt + 1, source.indexOf("\n", callAt + 1));
+      expect(line.trim()).toBe("assertVitestDatabaseAccess();");
+    });
+
+    it("単体テストでの拒否と、Vitest 以外での素通りは変わっていない", () => {
+      expect(guardFn).toContain("if (!isVitest) return;");
+      expect(guardFn).toMatch(/if \(env\.KATANA_DB_TEST_MODE !== "integration" \|\| env\.KATANA_TEST_RUNNER !== "script"\) \{\s*throw new Error\(/);
+      expect(guardFn).toContain("The real Prisma Client cannot be loaded in unit tests.");
+      // 単体テストの拒否は、ファイルの読み込みと共通の検証より前
+      expect(guardFn.indexOf("cannot be loaded in unit tests")).toBeLessThan(guardFn.indexOf("readEnvFileInCwd("));
+      expect(guardFn.indexOf("if (!isVitest) return;")).toBeLessThan(guardFn.indexOf("cannot be loaded in unit tests"));
+    });
+
+    it("env ファイルの読み込みは作業ディレクトリの .env・.env.test だけで、値を表示しない", () => {
+      expect(source).toContain('function readEnvFileInCwd(fileName: ".env" | ".env.test")');
+      expect(source).toContain("readFileSync(path.resolve(process.cwd(), fileName)");
+      expect(source).not.toMatch(/console\.|process\.stdout|process\.stderr/);
+      expect(source).not.toMatch(/\$\{[^}]*(DATABASE_URL|PASSWORD|source|env\[)/);
+    });
+
+    it("vitest.config.ts（通常テスト）は、統合テストのモードを無効にしたまま", () => {
+      const unitConfig = readFileSync(path.join(__dirname, "..", "..", "vitest.config.ts"), "utf8");
+      expect(unitConfig).toContain('KATANA_DB_TEST_MODE: "unit"');
+      expect(unitConfig).toContain('"**/*.integration.test.{ts,tsx}"');
+    });
   });
 });
