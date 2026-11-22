@@ -33,8 +33,7 @@ export default function ProductFilter({
         </SelectTrigger>
         <SelectContent>
           <SelectItem value="ALL">すべて</SelectItem>
-          <SelectItem value="ON_SALE">販売中</SelectItem>
-          <SelectItem value="RESERVED">商談中</SelectItem>
+          <SelectItem value="ACTIVE">販売中</SelectItem>
           <SelectItem value="SOLD">売約済</SelectItem>
         </SelectContent>
       </Select>

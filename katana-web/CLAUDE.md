@@ -238,6 +238,24 @@ For Prisma changes:
 
 Do not execute destructive database operations without explicit approval.
 
+## Testing and Test Database
+
+Tests run against a dedicated test database, separate from the development database. See `docs/TESTING.md` for the commands and procedures, and `docs/PLAN-test-db-isolation.md` for the design and history.
+
+- Development DB: `localhost:5433`, database `katana` (`.env`). Never write to it from tests.
+- Test DB: `127.0.0.1:5434`, database `katana_test`, Docker project `katana-test`, container `katana-test-db` (`.env.test`, `.env.test.readonly`). Its data lives on tmpfs.
+
+Rules:
+
+- Get explicit approval, per operation, before connecting to any database, running any Docker command (including read-only ones), running the Prisma CLI, applying migrations or seeds, or running integration tests.
+- Do not run `npm test` / `npx vitest run` without file arguments unless approved for that run. Run only named test files that do not touch a database, Docker or child processes.
+- Do not run the Prisma CLI directly against the test DB (`migrate deploy`, `migrate reset`, `db push`, `studio`, ...). Use the `npm run testdb:*` scripts.
+- Do not run `docker compose` directly for the test DB. Use `scripts/testdb.mts`.
+- Six fixed gates in `scripts/testdb-*.mts` (migration, checksum, catalog, schema diff, read-only role create, read-only role grant-sync) are all disabled. Enable one only with explicit approval, through a focused commit that also updates the matching static test, and disable it again after the approved run.
+- Do not weaken the database guards (`lib/db/`, `lib/testing/`) or their tests to make something pass.
+- On failure, do not retry automatically or repair the database or containers. Report and wait for approval.
+- Never print or record passwords, `AUTH_SECRET` or full connection strings.
+
 ## Git Rules
 
 The developer is currently working from the `Develop` branch.

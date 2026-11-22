@@ -13,7 +13,6 @@ out/
 
 # Prisma
 prisma/*.db
-prisma/migrations/
 lib/generated/prisma
 
 # Logs
@@ -38,3 +37,10 @@ file_paths.txt
 doc-filelist.js
 doc-script.js
 doc-style.css
+
+# Local-only session notes (not shared via git)
+docs/sessions/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+next-env.d.ts

@@ -226,7 +226,7 @@ model PriceHistory {
 
   oldPrice Int?
 
-  newPrice Int
+  newPrice Int?
 
   changedAt DateTime @default(now())
 }

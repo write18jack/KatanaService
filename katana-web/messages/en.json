@@ -42,6 +42,12 @@
     "logout": "Logout"
   },
 
+  "AccessSuspended": {
+    "title": "Access suspended",
+    "description": "This account cannot access the dashboard at the moment. Please contact your administrator for assistance.",
+    "logout": "Log out"
+  },
+
   "Login": {
     "title": "Login",
     "email": "Email",
