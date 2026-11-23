@@ -3303,7 +3303,34 @@ npm run test:integration ─► 専用runner
 | 4-4 | setupFiles（`lib/testing/integrationSetup.ts`。本体は `lib/testing/integrationWorkerCheck.ts`）：同じゲートの後に `@/lib/prisma` を動的 import し、SELECT 1文で本人確認。`vitest.integration.config.ts` に `setupFiles`・`bail: 1` | `7ae4047` | 6ファイル・627件成功。ゲートの有効化・Prisma の静的 import を一時的に入れると静的テストが失敗することを確認（ハッシュで復元を確認） |
 | 4-5 | 記録とドキュメント：`CLAUDE.md`（第7のゲートの2か所の適用）、`docs/TESTING.md`（5章「統合テストの経路」）、本節 | `aee9c88` | テストは実行していない（文書の変更だけ） |
 | 4-6 | 統合テストが失敗したときの復旧方式の調査・設計（コードの変更なし）。**採用：案2（既存のコマンドによる段階的な手動復旧）。延期：案1（専用の `testdb:reset`）。不採用：案3（テストで作ったデータだけを SQL で削除する。「SQL による削除をしない」方針に反する）。** 案1を延期した理由：down → up → migration を1回の実行で続けると「危険な操作を無条件に連続実行しない」と衝突する、migration のゲートを迂回できない、R9 は利便性の問題とされている、案2の部品はすべてあり 2026-11-07〜08 に実DBで1回実施した実績がある。`katana_test_ro` は統合テストでは使わないので、統合テストのための復旧の対象外（schemaDiff の前に、必要なら別に作り直す） | なし（調査だけ） | テストは実行していない |
-| 4-7 | 案2の手順の文書化：`docs/TESTING.md` の6章「統合テスト失敗後のテストDB復旧」（復旧が必要な状況、始める前の確認、状態 A・B・C ごとの対応、手順1〜10と止まる条件、`katana_test_ro` の扱い、完了条件、開発用DB の保護）。コマンド名・引数・エラーコードは、`package.json` と runner の実装（`parseTestDbArgs`・`parseTestDbMigrateArgs`・ro-role の引数の一覧）に静的に照合した | 未commit（記録の時点） | テストは実行していない（文書の変更だけ） |
+| 4-7 | 案2の手順の文書化：`docs/TESTING.md` の6章「統合テスト失敗後のテストDB復旧」（復旧が必要な状況、始める前の確認、状態 A・B・C ごとの対応、手順1〜10と止まる条件、`katana_test_ro` の扱い、完了条件、開発用DB の保護）。コマンド名・引数・エラーコードは、`package.json` と runner の実装（`parseTestDbArgs`・`parseTestDbMigrateArgs`・ro-role の引数の一覧）に静的に照合した | `7a6b156` | テストは実行していない（文書の変更だけ） |
+| 4-8A | Step 4-7 の文書の commit と、migration の予行（`npm run testdb:migrate`。引数なし） | `7a6b156` | 予行は終了コード0（Docker・DB に触れず、Prisma CLI も起動しない。ゲートは無効と表示）。出力の秘密情報の値を確かめるために、**予行を2回実行した**（指示は1回。2回とも同じ予行） |
+| 4-8B | テストDB の復旧（`docs/TESTING.md` の6章の案2の手順1〜10）。各操作は、個別の承認を得て1回ずつ実行した。詳細は下の「Step 4-8B の実施記録」 | `136ebeb`（migration のゲートの一時有効化）・`72d95fb`（無効化） | 状態 A → C（migration 8件・テーブルは空）。最後の `verify`・`identity` は成功し、migration の前後で同じコンテナ・同じ postmaster |
+
+**Step 4-8B の実施記録（2026-11-23。テストDB の復旧。統合テストは実行していない）：**
+
+- **始めた時点の状態：** 最初の `npm run testdb:status` は終了コード1（`DOCKER_COMMAND_FAILED`。Docker のソケットがなく、デーモンが停止していた。`docker context show` の後の `docker compose config` で止まった）。ユーザーが Docker Desktop を起動した後の `status` は終了コード0で、**`katana-test-db` は `exited`（停止中）**だった。データ領域は tmpfs なので、前の状態 C（最後の記録は 2026-11-14）と `katana_test_ro` は失われたと判断した（停止中のコンテナには接続できないので、DB では確かめていない）。前のコンテナ `591ffba8e050…` は、下の down で削除した。
+- **実行した操作と結果**（すべて1回ずつ。出力の秘密情報の照合は毎回行い、接続 URL は0件。値の一致は、開発用DB のパスワードが英単語の `password` で、表示の「password hidden」に一致したものだけ）:
+
+  | # | 操作 | 終了コード | 結果 |
+  |---|---|---|---|
+  | 1 | `npm run testdb:status`（Docker の起動の後） | 0 | `katana-test-db`（exited）だけ。プロジェクトのボリュームなし。5434番の公開なし。`katana-db` なし。開発用ボリューム `katana-web_postgres_data`（2026-07-18T05:42:41Z、ラベル `katana-web`・`postgres_data`）は未使用。ボリュームは全部で3つ |
+  | 2 | `npm run testdb:down`（予行） | 0 | 事前の確認（プロジェクトの中身、マウントの照合）に通った。実行予定は固定の `docker compose down` だけ |
+  | 3 | `npm run testdb:down -- --apply` | 0 | `katana-test-db` を停止・削除。停止後の照合に通った（テスト用のコンテナなし、ボリュームの増減なし、開発用の記録は不変） |
+  | 4 | `npm run testdb:up`（予行） | 0 | コンテナなし、5434番は空き、イメージ `postgres:15` はローカルにある |
+  | 5 | `npm run testdb:up -- --apply` | 0 | 新しい `katana-test-db` を作成・起動（running・healthy）。起動後の照合に通った（初期化用の読み取り専用の bind と tmpfs だけ、`127.0.0.1:5434` だけ、ボリュームの増加なし、開発用の記録は不変） |
+  | 6a | `npm run testdb:status` | 0 | `katana-test-db`（running・healthy）だけ。5434番の公開は `katana-test-db` だけ |
+  | 6b | `npm run testdb:identity` | 0 | 照合にすべて通った。コンテナID `1ba1b8ccc55d6dc8cf11d885955d0970e17d4c291acf2bed18646c90df8508f4`、イメージID `sha256:29342cb52157…`、StartedAt `2026-11-23T04:18:17.919851254Z`、RestartCount 0、`katana-test_default` のアドレス `172.18.0.2`、ボリュームは3つ（記録済みの無名の `0df3f60a…`・`b655b6e4…` と開発用） |
+  | 6c | `npm run testdb:verify` | 0 | **状態 A**。本人確認の4項目が一致、権限の4項目が true、`inet_server_addr` `172.18.0.2`・`inet_server_port` 5432・`pg_postmaster_start_time` `2026-11-23T04:18:18.515202Z`（StartedAt の約0.6秒後） |
+  | 7 | migration のゲートを一時的に有効にする commit `136ebeb` | — | スクリプトの `liveDatabase:` を固定のリテラル `{ mode: "enabled" }` にし、ゲートの行を固定している静的テスト（`testDbMigrate`・`testDbChecksums`・`testDbCatalogRunner`・`schemaDiff`・`testDbReadOnlyRoleRunner`）を合わせて更新。名前を指定した6ファイル・591件が成功、型検査・ESLint 成功。ゲートの行を環境変数で切り替える形に一時的に変えると、静的テストが11件失敗することを確認した（ハッシュで復元を確認）。ほかの6つのゲートは無効のまま |
+  | 8 | `npm run testdb:migrate -- --apply` | 0 | D1・F1 の照合に通った（コンテナ `1ba1b8ccc55d`、内部ポート 5432、アドレスはコンテナのネットワークと一致）。`prisma migrate deploy` で8件を適用した（`katana_test`・`127.0.0.1:5434`）。migration の後の照合で状態 C（8件・テーブルは空）。列・インデックス・制約の定義は比較していない |
+  | 9 | migration のゲートを無効に戻す commit `72d95fb` | — | `136ebeb` で変えた6ファイルを `7a6b156` の内容に戻した（HEAD のファイルの中身は `7a6b156` と完全に一致）。6ファイル・591件が成功、型検査・ESLint 成功。7つのゲートはすべて無効 |
+  | 10a | `npm run testdb:verify` | 0 | **状態 C**（8件・テーブルは空）。本人確認の4項目・権限の4項目は手順6c と同じ。`pg_postmaster_start_time` は手順6c と完全に一致（再起動なし） |
+  | 10b | `npm run testdb:identity` | 0 | 照合にすべて通った。手順6b の値と、全項目が完全に一致（コンテナ・イメージ・StartedAt・RestartCount・ネットワーク・ボリューム・開発用の記録・5434番の公開） |
+
+- **復旧の完了条件（`docs/TESTING.md` の6章 F）：** Docker の対象の同一性、DB と postmaster、migration 8件の整合、状態 C、固定ゲートの無効化は、手順10a・10b の新しい結果で満たした。開発用DB は、up・down の事後の照合で開発用ボリュームの記録が変わっていないことを確かめた（開発用DB の件数の照合は、Phase 4 の開始時・終了時の別の工程で、まだ行っていない）。本項が、復旧の結果の記録。
+- **注意：** 上の識別情報は、実測した時点の値で、将来の接続先を固定しない。状態 C は手順10a の時点の結果。`katana_test_ro` はない（統合テストには不要。schemaDiff の前に、必要なら `docs/TESTING.md` の6章 E の手順で作り直す）。checksum の再照合・カタログの監査・schemaDiff は、今回のコンテナでは行っていない（延期可能の扱いは変えない）。
+- **途中で起きたこと：** 手順9で、変数にまとめたパスが zsh で分割されず、最初の `git checkout` が失敗した（ファイルは変わっていない）。パスを直接並べてやり直した。
 
 **設計（2-2・2-3）との違い：**
 
@@ -3324,7 +3351,7 @@ npm run test:integration ─► 専用runner
 
 | 項目 | 内容 | 分類 |
 |---|---|---|
-| テストデータが残った場合の復旧 | 自動では削除しない。元に戻すには、テストDB の作り直し（`testdb:reset` は未実装。手作業なら Docker の down・up、migration のゲートの有効化、`katana_test_ro` の再作成。それぞれ承認が必要）。**方法を、実行の前に決める（今回は reset を実装・実行しない）**。（2026-11-23 追記・Step 4-6・4-7）**復旧方針決定済み（案2）。運用手順の文書化（`docs/TESTING.md` の6章）と、実行前の確認（手順の予行）が必要。** `katana_test_ro` の再作成は、統合テストのための復旧から外した | A |
+| テストデータが残った場合の復旧 | 自動では削除しない。元に戻すには、テストDB の作り直し（`testdb:reset` は未実装。手作業なら Docker の down・up、migration のゲートの有効化、`katana_test_ro` の再作成。それぞれ承認が必要）。**方法を、実行の前に決める（今回は reset を実装・実行しない）**。（2026-11-23 追記・Step 4-6・4-7）**復旧方針決定済み（案2）。運用手順の文書化（`docs/TESTING.md` の6章）と、実行前の確認（手順の予行）が必要。** `katana_test_ro` の再作成は、統合テストのための復旧から外した。（2026-11-23 追記・Step 4-8B）**案2の手順1〜10を1回実施し、状態 A → C に復旧した**（停止していたコンテナを作り直した。上の「Step 4-8B の実施記録」）。統合テストの後に同じ手順が必要になった場合も、改めて個別の承認で行う | A |
 | 同時実行（ロック機構なし） | 統合テスト・復旧・ほかの `testdb:*` の操作が、別の端末・セッションで同時に行われることを検出する仕組み（ロックなど）はない。**運用で防ぐ**（1つのセッションでだけ操作し、統合テストと復旧を同時に行わない。第7のゲートと migration のゲートを同時に有効にしない）。強化の案（未実装）：`testdb:verify` で、ほかのセッションの有無を読み取りで確かめる | A（運用で守ることの確認）／C（仕組みの追加） |
 | 実DBでの Prisma の SQL の結果の型 | `$queryRaw` が `::text` と `shobj_description()` を文字列で返す前提。違えば `IDENTITY_UNAVAILABLE` で止まる（安全側） | B |
 | `bail` が発動したときの teardown | `bail: 1` で残りを中止したときに、teardown が実行されること。実行されなければ、残ったデータは次の実行の開始前の検査で検出される | B |
@@ -3371,6 +3398,7 @@ npm run test:integration ─► 専用runner
 
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
+   - **（2026-11-23 更新・Step 4-8B）この行が、下の Step 4-7・4-5 の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-8B の記録の commit（作る場合）、またはその親の `72d95fb`（`test: restore disabled migration gate after test DB recovery`）。変更済み（未commit）は、記録を commit していなければ本ファイルだけ。未追跡は `docs/presentations/KatanaService_プロジェクト構成.pptx`・`test-data/`。固定ゲートは7つとも無効（第7のゲートは2か所とも）。テストDB は、2026-11-23 に作り直したコンテナ `katana-test-db`（`1ba1b8ccc55d…`）で、最後に確認した時点（Step 4-8B の手順10a）で状態 C。`katana_test_ro` はない。次のセッションでも、状態 C を過去の記録から推定せず、`status`・`identity`・`verify` で確かめる（コンテナが停止・再起動していれば、tmpfs のためデータは失われている）。次の候補（どれも承認が必要）：開発用DB の件数の記録（Phase 4 の開始時）、R13 の build、`npm test` の全体、統合テストのための第7のゲートの有効化（2か所を同じ commit で）。
    - **（2026-11-23 更新・Step 4-7）この行が、下の Step 4-5 の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-7 の記録の commit（作る場合）、またはその親の `aee9c88`（`docs: record Phase 4 integration safety infrastructure`）。変更済み（未commit）は、Step 4-7 を commit していなければ `docs/TESTING.md`・本ファイルの2つ。未追跡は `docs/presentations/KatanaService_プロジェクト構成.pptx`・`test-data/`。固定ゲートは7つとも無効（第7のゲートは2か所とも）。
    - **（2026-11-23 更新・Step 4-5）以下の想定より、この行が優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-5 の記録の commit（作る場合）、またはその親の `7ae4047`（`test: verify integration database identity in Vitest workers`）。変更済み（未commit）は、Step 4-5 を commit していなければ `CLAUDE.md`・`docs/TESTING.md`・本ファイルの3つ。未追跡は `docs/presentations/KatanaService_プロジェクト構成.pptx`・`test-data/`。固定ゲートは7つとも無効（第7のゲートは2か所とも）。下の `chore/test-db-isolation` 以降の行は、Phase 3 の時点の想定（`chore/test-db-isolation` は `09423a4` のまま）。
    - ブランチ：`chore/test-db-isolation`
