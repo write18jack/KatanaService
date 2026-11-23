@@ -955,7 +955,7 @@ describe("スクリプトの配線と、ほかの経路への影響（静的な�
       expect(gate).not.toBe(RO_ROLE_CREATE_DISABLED);
       expect(gate).not.toBe(RO_ROLE_GRANT_SYNC_DISABLED);
     }
-    expect(code("scripts/testdb-migrate.mts")).toMatch(/^ {2}liveDatabase: LIVE_DATABASE_DISABLED,$/m);
+    expect(code("scripts/testdb-migrate.mts")).toMatch(/^ {2}liveDatabase: \{ mode: "enabled" \},$/m); // Step 4-8B：テストDB の復旧のために一時的に有効（固定のリテラル。migrate --apply の1回の後、LIVE_DATABASE_DISABLED に戻す）
     expect(code("scripts/testdb-checksums.mts")).toMatch(/^ {2}checksumDatabase: CHECKSUM_DATABASE_DISABLED,$/m);
     expect(code("scripts/testdb-catalog.mts")).toMatch(/^ {2}catalogDatabase: CATALOG_AUDIT_DATABASE_DISABLED,$/m);
     expect(EXPECTED_RO_ROLE_MIGRATION_COUNT).toBe(EXPECTED_MIGRATION_COUNT);

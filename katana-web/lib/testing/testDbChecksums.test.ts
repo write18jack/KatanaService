@@ -478,7 +478,7 @@ describe("静的な確認（ソース）", () => {
     expect(Object.values(pkg.scripts).filter((s) => s.includes("testdb-checksums.mts"))).toEqual(["node scripts/testdb-checksums.mts"]);
   });
 
-  it("既存の migration 用の固定ゲートは無効のまま", () => {
-    expect(code("scripts/testdb-migrate.mts")).toMatch(/^ {2}liveDatabase: LIVE_DATABASE_DISABLED,$/m);
+  it("既存の migration 用の固定ゲートは、Step 4-8B の一時的な有効化（固定のリテラル）のほかは変えていない", () => {
+    expect(code("scripts/testdb-migrate.mts")).toMatch(/^ {2}liveDatabase: \{ mode: "enabled" \},$/m); // Step 4-8B：テストDB の復旧のために一時的に有効（固定のリテラル。migrate --apply の1回の後、LIVE_DATABASE_DISABLED に戻す）
   });
 });
