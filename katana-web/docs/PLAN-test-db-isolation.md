@@ -3318,6 +3318,8 @@ npm run test:integration ─► 専用runner
 | 4-12 | `npm test`（通常テストの全体）の実行。詳細は下の「Step 4-12 の実施記録」 | なし（コードの変更なし） | **43ファイル・2,185件が成功（終了コード0）。** 統合テストは含まれず、DB に接続した形跡はない |
 | 4-13 | F-01 の E2E の設計（調査だけ。コードの変更なし）と、方式の決定（ユーザーの承認による） | なし | 方式 B・データの準備 D1・固定ゲートあり・E2E の後はテストDB の作り直し。下の「Step 4-13・4-13A の記録」 |
 | 4-13A | P9：`lib/prisma.ts` に、Vitest の外で `KATANA_DB_TARGET` が設定されたときの接続先の検証を追加。あわせて R13 の build を再確認 | `83fc0f9` | 7ファイル・765件が成功、型検査・ESLint 成功、静的テストの空振りの確認（2種類の書き換えで各1件の失敗）。build の再確認は成功（DB に接続した形跡なし） |
+| 4-13B | E2E 用の開発サーバーを起動するスクリプト（`scripts/e2e-dev-server.mts`。本体は `lib/testing/e2eDevServer.ts`）と、**8つ目の固定ゲート `E2E_DEV_SERVER_DISABLED`**（無効）。`package.json` に `e2e:dev-server`（予行だけ）。開発サーバーは起動していない | `710bbd1` | 9ファイル・809件が成功（新しいテスト29件を含む）、型検査・ESLint 成功、静的テストの空振りの確認（2種類の書き換えで各1件の失敗） |
+| 4-14 | 8つ目のゲートの文書化：`CLAUDE.md`（ゲートを8つに。テストDB を使う開発サーバーはスクリプトからだけ起動し、Phase 4 のあいだ開発用DB を起動しない）、`docs/TESTING.md`（ゲートの表・エラーコード・コマンドの一覧、新しい7章「E2E 用の開発サーバー」）、本ファイル。あわせて、`docs/TESTING.md` の、Step 4-8B・4-10 より前のままだった事実の記述（統合テストは未実行、復旧は未実施、最後の状態 C は 2026-11-14）を、今の事実に合わせて追記で直した | 未commit（記録の時点） | テストは実行していない（文書の変更だけ） |
 
 **Step 4-8B の実施記録（2026-11-23。テストDB の復旧。統合テストは実行していない）：**
 
@@ -3367,6 +3369,16 @@ npm run test:integration ─► 専用runner
 
 - **終了時の比べ方：** Phase 4 の最後に、同じコマンドで同じ項目を読む（読み取りだけ。承認が必要）。1〜3がすべて0のまま、4の作成日時・ラベル・config-hash・大きさが同じなら、完了条件（読み替えたもの）を満たす。大きさは Docker の集計の値で、細かい書き込みまでは捉えないので、主な根拠は1〜3。途中で開発用DB を起動した場合は、この比べ方は使えない。
 - **限界：** 記録は、読んだ2つの時点のスナップショット。その間に、別のプロセスが一時的に 5433 番で DB を起動して止めた場合は、検出できない（運用で、Phase 4 のあいだ開発用DB を起動しない）。
+
+**Step 4-13B の記録（2026-11-23。E2E 用の開発サーバーの起動スクリプトと、8つ目の固定ゲート。commit `710bbd1`）：**
+
+- **構成：** 本体 `lib/testing/e2eDevServer.ts`（env ファイルの読み込み・乱数・子プロセスの起動・表示をすべて引数で受け取り、`child_process`・DB ドライバ・Prisma を読み込まない）と、入口 `scripts/e2e-dev-server.mts`（固定のゲートと実際の部品を渡すだけ）。統合テストの runner と同じ構成。
+- **動作：** 引数なしは予行（検証と、起動予定のコマンド・環境変数の表示だけ。`DATABASE_URL`・`AUTH_SECRET` は伏せ字）。`--start` は起動の意思表示で、8つ目の固定ゲート `E2E_DEV_SERVER_DISABLED`（`Object.freeze({ mode: "disabled" })`。入口で固定して渡す）が無効なので、検証の後、起動の前に `E2E_DEV_SERVER_LIVE_DISABLED` で止まる。ゲートが有効なときだけ、`node node_modules/next/dist/bin/next dev --hostname 127.0.0.1 --port 3100` を shell なしで起動する。
+- **起動の前の検証：** 引数、Node の起動オプション、**親の `NODE_OPTIONS`**（P9 でアプリの中では見ないことにした分）、`.env.test` の有無、乱数（43文字以上・base64url の文字だけ）、Next の CLI の存在。作った環境変数を、開発サーバーの中の `lib/prisma.ts` と同じ `assertAppDatabaseTarget()` で確かめる。
+- **渡す環境変数：** 親の許可リストの変数（`inheritAllowedEnv`）、`DATABASE_URL`（`.env.test` の値）、`KATANA_DB_TARGET=test`、`AUTH_SECRET`（起動のたびに `node:crypto` の32バイトの乱数。保存も表示もしない）、`NEXT_TELEMETRY_DISABLED=1` だけ。親の `DATABASE_URL`・`AUTH_SECRET`・`AUTH_URL`・`NEXTAUTH_URL`・`PG*`・`DOTENV_*`・`PORT` などは渡さない。`NODE_ENV`・`AUTH_URL`・`AUTH_TRUST_HOST` は設定しない（`next dev` が development にし、Auth.js は `NODE_ENV` が production でなければホストを信頼する。インストール済みの `@auth/core` のソースで確認）。
+- **検証：** 名前を指定した9ファイル・809件が成功（`lib/testing/e2eDevServer.test.ts` の29件：ゲートの凍結と無効時の停止、`"enabled"` と完全に一致しない値、環境変数で有効にならないこと、引数、起動の前の検証の失敗、`.env.test` の誤り、渡す環境変数、予行の表示に秘密情報を含めないこと、偽の spawn での起動の引数、起動の失敗、入口と `package.json` の静的検査）。型検査は最初、`spawn` の `env` の型の不一致で失敗し、`scripts/testdb-migrate.mts` と同じく、値を変えずに型だけ合わせた。入口のゲートの行を有効の値にする書き換えと、環境変数で切り替える書き換えを一時的に入れると、静的テストがそれぞれ1件失敗することを確認した（ハッシュで復元を確認）。通常テストの件数の期待値を 43 → 44。
+- **秘密情報の照合：** stage した内容で照合し、結果を確かめてから commit した。一致は、英単語の `password`（表示の文言「password hidden」など）の1件だけ。
+- **まだ行っていないこと：** 予行（`npm run e2e:dev-server`。本物の `.env.test` で検証が通ることの確認）、開発サーバーの起動、データの準備用のスクリプト（Step 4-13C）、E2E の手順書。
 
 **Step 4-13・4-13A の記録（2026-11-23。F-01 の E2E の設計と、P9 のガード）：**
 
@@ -3492,6 +3504,7 @@ npm run test:integration ─► 専用runner
 
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
+   - **（2026-11-23 更新・Step 4-14）この行が、下の Step 4-13A 以前の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-14 の文書の commit（作る場合）、またはその親の `710bbd1`（`feat: add gated launcher for the E2E dev server`）。変更済み（未commit）は、文書を commit していなければ `CLAUDE.md`・`docs/TESTING.md`・本ファイルの3つ。未追跡は既存の2件。**固定ゲートは8つ（`E2E_DEV_SERVER_DISABLED` を含む）とも無効。** E2E 用の開発サーバーは、まだ一度も起動していない。次の候補（どれも承認が必要）：E2E 用の開発サーバーの予行（`npm run e2e:dev-server`。起動しない）、Step 4-13C（データの準備用のスクリプトと固定ゲート。コードだけ）、E2E の手順書。
    - **（2026-11-23 更新・Step 4-13A）この行が、下の Step 4-12 以前の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-13A の記録の commit（作る場合）、またはその親の `83fc0f9`（`feat: guard the app database target for E2E dev servers (P9)`）。変更済み（未commit）は、記録を commit していなければ本ファイルだけ。未追跡は既存の2件。固定ゲートは7つとも無効。P9 は実装済みで、build の再確認も成功。E2E の方式は B・D1・固定ゲートあり・作り直し（4-A の「Step 4-13・4-13A の記録」）。次の候補（どれも承認が必要）：Step 4-13B（E2E 用の開発サーバーを起動するスクリプトと固定ゲート。コードだけ）、Step 4-13C（データの準備用のスクリプトと固定ゲート。コードだけ）。
    - **（2026-11-23 更新・Step 4-12）この行が、下の Step 4-11 以前の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-12 の記録の commit（作る場合）、またはその親の `c0dcf15`（`docs: record R13 production build result in Phase 4`）。変更済み（未commit）は、記録を commit していなければ本ファイルだけ。未追跡は既存の2件。固定ゲートは7つとも無効。統合テスト6件・R13 の build・`npm test` の全体（43ファイル・2,185件）は、どれも成功済み。Phase 4 の残り（どれも承認が必要）：F-01 の E2E（先に P9 の対応と、Playwright か手動かの判断）、Phase 4 の終了時の案Aの記録。Google Fonts の取得の確認は任意（`.next/` の削除を伴う）。
    - **（2026-11-23 更新・Step 4-11）この行が、下の Step 4-10 以前の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-11 の記録の commit（作る場合）、またはその親の `a55940b`（`docs: record first integration test run in Phase 4`）。変更済み（未commit）は、記録を commit していなければ本ファイルだけ。未追跡は既存の2件。固定ゲートは7つとも無効。統合テスト6件は成功済み、R13 の build も成功済み（DB に接続しない）。Phase 4 の残り（どれも承認が必要）：`npm test` の全体、F-01 の E2E（先に P9 の対応と Playwright の判断）、Phase 4 の終了時の案Aの記録。Google Fonts の取得の確認は任意（`.next/` の削除を伴う）。
