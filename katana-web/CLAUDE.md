@@ -251,7 +251,7 @@ Rules:
 - Do not run `npm test` / `npx vitest run` without file arguments unless approved for that run. Run only named test files that do not touch a database, Docker or child processes.
 - Do not run the Prisma CLI directly against the test DB (`migrate deploy`, `migrate reset`, `db push`, `studio`, ...). Use the `npm run testdb:*` scripts.
 - Do not run `docker compose` directly for the test DB. Use `scripts/testdb.mts`.
-- Six fixed gates in `scripts/testdb-*.mts` (migration, checksum, catalog, schema diff, read-only role create, read-only role grant-sync) are all disabled. Enable one only with explicit approval, through a focused commit that also updates the matching static test, and disable it again after the approved run.
+- Seven fixed gates are all disabled: six in `scripts/testdb-*.mts` (migration, checksum, catalog, schema diff, read-only role create, read-only role grant-sync) and the integration database gate (`INTEGRATION_DATABASE_DISABLED`) in `lib/testing/integrationGlobalSetup.ts`. Enable one only with explicit approval, through a focused commit that also updates the matching static test, and disable it again after the approved run.
 - Do not weaken the database guards (`lib/db/`, `lib/testing/`) or their tests to make something pass.
 - On failure, do not retry automatically or repair the database or containers. Report and wait for approval.
 - Never print or record passwords, `AUTH_SECRET` or full connection strings.

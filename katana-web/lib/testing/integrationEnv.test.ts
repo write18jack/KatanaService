@@ -169,26 +169,43 @@ describe("readIntegrationRuntimeFiles", () => {
   });
 });
 
-// globalSetup のソースを文字列として読むだけ（import しない。Step 4-1）
+// globalSetup のソースを文字列として読むだけ（import しない。Step 4-1・4-3）。
+// Step 4-3 で、本体を lib/testing/integrationDatabaseSetup.ts の runIntegrationGlobalSetup に移し、無条件の throw を第7の固定ゲートに置き換えた。
+// 止まることの振る舞いは lib/testing/integrationDatabaseSetup.test.ts、ゲートの行の固定は lib/testing/testDbMigrate.test.ts で確かめる
 describe("integrationGlobalSetup の静的検査（R14-1）", () => {
-  const source = readFileSync(path.join(__dirname, "integrationGlobalSetup.ts"), "utf8");
-  const body = source.slice(source.indexOf("export default function setup"));
+  /** コメントを除いたコード（説明の中の名前で、禁止語の検査が誤検出しないように） */
+  const code = (file: string) =>
+    readFileSync(path.join(__dirname, file), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+  const entry = code("integrationGlobalSetup.ts");
+  const core = code("integrationDatabaseSetup.ts");
+  const body = core.slice(core.indexOf("export async function runIntegrationGlobalSetup"));
 
-  it("接続前の検証を、強制停止の throw より前に1回だけ呼ぶ", () => {
-    const guardCall = "assertIntegrationRuntimeEnv(process.env, readIntegrationRuntimeFiles(process.cwd()));";
+  it("globalSetup は、作業ディレクトリの .env.test・.env を読む関数と process.env を、本体に渡す", () => {
+    expect(entry).toContain("    env: process.env,");
+    expect(entry).toContain("    readFiles: () => readIntegrationRuntimeFiles(root),");
+    expect(entry).toContain("  const root = process.cwd();");
+  });
+
+  it("本体は、接続前の検証を1回だけ、ゲートの確認と inspectDatabase の呼び出しより前に行う", () => {
+    const guardCall = "assertIntegrationRuntimeEnv(deps.env, files);";
     expect(body.split(guardCall)).toHaveLength(2);
-    expect(body.indexOf(guardCall)).toBeLessThan(body.indexOf("throw new Error("));
+    expect(body.indexOf("const files = deps.readFiles();")).toBeLessThan(body.indexOf(guardCall));
+    const gateAt = body.indexOf('if (deps.integrationDatabase.mode !== "enabled") {');
+    expect(gateAt).toBeGreaterThan(body.indexOf(guardCall));
+    expect(body.indexOf("deps.inspectDatabase")).toBe(-1); // 呼び出しは inspect() の中だけ
+    expect(body.indexOf("await inspect(")).toBeGreaterThan(gateAt);
   });
 
-  it("強制停止は残っていて、DBへの接続の部品を読み込まない", () => {
-    expect(body).toMatch(/throw new Error\(\s*"\[integrationGlobalSetup\][^"]*refusing to start integration tests\.",?\s*\);\s*\}\s*$/);
-    for (const forbidden of ["testDbConnection", "connectTestDatabase", "verifyIntegrationDatabase", "classifyTestDatabase", "@/lib/prisma", '"pg"', "child_process"]) {
-      expect(source).not.toContain(forbidden);
+  it("globalSetup・本体とも、古い検証・別の接続経路を使わない", () => {
+    for (const source of [entry, core]) {
+      for (const forbidden of ["assertIntegrationProcessEnv", "verifyIntegrationDatabase", "classifyTestDatabase", "@/lib/prisma", '"pg"', "child_process"]) {
+        expect(source, forbidden).not.toContain(forbidden);
+      }
     }
-  });
-
-  it("古い検証（.env.test を見ない assertIntegrationProcessEnv）は使わない", () => {
-    expect(source).not.toContain("assertIntegrationProcessEnv");
+    // 本体は DB ドライバ・接続の部品を読み込まない（globalSetup が渡す）
+    for (const forbidden of ["testDbConnection", "connectTestDatabase", "testDbMigrate", "testDbDocker"]) expect(core, forbidden).not.toContain(forbidden);
   });
 });
 

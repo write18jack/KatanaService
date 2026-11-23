@@ -434,12 +434,27 @@ describe("runTestDbMigrate：実DBへの接続の許可（強制停止）", () =
     }
   });
 
-  it("globalSetup の強制停止は変わっていない（DBへの接続の部品も読み込まない）", () => {
+  // Step 4-3：globalSetup の無条件の throw を、第7の固定ゲート（INTEGRATION_DATABASE_DISABLED）に置き換えた。
+  // 止まることの振る舞いは lib/testing/integrationDatabaseSetup.test.ts で、偽の部品を使って確かめる
+  it("globalSetup は第7の固定ゲートを無効の定数で渡し、有効にする経路がない（接続の部品は inspectDatabase の中だけ）", () => {
     const source = codeOf("lib/testing/integrationGlobalSetup.ts");
-    expect(source).toContain("refusing to start integration tests.");
-    expect(source).toMatch(/throw new Error\(/);
-    for (const forbidden of ["testDbConnection", "connectTestDatabase", "verifyIntegrationDatabase(", "classifyTestDatabase", '"pg"']) {
-      expect(source).not.toContain(forbidden);
+    // ゲートの行は、固定の無効値だけ（条件分岐・環境変数・引数なし）
+    expect(source.match(/^ {4}integrationDatabase: .*$/gm)).toEqual(["    integrationDatabase: INTEGRATION_DATABASE_DISABLED,"]);
+    expect(source.match(/INTEGRATION_DATABASE_DISABLED/g)).toHaveLength(2);
+    expect(source).toMatch(/import \{[^}]*\bINTEGRATION_DATABASE_DISABLED\b[^}]*\} from "\.\/integrationDatabaseSetup\.ts";/);
+    for (const forbidden of ['"enabled"', "mode:", "process.argv", "?", "||", "&&", "if (", "INTEGRATION_DATABASE_ENABLED"]) {
+      expect(source, forbidden).not.toContain(forbidden);
+    }
+    // process.env は env として1か所で渡すだけ（ゲートを環境変数から読まない）
+    expect(source.match(/process\.env/g)).toEqual(["process.env"]);
+    expect(source).toContain("    env: process.env,");
+    // 接続の部品は import と、inspectDatabase の1行の中だけ
+    const inspectLine = "    inspectDatabase: (input) => createTestDatabaseInspector({ root, connect: connectTestDatabase })(input),";
+    expect(source.split(inspectLine)).toHaveLength(2);
+    for (const part of ["connectTestDatabase", "createTestDatabaseInspector"]) expect(source.match(new RegExp(part, "g"))).toHaveLength(2);
+    // 古い検証・別の接続経路・DBを変更する処理を使わない
+    for (const forbidden of ["verifyIntegrationDatabase", "classifyTestDatabase", "assertIntegrationProcessEnv", '"pg"', "child_process", "@/lib/prisma", "TRUNCATE", "DELETE", "DROP", "reset", "migrate"]) {
+      expect(source, forbidden).not.toContain(forbidden);
     }
   });
 });

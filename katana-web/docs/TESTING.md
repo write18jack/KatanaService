@@ -4,6 +4,8 @@
 
 記載は 2026-11-15 時点（HEAD `0c1702b`）の状態に基づきます。**固定ゲートは6つともすべて無効です。**
 
+（2026-11-23 追記・Step 4-3）統合テストの globalSetup に、7つ目の固定ゲート `INTEGRATION_DATABASE_DISABLED` を追加しました。**固定ゲートは7つともすべて無効です。** 詳しくは「固定ゲート」の節と、`npm run test:integration` の行を参照してください。
+
 ---
 
 ## 1. 承認の原則
@@ -86,10 +88,11 @@
 | `SCHEMA_DIFF_DISABLED` | `scripts/testdb-schema-diff.mts` | `--live`（schemaDiff） | 無効 |
 | `RO_ROLE_CREATE_DISABLED` | `scripts/testdb-ro-role.mts` | `--create --apply`（`katana_test_ro` の作成） | 無効 |
 | `RO_ROLE_GRANT_SYNC_DISABLED` | `scripts/testdb-ro-role.mts` | `--grant-sync --apply`（権限の補完） | 無効 |
+| `INTEGRATION_DATABASE_DISABLED` | `lib/testing/integrationGlobalSetup.ts`（統合テストの globalSetup。定数は `lib/testing/integrationDatabaseSetup.ts`） | `npm run test:integration`（統合テストのDBへの接続。Step 4-3 で追加） | 無効 |
 
-ゲートが無効の場合、これらの操作は、事前の検証の後、Docker・DB・Prisma CLI に触れる前に、それぞれのエラー（`TESTDB_MIGRATION_LIVE_DISABLED`・`CHECKSUM_LIVE_DISABLED`・`CATALOG_AUDIT_LIVE_DISABLED`・`SCHEMA_DIFF_LIVE_DISABLED`・`RO_ROLE_CREATE_DISABLED`・`RO_ROLE_GRANT_SYNC_DISABLED`）で止まります。
+ゲートが無効の場合、これらの操作は、事前の検証の後、Docker・DB・Prisma CLI に触れる前に、それぞれのエラー（`TESTDB_MIGRATION_LIVE_DISABLED`・`CHECKSUM_LIVE_DISABLED`・`CATALOG_AUDIT_LIVE_DISABLED`・`SCHEMA_DIFF_LIVE_DISABLED`・`RO_ROLE_CREATE_DISABLED`・`RO_ROLE_GRANT_SYNC_DISABLED`・`INTEGRATION_DATABASE_LIVE_DISABLED`）で止まります。
 
-`testdb:verify` の読み取り専用の接続は、上の6つとは別の固定の許可（`readOnlyDatabase`。Step 3-11B で承認済み）で、有効です。
+`testdb:verify` の読み取り専用の接続は、上の7つとは別の固定の許可（`readOnlyDatabase`。Step 3-11B で承認済み）で、有効です。
 
 ---
 
@@ -134,7 +137,7 @@
 | `npm run testdb:catalog -- --verify` | カタログの監査 | ゲートが無効なので止まる |
 | `node scripts/testdb-schema-diff.mts --live` | schemaDiff（Prisma CLI） | ゲートが無効なので止まる |
 | `node scripts/testdb-ro-role.mts --create --apply` / `--grant-sync --apply` | `katana_test_ro` の作成・補完 | ゲートが無効なので止まる |
-| `npm run test:integration` | 統合テスト | **まだ使えない。** globalSetup（`lib/testing/integrationGlobalSetup.ts`）が、テストを始めずに必ず停止する |
+| `npm run test:integration` | 統合テスト | **まだ使えない。** globalSetup（`lib/testing/integrationGlobalSetup.ts`）は、接続前の検証（R14-1）の後、第7の固定ゲート `INTEGRATION_DATABASE_DISABLED` で、DB に接続する前・テストを始める前に必ず停止する（`INTEGRATION_DATABASE_LIVE_DISABLED`）。ゲートが有効なときだけ、読み取り専用で状態 C とサーバーの識別情報を確かめ、終了後に再確認する（データの削除・reset はしない） |
 
 ### 使わないもの
 
