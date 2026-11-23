@@ -168,20 +168,18 @@ describe("静的検査：setupFiles（lib/testing/integrationSetup.ts。import �
   const raw = readFileSync(path.join(__dirname, "integrationSetup.ts"), "utf8");
   const code = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-  // Step 4-10：統合テストを1回実行するために、承認を得て、ゲートの行を一時的に固定のリテラル { mode: "enabled" } にした
-  // （globalSetup と同じ commit・同じ値）。実行の後、INTEGRATION_DATABASE_DISABLED に戻し、この確認も無効値の形に戻す
-  it("第7の固定ゲートを、globalSetup と同じ固定のリテラルで渡す（Step 4-10 で一時的に有効。切り替える経路がない）", () => {
-    expect(code.match(/^ {2}integrationDatabase: .*$/gm)).toEqual(['  integrationDatabase: { mode: "enabled" },']);
-    expect(code.match(/mode:\s*["']enabled["']/g)).toHaveLength(1);
-    expect(code).not.toContain("INTEGRATION_DATABASE_DISABLED");
-    for (const forbidden of ["process.argv", "||", "&&", "if (", "?", "process.env["]) expect(code, forbidden).not.toContain(forbidden);
+  it("第7の固定ゲートを、globalSetup と同じ無効の定数で渡す（有効にする経路がない）", () => {
+    expect(code.match(/^ {2}integrationDatabase: .*$/gm)).toEqual(["  integrationDatabase: INTEGRATION_DATABASE_DISABLED,"]);
+    expect(code.match(/INTEGRATION_DATABASE_DISABLED/g)).toHaveLength(2);
+    expect(code).toContain('import { INTEGRATION_DATABASE_DISABLED } from "./integrationDatabaseSetup.ts";');
+    for (const forbidden of ['"enabled"', "mode:", "process.argv", "||", "&&", "if (", "?"]) expect(code, forbidden).not.toContain(forbidden);
     expect(code.match(/process\.env/g)).toEqual(["process.env"]);
   });
 
   it("globalSetup と setupFiles のゲートの値は同じ（片方だけを有効にしない）", () => {
     const globalSetup = readFileSync(path.join(__dirname, "integrationGlobalSetup.ts"), "utf8");
-    const gateOf = (source: string) => /^\s*integrationDatabase: (.+),$/m.exec(source)?.[1];
-    expect(gateOf(code)).toBe('{ mode: "enabled" }');
+    const gateOf = (source: string) => /^\s*integrationDatabase: (\S+),$/m.exec(source)?.[1];
+    expect(gateOf(code)).toBe("INTEGRATION_DATABASE_DISABLED");
     expect(gateOf(globalSetup)).toBe(gateOf(code));
   });
 
@@ -189,7 +187,7 @@ describe("静的検査：setupFiles（lib/testing/integrationSetup.ts。import �
     expect(code).not.toMatch(/^import[^\n]*(lib\/prisma|@prisma\/client|"pg")/m);
     expect(code.match(/import\(/g)).toHaveLength(1);
     const queryAt = code.indexOf("  queryIdentity: async () => {");
-    expect(queryAt).toBeGreaterThan(code.indexOf('  integrationDatabase: { mode: "enabled" },'));
+    expect(queryAt).toBeGreaterThan(code.indexOf("  integrationDatabase: INTEGRATION_DATABASE_DISABLED,"));
     expect(code.indexOf('await import("@/lib/prisma")')).toBeGreaterThan(queryAt);
   });
 

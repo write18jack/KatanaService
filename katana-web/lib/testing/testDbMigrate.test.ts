@@ -436,16 +436,13 @@ describe("runTestDbMigrate：実DBへの接続の許可（強制停止）", () =
 
   // Step 4-3：globalSetup の無条件の throw を、第7の固定ゲート（INTEGRATION_DATABASE_DISABLED）に置き換えた。
   // 止まることの振る舞いは lib/testing/integrationDatabaseSetup.test.ts で、偽の部品を使って確かめる
-  // Step 4-10：統合テストを1回実行するために、承認を得て、ゲートの行を一時的に固定のリテラル { mode: "enabled" } にした
-  // （setupFiles と同じ commit・同じ値）。実行の後、INTEGRATION_DATABASE_DISABLED に戻し、この確認も無効値の形に戻す
-  it("globalSetup は第7の固定ゲートを固定のリテラルで渡し（Step 4-10 で一時的に有効）、切り替える経路がない（接続の部品は inspectDatabase の中だけ）", () => {
+  it("globalSetup は第7の固定ゲートを無効の定数で渡し、有効にする経路がない（接続の部品は inspectDatabase の中だけ）", () => {
     const source = codeOf("lib/testing/integrationGlobalSetup.ts");
-    // ゲートの行は、固定の有効値のリテラルだけ（条件分岐・環境変数・引数なし）
-    expect(source.match(/^ {4}integrationDatabase: .*$/gm)).toEqual(['    integrationDatabase: { mode: "enabled" },']);
-    expect(source.match(/mode:\s*["']enabled["']/g)).toHaveLength(1);
-    expect(source).not.toContain("INTEGRATION_DATABASE_DISABLED");
-    expect(source).toMatch(/import \{[^}]*\brunIntegrationGlobalSetup\b[^}]*\} from "\.\/integrationDatabaseSetup\.ts";/);
-    for (const forbidden of ["process.argv", "?", "||", "&&", "if (", "INTEGRATION_DATABASE_ENABLED", "process.env["]) {
+    // ゲートの行は、固定の無効値だけ（条件分岐・環境変数・引数なし）
+    expect(source.match(/^ {4}integrationDatabase: .*$/gm)).toEqual(["    integrationDatabase: INTEGRATION_DATABASE_DISABLED,"]);
+    expect(source.match(/INTEGRATION_DATABASE_DISABLED/g)).toHaveLength(2);
+    expect(source).toMatch(/import \{[^}]*\bINTEGRATION_DATABASE_DISABLED\b[^}]*\} from "\.\/integrationDatabaseSetup\.ts";/);
+    for (const forbidden of ['"enabled"', "mode:", "process.argv", "?", "||", "&&", "if (", "INTEGRATION_DATABASE_ENABLED"]) {
       expect(source, forbidden).not.toContain(forbidden);
     }
     // process.env は env として1か所で渡すだけ（ゲートを環境変数から読まない）
