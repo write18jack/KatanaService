@@ -6,6 +6,8 @@
 
 （2026-11-23 追記・Step 4-3）統合テストの globalSetup に、7つ目の固定ゲート `INTEGRATION_DATABASE_DISABLED` を追加しました。**固定ゲートは7つともすべて無効です。** 詳しくは「固定ゲート」の節と、`npm run test:integration` の行を参照してください。
 
+（2026-11-23 追記・Step 4-4・4-5）第7のゲートは、globalSetup（`lib/testing/integrationGlobalSetup.ts`）と setupFiles（`lib/testing/integrationSetup.ts`）の**2か所**で同じ定数を使います。今は2か所とも無効です。**統合テストは、実DBではまだ一度も実行していません**（「5. 統合テストの経路」）。
+
 ---
 
 ## 1. 承認の原則
@@ -88,9 +90,11 @@
 | `SCHEMA_DIFF_DISABLED` | `scripts/testdb-schema-diff.mts` | `--live`（schemaDiff） | 無効 |
 | `RO_ROLE_CREATE_DISABLED` | `scripts/testdb-ro-role.mts` | `--create --apply`（`katana_test_ro` の作成） | 無効 |
 | `RO_ROLE_GRANT_SYNC_DISABLED` | `scripts/testdb-ro-role.mts` | `--grant-sync --apply`（権限の補完） | 無効 |
-| `INTEGRATION_DATABASE_DISABLED` | `lib/testing/integrationGlobalSetup.ts`（統合テストの globalSetup。定数は `lib/testing/integrationDatabaseSetup.ts`） | `npm run test:integration`（統合テストのDBへの接続。Step 4-3 で追加） | 無効 |
+| `INTEGRATION_DATABASE_DISABLED` | 定数は `lib/testing/integrationDatabaseSetup.ts`。適用箇所は2か所：`lib/testing/integrationGlobalSetup.ts`（globalSetup）と `lib/testing/integrationSetup.ts`（setupFiles） | `npm run test:integration`（統合テストのDBへの接続。Step 4-3 で追加、Step 4-4 で setupFiles にも適用） | 無効（2か所とも） |
 
 ゲートが無効の場合、これらの操作は、事前の検証の後、Docker・DB・Prisma CLI に触れる前に、それぞれのエラー（`TESTDB_MIGRATION_LIVE_DISABLED`・`CHECKSUM_LIVE_DISABLED`・`CATALOG_AUDIT_LIVE_DISABLED`・`SCHEMA_DIFF_LIVE_DISABLED`・`RO_ROLE_CREATE_DISABLED`・`RO_ROLE_GRANT_SYNC_DISABLED`・`INTEGRATION_DATABASE_LIVE_DISABLED`）で止まります。
+
+第7のゲート（`INTEGRATION_DATABASE_DISABLED`）は、2か所の適用箇所が**それぞれ**接続を拒否します。有効化・無効化は、承認を得て、**2か所を同じ commit で変え、両方を確かめます**（2か所の値が同じであることは、`lib/testing/integrationWorkerCheck.test.ts` の静的テストで確かめています）。環境変数や引数でゲートを有効にする仕組みは作りません。
 
 `testdb:verify` の読み取り専用の接続は、上の7つとは別の固定の許可（`readOnlyDatabase`。Step 3-11B で承認済み）で、有効です。
 
@@ -137,7 +141,7 @@
 | `npm run testdb:catalog -- --verify` | カタログの監査 | ゲートが無効なので止まる |
 | `node scripts/testdb-schema-diff.mts --live` | schemaDiff（Prisma CLI） | ゲートが無効なので止まる |
 | `node scripts/testdb-ro-role.mts --create --apply` / `--grant-sync --apply` | `katana_test_ro` の作成・補完 | ゲートが無効なので止まる |
-| `npm run test:integration` | 統合テスト | **まだ使えない。** globalSetup（`lib/testing/integrationGlobalSetup.ts`）は、接続前の検証（R14-1）の後、第7の固定ゲート `INTEGRATION_DATABASE_DISABLED` で、DB に接続する前・テストを始める前に必ず停止する（`INTEGRATION_DATABASE_LIVE_DISABLED`）。ゲートが有効なときだけ、読み取り専用で状態 C とサーバーの識別情報を確かめ、終了後に再確認する（データの削除・reset はしない） |
+| `npm run test:integration` | 統合テスト | **まだ使えない（実DBでは一度も実行していない）。** globalSetup（`lib/testing/integrationGlobalSetup.ts`）は、接続前の検証（R14-1）の後、第7の固定ゲート `INTEGRATION_DATABASE_DISABLED` で、DB に接続する前・テストを始める前に必ず停止する（`INTEGRATION_DATABASE_LIVE_DISABLED`）。setupFiles（`lib/testing/integrationSetup.ts`）も同じゲートで、Prisma を読み込む前に止まる。ゲートが有効なときだけ、読み取り専用で状態 C とサーバーの識別情報を確かめ、終了後に再確認する（データの削除・reset はしない）。詳細は「5. 統合テストの経路」 |
 
 ### 使わないもの
 
@@ -216,3 +220,43 @@ runner は URL を子プロセスの環境変数に入れず、URL の SHA-256 �
 - 結果は、実行した時点のスナップショット。
 
 詳細は PLAN の「Step 3-12B-5E-9A」以降の節にあります。
+
+---
+
+## 5. 統合テストの経路（Phase 4。2026-11-23・Step 4-1〜4-4）
+
+**この節は、経路と安全装置の説明です。手順書ではありません。** 統合テストは、第7の固定ゲート（`INTEGRATION_DATABASE_DISABLED`）が2か所とも無効なので、今は DB に接続する前に必ず止まります。**実DBでは一度も実行していません。** 実行するには、事前の確認と、ゲートの有効化・実行・無効化のそれぞれについて、個別の承認が必要です（PLAN の4章）。
+
+### 実行の経路と、各段階の責務
+
+| 段階 | ファイル | プロセス | 責務 |
+|---|---|---|---|
+| runner | `scripts/test-integration.mts`（`lib/testing/integrationEnv.ts`） | 親 | `.env.test` を読み、接続先とパスワードを検証し、許可リストの環境変数だけで Vitest を起動する。DB には接続しない |
+| globalSetup | `lib/testing/integrationGlobalSetup.ts`（本体は `lib/testing/integrationDatabaseSetup.ts`） | Vitest のメインプロセス（1回） | 接続前の検証 → 第7のゲート → 独立した pg の接続1回で、読み取り専用の検査（状態 C・サーバーの識別情報）→ teardown を返す |
+| setupFiles | `lib/testing/integrationSetup.ts`（本体は `lib/testing/integrationWorkerCheck.ts`） | ワーカー（テストファイルごと） | 接続前の検証 → 第7のゲート → テストが使う Prisma Client（`@/lib/prisma`）を動的 import し、SELECT 1文で本人確認 |
+| Prisma Client | `lib/prisma.ts` | ワーカー | Vitest の中では、`PrismaPg`・`PrismaClient` を作る前に、通常テストなら拒否し、統合テストのモードなら接続前の検証を行う |
+
+- **接続前の検証**（`lib/db/testDatabaseGuard.ts` の `assertIntegrationRuntime`）は、globalSetup・setupFiles・`lib/prisma.ts` で同じ条件です：実行モードと runner の目印、`NODE_OPTIONS` がないこと、`.env.test` があること、接続先がテストDB であること（`PG*`・`DOTENV_*`・開発用DB との比較を含む）、`DATABASE_URL` が `.env.test` の値と完全に一致すること、`.env.test` のパスワード（見本の値でない、URL と一致、管理用と共用しない）。runner を通さずに起動しても、この条件を満たさなければ止まります（R14-1 の対策）。
+- **globalSetup の検査**は、`BEGIN READ ONLY` の中で `search_path` を `pg_catalog` に固定してから、本人確認・状態の判定・サーバーの識別情報（`inet_server_addr()`・`inet_server_port()`・`pg_postmaster_start_time()`）を読み、ROLLBACK して接続を閉じます。途中で失敗しても、ROLLBACK と接続の終了は必ず行います。
+- **Prisma による本人確認**（setupFiles）は、`pg_catalog.current_database()`・`current_user`・`session_user`・DB のコメントを、関数・演算子を `pg_catalog` で修飾した SELECT 1文で読み、`katana_test`・`katana_test_user`・`katana-test-db` と照合します。1行でなければ、または1項目でも違えば止まります。
+
+### 状態 C 以外では実行しない
+
+- globalSetup は、状態 C（期待する migration がすべて適用済みで、アプリのテーブルが空）でなければ、テストを始めずに止まります（`INTEGRATION_STATE_NOT_C`）。状態 A・B を自動では直しません。
+- サーバーの内部ポートが 5432 でなければ止まります。
+
+### 逐次実行と bail
+
+- `vitest.integration.config.ts` は `fileParallelism: false`・`maxWorkers: 1`・`maxConcurrency: 1`・`sequence: { concurrent: false, shuffle: false }` で、テストファイルもテストも1つずつ実行します。
+- `bail: 1` で、最初に失敗したテストの後、残りのテストファイルを実行しません。そのとき、実行しなかったファイルは「未実施」として扱います。
+
+### teardown（読み取り専用の再確認）
+
+- テストの終了後、globalSetup が返した teardown が、同じ接続先をもう一度読み取り専用で検査します。
+- サーバーの識別情報（アドレス・ポート・postmaster の起動時刻）が開始時と1つでも違えば `INTEGRATION_TEARDOWN_SERVER_CHANGED`、状態 C でなければ（テストデータが残っているなど）`INTEGRATION_TEARDOWN_STATE_NOT_C` で失敗します。
+
+### テストが失敗したとき・データが残ったとき
+
+- **自動では削除しません。** TRUNCATE・DELETE・DROP・migration・reset・Docker の操作は、統合テストの経路のどこにもありません。
+- データが残ると、次の実行は globalSetup の開始前の検査（状態 C でない）で止まります。元に戻す方法は、テストDB の作り直しだけです（`testdb:reset` は未実装。手作業の作り直しには、Docker の操作・migration・`katana_test_ro` の再作成と、それぞれの承認・固定ゲートが必要）。**復旧の方法は、統合テストを実行する前に決めます**（PLAN の4章の「Phase 4 の残余リスク」）。
+- 失敗の出力は記録し、報告して、承認を待ちます（「失敗したときの対応」と同じ）。

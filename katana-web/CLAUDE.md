@@ -252,6 +252,7 @@ Rules:
 - Do not run the Prisma CLI directly against the test DB (`migrate deploy`, `migrate reset`, `db push`, `studio`, ...). Use the `npm run testdb:*` scripts.
 - Do not run `docker compose` directly for the test DB. Use `scripts/testdb.mts`.
 - Seven fixed gates are all disabled: six in `scripts/testdb-*.mts` (migration, checksum, catalog, schema diff, read-only role create, read-only role grant-sync) and the integration database gate (`INTEGRATION_DATABASE_DISABLED`) in `lib/testing/integrationGlobalSetup.ts`. Enable one only with explicit approval, through a focused commit that also updates the matching static test, and disable it again after the approved run.
+- The integration database gate is one constant, `INTEGRATION_DATABASE_DISABLED`, defined in `lib/testing/integrationDatabaseSetup.ts`, and it is applied in two places: `lib/testing/integrationGlobalSetup.ts` (globalSetup) and `lib/testing/integrationSetup.ts` (setupFiles). Both places are currently disabled and must each refuse to connect while the gate is disabled. Enabling or disabling it requires explicit approval and must change and verify both places in the same commit. Never add a way to enable any gate through environment variables or command-line arguments.
 - Do not weaken the database guards (`lib/db/`, `lib/testing/`) or their tests to make something pass.
 - On failure, do not retry automatically or repair the database or containers. Report and wait for approval.
 - Never print or record passwords, `AUTH_SECRET` or full connection strings.
