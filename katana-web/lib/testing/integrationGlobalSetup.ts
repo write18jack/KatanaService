@@ -1,4 +1,4 @@
-import { INTEGRATION_DATABASE_DISABLED, type IntegrationTeardown, runIntegrationGlobalSetup } from "./integrationDatabaseSetup.ts";
+import { type IntegrationTeardown, runIntegrationGlobalSetup } from "./integrationDatabaseSetup.ts";
 import { readIntegrationRuntimeFiles } from "./integrationEnv.ts";
 import { connectTestDatabase } from "./testDbConnection.ts";
 import { createTestDatabaseInspector } from "./testDbMigrate.ts";
@@ -8,8 +8,9 @@ import { createTestDatabaseInspector } from "./testDbMigrate.ts";
  * 処理の本体は lib/testing/integrationDatabaseSetup.ts の runIntegrationGlobalSetup。ここは、固定のゲートと実際の部品を渡すだけ。
  *
  * 1. `.env.test`・`.env` を読み、接続前の検証（R14-1。DBには接続しない）
- * 2. 第7の固定ゲート integrationDatabase。**INTEGRATION_DATABASE_DISABLED（無効）を固定で渡すので、ここで必ず止まる。**
- *    環境変数・引数では有効にできない。有効にするには、承認を得てこの行を変え、commit する
+ * 2. 第7の固定ゲート integrationDatabase。**Step 4-10 で、統合テストを1回実行するために、承認を得て一時的に固定のリテラル
+ *    `{ mode: "enabled" }` にした**（setupFiles の lib/testing/integrationSetup.ts と同じ commit で、同じ値）。
+ *    環境変数・引数では切り替えない。統合テストの1回の実行の後、承認を得て、2か所とも INTEGRATION_DATABASE_DISABLED に戻す
  * 3. （ゲートが有効なときだけ）読み取り専用の検査で状態 C とサーバーの識別情報を確かめ、テストの終了後に再確認する teardown を返す
  *
  * 接続の部品（createTestDatabaseInspector・connectTestDatabase）は、inspectDatabase が呼ばれたときにだけ作る
@@ -21,7 +22,7 @@ export default function setup(): Promise<IntegrationTeardown> {
   return runIntegrationGlobalSetup({
     env: process.env,
     readFiles: () => readIntegrationRuntimeFiles(root),
-    integrationDatabase: INTEGRATION_DATABASE_DISABLED,
+    integrationDatabase: { mode: "enabled" },
     inspectDatabase: (input) => createTestDatabaseInspector({ root, connect: connectTestDatabase })(input),
   });
 }
