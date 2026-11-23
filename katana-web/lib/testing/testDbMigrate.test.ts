@@ -47,21 +47,15 @@ const codeOf = (file: string) =>
     .replace(/^\s*\/\/.*$/gm, "")
     .replace(/\s\/\/ .*$/gm, "");
 
-/**
- * scripts/testdb-migrate.mts の migration 用の許可の行（Step 4-8B で、テストDB の復旧のために承認を得て一時的に有効化。固定のリテラルだけ。
- * 条件分岐・環境変数・引数なし）。migrate --apply の1回の後、LIVE_DATABASE_DISABLED に戻し、この確認も無効値の形に戻す（Step 3-12B-4 と同じ）
- */
-const SCRIPT_LIVE_ENABLED_LINE = /^ {2}liveDatabase: \{ mode: "enabled" \},$/m;
-/** スクリプトの migration 用の許可が、固定の有効値のリテラルの1か所だけで、切り替えの経路（無効値の import・条件式・環境変数・引数）がないこと */
-function expectScriptGateFixedEnabled(source: string) {
-  expect(source).toMatch(SCRIPT_LIVE_ENABLED_LINE);
+/** scripts/testdb-migrate.mts の migration 用の許可の行（Step 3-12B-4 で無効に戻した。固定の無効値だけ。条件分岐・環境変数・引数なし） */
+const SCRIPT_LIVE_DISABLED_LINE = /^ {2}liveDatabase: LIVE_DATABASE_DISABLED,$/m;
+/** スクリプトの migration 用の許可が、固定の無効値の1か所だけで、有効値がどこにもないこと */
+function expectScriptGateFixedDisabled(source: string) {
+  expect(source).toMatch(SCRIPT_LIVE_DISABLED_LINE);
   expect(source.match(/liveDatabase/g)).toHaveLength(1);
-  // 有効値（mode: "enabled"）は、この1か所だけ（readOnlyDatabase の "enabled-read-only" は別の値）
-  expect(source.match(/mode:\s*["']enabled["']/g)).toHaveLength(1);
-  expect(source).not.toContain("LIVE_DATABASE_DISABLED");
-  for (const forbidden of ["process.env.KATANA", "process.argv.includes", "process.env[", "? {", "?? {", "|| {", "&& {"]) {
-    expect(source, forbidden).not.toContain(forbidden);
-  }
+  expect(source).not.toMatch(/mode:\s*["']enabled["']/);
+  // import の1回と、liveDatabase に渡す1回だけ
+  expect(source.match(/LIVE_DATABASE_DISABLED/g)).toHaveLength(2);
 }
 
 const STATE_A: TestDatabaseState = { state: "A" };
@@ -421,10 +415,10 @@ describe("runTestDbMigrate：実DBへの接続の許可（強制停止）", () =
     expect(Object.isFrozen(LIVE_DATABASE_DISABLED)).toBe(true);
   });
 
-  it("スクリプト（scripts/testdb-migrate.mts）は、migration 用の許可を固定のリテラルにし（Step 4-8B で一時的に有効）、接続の部品は --verify の許可と migrationChecks の中だけで使う", () => {
+  it("スクリプト（scripts/testdb-migrate.mts）は、migration 用の許可を固定の LIVE_DATABASE_DISABLED にし（Step 3-12B-4）、接続の部品は --verify の許可と migrationChecks の中だけで使う", () => {
     const source = codeOf("scripts/testdb-migrate.mts");
     // 許可は引数・環境変数から決めない（liveDatabase に渡す値は固定のリテラルだけ）
-    expectScriptGateFixedEnabled(source);
+    expectScriptGateFixedDisabled(source);
     for (const forbidden of ["classifyTestDatabase", '"pg"', "process.env.KATANA_TESTDB", "process.argv.includes"]) {
       expect(source).not.toContain(forbidden);
     }
@@ -967,9 +961,9 @@ describe("migration に必要な権限（Step 3-11D）", () => {
     expect(f.spawn).toHaveBeenCalledTimes(1);
   });
 
-  it("許可が無効なら、権限の検査より前に接続せずに止まる（モックの無効値）。スクリプトの許可は固定のリテラル（Step 4-8B で一時的に有効）", async () => {
+  it("許可が無効なら、権限の検査より前に接続せずに止まる。スクリプトの許可は固定の無効値（Step 3-12B-4）", async () => {
     await expectStopped(fake({ liveDisabled: true }), "TESTDB_MIGRATION_LIVE_DISABLED");
-    expectScriptGateFixedEnabled(codeOf("scripts/testdb-migrate.mts"));
+    expectScriptGateFixedDisabled(codeOf("scripts/testdb-migrate.mts"));
   });
 
   it("本物の判定と偽のDB：権限が不足していても状態は A と判定され、--verify は不足として失敗する", async () => {
@@ -1131,11 +1125,11 @@ describe("接続先の識別情報と TOCTOU の照合（Step 3-11E）", () => {
     }
   });
 
-  it("許可が無効なら Docker の読み取りも、接続も、Prisma CLI もない（モックの無効値）。スクリプトの許可は固定のリテラルで、Docker の読み取りは migrationChecks の中だけ", async () => {
+  it("許可が無効なら Docker の読み取りも、接続も、Prisma CLI もない。スクリプトの許可は固定の無効値で、Docker の読み取りは migrationChecks の中だけ", async () => {
     const f = fake({ liveDisabled: true });
     await expectStopped(f, "TESTDB_MIGRATION_LIVE_DISABLED");
     const source = codeOf("scripts/testdb-migrate.mts");
-    expectScriptGateFixedEnabled(source);
+    expectScriptGateFixedDisabled(source);
     // Docker の識別情報の読み取りは、migrationChecks の中の1か所だけ（Step 3-12A。--apply のときだけ呼ばれる）
     expect(source.match(/readTestDbDockerIdentity/g)).toHaveLength(2);
     expect(source.match(/readDockerIdentity:/g)).toHaveLength(1);
@@ -1363,7 +1357,7 @@ describe("Step 3-12A：--apply と、migration の照合の接続", () => {
     expect(error.message).toContain("(D1) failed (DOCKER_COMMAND_FAILED). The Prisma CLI was not started.");
   });
 
-  it("スクリプトは migrationChecks に本物の関数を渡し、許可は固定のリテラル（--apply・環境変数で切り替えない。Step 4-8B で一時的に有効）", () => {
+  it("スクリプトは migrationChecks に本物の関数を渡し、許可は固定の無効値（--apply・環境変数で切り替えない。Step 3-12B-4）", () => {
     const source = codeOf("scripts/testdb-migrate.mts");
     const expected = [
       "  migrationChecks: {",
@@ -1372,7 +1366,7 @@ describe("Step 3-12A：--apply と、migration の照合の接続", () => {
       "  },",
     ].join("\n");
     expect(source).toContain(expected);
-    expectScriptGateFixedEnabled(source);
+    expectScriptGateFixedDisabled(source);
     expect(source).not.toContain("--apply");
     expect(source).not.toContain("scripts/testdb.mts");
     expect(source).not.toMatch(/from "\.\/testdb\.mts"/);
@@ -1430,15 +1424,15 @@ describe("Step 3-12B-1：有効な許可での runner の安全性（モック�
     "exists:prisma/migrations",
   ];
 
-  it("スクリプトの許可は固定の有効値のリテラル（Step 4-8B で一時的に有効）で、引数は process.argv をそのまま渡し、許可の判定に使わない。モックの既定も有効値", () => {
+  it("スクリプトの許可は固定の無効値で、引数は process.argv をそのまま渡し、許可の判定に使わない。モックの既定は有効値", () => {
     const source = codeOf("scripts/testdb-migrate.mts");
-    expectScriptGateFixedEnabled(source);
+    expectScriptGateFixedDisabled(source);
     expect(source).toMatch(/^ {2}argv: process\.argv\.slice\(2\),$/m);
     expect(source.match(/process\.argv/g)).toHaveLength(1);
     expect(source.match(/process\.env/g)).toHaveLength(1);
     // 許可の値に、条件式・関数呼び出し・変数を使わない
     const gateLine = source.split("\n").find((line) => line.includes("liveDatabase"));
-    expect(gateLine).toBe('  liveDatabase: { mode: "enabled" },');
+    expect(gateLine).toBe("  liveDatabase: LIVE_DATABASE_DISABLED,");
     expect(fake().deps.liveDatabase).toEqual(MOCK_GATE);
   });
 
@@ -1543,11 +1537,10 @@ describe("Step 3-12B-4：固定ゲートの無効化（スクリプトと同じ 
     "exists:prisma/migrations",
   ];
 
-  it("スクリプトの許可の行は、固定の有効値のリテラルだけ（Step 4-8B で一時的に有効。無効値の LIVE_DATABASE_DISABLED は import しない）。ライブラリの無効値は凍結されたまま", () => {
+  it("スクリプトの許可の行は、固定の LIVE_DATABASE_DISABLED（import から来る凍結された無効値）だけ", () => {
     const source = codeOf("scripts/testdb-migrate.mts");
-    expectScriptGateFixedEnabled(source);
-    expect(source).toMatch(/import \{[^}]*\} from "\.\.\/lib\/testing\/testDbMigrate\.ts";/);
-    expect(source).not.toMatch(/import \{[^}]*\bLIVE_DATABASE_DISABLED\b[^}]*\} from/);
+    expectScriptGateFixedDisabled(source);
+    expect(source).toMatch(/import \{[^}]*\bLIVE_DATABASE_DISABLED\b[^}]*\} from "\.\.\/lib\/testing\/testDbMigrate\.ts";/);
     expect(LIVE_DATABASE_DISABLED).toEqual({ mode: "disabled" });
     expect(Object.isFrozen(LIVE_DATABASE_DISABLED)).toBe(true);
   });
