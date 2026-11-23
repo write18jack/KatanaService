@@ -4,7 +4,7 @@ import path from "node:path";
 import { parse } from "dotenv";
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { assertIntegrationRuntime } from "./db/testDatabaseGuard";
+import { assertAppDatabaseTarget, assertIntegrationRuntime } from "./db/testDatabaseGuard";
 
 /**
  * 作業ディレクトリの env ファイル（`.env`・`.env.test`）を dotenv.parse で読む（process.env は変えない）。
@@ -52,8 +52,23 @@ function assertVitestDatabaseAccess(): void {
   });
 }
 
+/**
+ * KATANA_DB_TARGET が設定されているときだけ、PrismaPg・PrismaClient を作る前に接続先を検証する（P9。E2E 用の開発サーバー）。
+ * KATANA_DB_TARGET=test なら、DATABASE_URL が `.env.test` の値と完全に一致し、テストDBを指し、`.env.test` のパスワードが正しいこと。
+ * それ以外の値は拒否する。未設定のとき（開発・本番の通常の起動）は何もしない。`.env.test`・`.env` は、設定されているときだけ読む。
+ */
+function assertAppDatabaseTargetAccess(): void {
+  if (process.env.KATANA_DB_TARGET === undefined) return;
+  assertAppDatabaseTarget({
+    env: process.env,
+    testEnv: readEnvFileInCwd(".env.test"),
+    developmentDatabaseUrl: readEnvFileInCwd(".env")?.DATABASE_URL,
+  });
+}
+
 // 既存クライアントの再利用より前に置き、どの経路でも必ず検証を通す
 assertVitestDatabaseAccess();
+assertAppDatabaseTargetAccess();
 
 const globalForPrisma = global as unknown as {
   prisma: PrismaClient;

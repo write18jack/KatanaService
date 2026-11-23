@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  AppDatabaseTargetError,
+  type AppDatabaseTargetInput,
+  assertAppDatabaseTarget,
   assertIntegrationRuntime,
   assertTestDatabaseCredentials,
   assertTestDatabaseTarget,
@@ -486,6 +489,90 @@ describe("assertIntegrationRuntime（R14-1。接続前の検証）", () => {
     const value = runtime();
     const snapshot = JSON.stringify(value);
     assertIntegrationRuntime(value);
+    expect(JSON.stringify(value)).toBe(snapshot);
+  });
+});
+
+describe("assertAppDatabaseTarget（P9。Vitest の外での KATANA_DB_TARGET）", () => {
+  const ADMIN = "admin-dummy-pass_4";
+  const GOOD_TEST_ENV = { DATABASE_URL: TEST_URL, KATANA_TEST_DB_PASSWORD: PASSWORD, KATANA_TEST_DB_ADMIN_PASSWORD: ADMIN };
+  /** E2E 用の開発サーバーを起動するスクリプトが渡す環境変数と同じ形（値はすべてダミー） */
+  const GOOD_ENV = { PATH: "/usr/bin", NODE_ENV: "development", DATABASE_URL: TEST_URL, KATANA_DB_TARGET: "test" };
+
+  function app(overrides: { env?: Record<string, string | undefined>; testEnv?: Record<string, string | undefined> | undefined } = {}): AppDatabaseTargetInput {
+    return { env: { ...GOOD_ENV, ...overrides.env }, testEnv: "testEnv" in overrides ? overrides.testEnv : GOOD_TEST_ENV, developmentDatabaseUrl: DEV_URL };
+  }
+
+  function expectAppRejected(value: AppDatabaseTargetInput, errorClass: new (...args: never[]) => Error, code: string) {
+    let caught: unknown;
+    try {
+      assertAppDatabaseTarget(value);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(errorClass);
+    expect((caught as { code: string }).code).toBe(code);
+    const secrets = [value.env.DATABASE_URL, value.testEnv?.DATABASE_URL, DEV_URL, PASSWORD, ADMIN, "dev-dummy-pass", "postgresql://"].filter(
+      (v): v is string => !!v,
+    );
+    for (const text of [(caught as Error).message, String(caught)]) for (const secret of secrets) expect(text).not.toContain(secret);
+  }
+
+  it("KATANA_DB_TARGET が未設定なら、何も検査せず default を返す（開発・本番の従来の動作。.env.test がなくても、開発用DB の URL でもよい）", () => {
+    expect(assertAppDatabaseTarget({ env: { PATH: "/usr/bin", DATABASE_URL: DEV_URL }, testEnv: undefined, developmentDatabaseUrl: DEV_URL })).toEqual({ mode: "default" });
+    expect(assertAppDatabaseTarget({ env: {}, testEnv: undefined, developmentDatabaseUrl: undefined })).toEqual({ mode: "default" });
+  });
+
+  it("KATANA_DB_TARGET=test で、.env.test と完全に一致するテストDB の URL なら、test と接続先の情報を返す", () => {
+    expect(assertAppDatabaseTarget(app())).toEqual({ mode: "test", target: { host: "127.0.0.1", port: "5434", database: "katana_test", user: "katana_test_user" } });
+  });
+
+  it.each([[""], ["Test"], ["TEST"], ["test "], ["dev"], ["test-readonly"], ["production"]])("KATANA_DB_TARGET=%j は拒否する（Prisma CLI のガードと同じ）", (value) => {
+    expectAppRejected(app({ env: { KATANA_DB_TARGET: value } }), AppDatabaseTargetError, "TARGET_INVALID");
+  });
+
+  it(".env.test がない・DATABASE_URL がないなら拒否する", () => {
+    expectAppRejected(app({ testEnv: undefined }), AppDatabaseTargetError, "TEST_ENV_MISSING");
+    expectAppRejected(app({ testEnv: { ...GOOD_TEST_ENV, DATABASE_URL: undefined } }), AppDatabaseTargetError, "TEST_ENV_URL_MISSING");
+    expectAppRejected(app({ testEnv: { ...GOOD_TEST_ENV, DATABASE_URL: "" } }), AppDatabaseTargetError, "TEST_ENV_URL_MISSING");
+  });
+
+  it("プロセスの DATABASE_URL が、テストDB を指していても .env.test と違えば拒否する（Next が読む .env の値を使わない）", () => {
+    expectAppRejected(app({ env: { DATABASE_URL: testUrl({ password: "other-dummy-pass" }) } }), AppDatabaseTargetError, "DATABASE_URL_MISMATCH");
+    expectAppRejected(app({ env: { DATABASE_URL: testUrl({ host: "localhost" }) } }), AppDatabaseTargetError, "DATABASE_URL_MISMATCH");
+  });
+
+  it.each([
+    ["開発用DB の URL（Next が .env から読んだ値）", DEV_URL, "PORT_NOT_ALLOWED"],
+    ["DATABASE_URL がない", undefined, "URL_MISSING"],
+    ["DB名が違う", testUrl({ database: "/katana" }), "DATABASE_NOT_ALLOWED"],
+    ["ユーザーが違う（読み取り専用ロール）", testUrl({ user: "katana_test_ro" }), "USER_NOT_ALLOWED"],
+  ])("プロセスの DATABASE_URL が%sなら、接続先の検証で拒否する", (_label, url, code) => {
+    expectAppRejected(app({ env: { DATABASE_URL: url } }), TestDatabaseGuardError, code);
+  });
+
+  it("PG*・DOTENV_* が設定されていれば拒否する", () => {
+    expectAppRejected(app({ env: { PGHOST: "db.example.com" } }), TestDatabaseGuardError, "PG_ENV_PRESENT");
+    expectAppRejected(app({ env: { DOTENV_CONFIG_PATH: ".env" } }), TestDatabaseGuardError, "DOTENV_ENV_PRESENT");
+  });
+
+  it.each([
+    ["見本の値のまま", { DATABASE_URL: testUrl({ password: "CHANGE_ME_x" }), KATANA_TEST_DB_PASSWORD: "CHANGE_ME_x", KATANA_TEST_DB_ADMIN_PASSWORD: ADMIN }, "PASSWORD_PLACEHOLDER"],
+    ["管理用とアプリ用の共用", { ...GOOD_TEST_ENV, KATANA_TEST_DB_ADMIN_PASSWORD: PASSWORD }, "ADMIN_PASSWORD_SAME_AS_APP"],
+    ["URL とアプリ用の不一致", { ...GOOD_TEST_ENV, KATANA_TEST_DB_PASSWORD: `${PASSWORD}x` }, "URL_PASSWORD_MISMATCH"],
+  ])(".env.test のパスワードが%sなら拒否する", (_label, testEnv, code) => {
+    expectAppRejected(app({ env: { DATABASE_URL: testEnv.DATABASE_URL }, testEnv }), TestDatabaseCredentialsError, code);
+  });
+
+  it("runner の目印は求めない（開発サーバーは統合テストではない）が、統合テストのモードの目印があっても結果は変わらない", () => {
+    expect(assertAppDatabaseTarget(app({ env: { KATANA_TEST_RUNNER: undefined, KATANA_DB_TEST_MODE: undefined } })).mode).toBe("test");
+    expect(assertAppDatabaseTarget(app({ env: { KATANA_TEST_RUNNER: "script", KATANA_DB_TEST_MODE: "integration" } })).mode).toBe("test");
+  });
+
+  it("入力を変更しない", () => {
+    const value = app();
+    const snapshot = JSON.stringify(value);
+    assertAppDatabaseTarget(value);
     expect(JSON.stringify(value)).toBe(snapshot);
   });
 });

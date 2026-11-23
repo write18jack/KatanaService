@@ -343,6 +343,75 @@ export function assertIntegrationRuntime(input: IntegrationRuntimeInput): TestDa
   return target;
 }
 
+/** アプリ（Next の開発サーバーなど）の接続先を切り替える環境変数（prisma.config.ts の Prisma CLI のガードと同じ名前・同じ値） */
+export const APP_DB_TARGET_KEY = "KATANA_DB_TARGET";
+export const APP_DB_TARGET_TEST = "test";
+
+export type AppDatabaseTargetErrorCode = "TARGET_INVALID" | "TEST_ENV_MISSING" | "TEST_ENV_URL_MISSING" | "DATABASE_URL_MISMATCH";
+
+export class AppDatabaseTargetError extends Error {
+  readonly code: AppDatabaseTargetErrorCode;
+  /** コードを除いた説明（パスワード・接続URL・環境変数の値を含まない） */
+  readonly detail: string;
+
+  constructor(code: AppDatabaseTargetErrorCode, detail: string) {
+    super(`[testDatabaseGuard] ${code}: ${detail}`);
+    this.name = "AppDatabaseTargetError";
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+export type AppDatabaseTargetInput = {
+  /** 検査するプロセスの環境変数（lib/prisma.ts では process.env） */
+  env: Readonly<Record<string, string | undefined>>;
+  /** `.env.test` を dotenv.parse した結果。ファイルがなければ undefined（読み込みは呼び出し側が行う） */
+  testEnv: Readonly<Record<string, string | undefined>> | undefined;
+  /** `.env` の DATABASE_URL（開発用DBとの比較だけに使う）。`.env` がなければ undefined */
+  developmentDatabaseUrl: string | undefined;
+};
+
+export type AppDatabaseTarget = { mode: "default" } | { mode: "test"; target: TestDatabaseTarget };
+
+/**
+ * アプリ（Vitest の外。Next の開発サーバーなど）の接続先の検証（P9。E2E の前提）。DBには接続しない。
+ *
+ * - KATANA_DB_TARGET が未設定：何も検査せず `{ mode: "default" }` を返す（開発・本番の従来の動作を変えない）。
+ * - KATANA_DB_TARGET=test：E2E 用の開発サーバー。次をすべて満たさなければ throw する（最初の失敗で止まる）:
+ *   1. `.env.test` が存在し、DATABASE_URL を定義していること
+ *   2. プロセスの DATABASE_URL がテストDBを指すこと（assertTestDatabaseTarget。PG*・DOTENV_*・開発用DBとの比較を含む）
+ *   3. プロセスの DATABASE_URL が `.env.test` の DATABASE_URL と完全に一致すること（Next が読む `.env` の値を使わない）
+ *   4. `.env.test` のパスワード（assertTestDatabaseCredentials）
+ * - それ以外の値（空文字列・大文字の違いを含む）：TARGET_INVALID（Prisma CLI のガードと同じ。取り違えても接続しない）。
+ *
+ * NODE_OPTIONS は、ここでは検査しない（Next の開発サーバーが子プロセスに設定することがあり、アプリの中では起動した側と区別できないため）。
+ * 親のプロセスの NODE_OPTIONS は、開発サーバーを起動するスクリプトの側で拒否する。
+ * 失敗したときのメッセージには、パスワード・接続URL・環境変数の値を含めない。
+ */
+export function assertAppDatabaseTarget(input: AppDatabaseTargetInput): AppDatabaseTarget {
+  const { env, testEnv, developmentDatabaseUrl } = input;
+  const value = env[APP_DB_TARGET_KEY];
+  if (value === undefined) return { mode: "default" };
+  if (value !== APP_DB_TARGET_TEST) {
+    throw new AppDatabaseTargetError("TARGET_INVALID", `${APP_DB_TARGET_KEY} must be unset or exactly "${APP_DB_TARGET_TEST}".`);
+  }
+
+  if (testEnv === undefined) {
+    throw new AppDatabaseTargetError("TEST_ENV_MISSING", ".env.test was not found.");
+  }
+  const expectedUrl = testEnv.DATABASE_URL;
+  if (expectedUrl === undefined || expectedUrl === "") {
+    throw new AppDatabaseTargetError("TEST_ENV_URL_MISSING", ".env.test does not define DATABASE_URL.");
+  }
+
+  const target = assertTestDatabaseTarget({ databaseUrl: env.DATABASE_URL, env, developmentDatabaseUrl });
+  if (env.DATABASE_URL !== expectedUrl) {
+    throw new AppDatabaseTargetError("DATABASE_URL_MISMATCH", "DATABASE_URL does not match the DATABASE_URL in .env.test.");
+  }
+  assertTestDatabaseCredentials(testEnv);
+  return { mode: "test", target };
+}
+
 /** `.env.test.readonly` の、katana_test_ro の接続URL（Step 3-12B-5E-3。`.env.test` には置かない） */
 export const TEST_DB_RO_URL_KEY = "KATANA_TEST_RO_DATABASE_URL";
 /** `.env.test.readonly` の、katana_test_ro のパスワード（KATANA_TEST_RO_DATABASE_URL のパスワードと同じ値） */

@@ -282,7 +282,7 @@ describe("ワーカー側（lib/prisma.ts）の接続前の検証（R14-1）", (
     const guardCall = "\nassertVitestDatabaseAccess();\n";
 
     it("共通の検証関数を、.env.test・.env を読んだ結果と process.env で呼ぶ（古い assertTestDatabaseTarget は呼ばない）", () => {
-      expect(source).toContain('import { assertIntegrationRuntime } from "./db/testDatabaseGuard";');
+      expect(source).toContain('import { assertAppDatabaseTarget, assertIntegrationRuntime } from "./db/testDatabaseGuard";');
       expect(guardFn.split("assertIntegrationRuntime({")).toHaveLength(2);
       expect(guardFn).toMatch(/assertIntegrationRuntime\(\{\s*env,\s*testEnv: readEnvFileInCwd\("\.env\.test"\),\s*developmentDatabaseUrl: readEnvFileInCwd\("\.env"\)\?\.DATABASE_URL,\s*\}\);/);
       expect(source).not.toContain("assertTestDatabaseTarget");
@@ -314,6 +314,26 @@ describe("ワーカー側（lib/prisma.ts）の接続前の検証（R14-1）", (
       expect(source).toContain("readFileSync(path.resolve(process.cwd(), fileName)");
       expect(source).not.toMatch(/console\.|process\.stdout|process\.stderr/);
       expect(source).not.toMatch(/\$\{[^}]*(DATABASE_URL|PASSWORD|source|env\[)/);
+    });
+
+    // Step 4-13A（P9）：Vitest の外（Next の開発サーバー）で KATANA_DB_TARGET が設定されたときの接続先の検証
+    it("KATANA_DB_TARGET の検証を、Vitest の検証の直後に、モジュールの本体で無条件に1回だけ呼び、PrismaPg・PrismaClient の生成より前に置く", () => {
+      const call = "\nassertAppDatabaseTargetAccess();\n";
+      expect(source.split(call)).toHaveLength(2);
+      expect(source).toContain("\nassertVitestDatabaseAccess();\nassertAppDatabaseTargetAccess();\n");
+      const callAt = source.indexOf(call);
+      for (const later of ["new PrismaPg(", "new PrismaClient(", "globalForPrisma.prisma ||", "const globalForPrisma"]) {
+        expect(source.indexOf(later), later).toBeGreaterThan(callAt);
+      }
+    });
+
+    it("KATANA_DB_TARGET が未設定なら何もせず（ファイルも読まない）、設定されていれば共通の検証関数を .env.test・.env を読んだ結果と process.env で呼ぶ", () => {
+      const fn = source.slice(source.indexOf("function assertAppDatabaseTargetAccess"), source.indexOf("\n}\n", source.indexOf("function assertAppDatabaseTargetAccess")));
+      const early = "  if (process.env.KATANA_DB_TARGET === undefined) return;";
+      expect(fn).toContain(early);
+      expect(fn.indexOf(early)).toBeLessThan(fn.indexOf("readEnvFileInCwd("));
+      expect(fn).toMatch(/assertAppDatabaseTarget\(\{\s*env: process\.env,\s*testEnv: readEnvFileInCwd\("\.env\.test"\),\s*developmentDatabaseUrl: readEnvFileInCwd\("\.env"\)\?\.DATABASE_URL,\s*\}\);/);
+      expect(fn.split("assertAppDatabaseTarget(")).toHaveLength(2);
     });
 
     it("vitest.config.ts（通常テスト）は、統合テストのモードを無効にしたまま", () => {
