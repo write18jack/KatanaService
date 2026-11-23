@@ -351,7 +351,8 @@ const KNOWN_DB_INTEGRATION_TEST_FILES = [
 // Step 3-12B-5E-9A-9-2 で lib/testing/testDbSchemaDiffRunner.test.ts を追加（40 → 41）
 // Step 4-3 で lib/testing/integrationDatabaseSetup.test.ts を追加（41 → 42）
 // Step 4-4 で lib/testing/integrationWorkerCheck.test.ts を追加（42 → 43）
-const EXPECTED_UNIT_TEST_COUNT = 43;
+// Step 4-13B で lib/testing/e2eDevServer.test.ts を追加（43 → 44）
+const EXPECTED_UNIT_TEST_COUNT = 44;
 const INTEGRATION_TEST_GLOB = "**/*.integration.test.{ts,tsx}";
 const TEST_FILE = /\.test\.tsx?$/;
 const INTEGRATION_TEST_FILE = /\.integration\.test\.tsx?$/;
