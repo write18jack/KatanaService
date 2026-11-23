@@ -3047,7 +3047,7 @@ npm run test:integration ─► 専用runner
 | 1. globalSetup への接続処理の組み込み | 必須 | 3-Aの「Step 3-10の実施前レビュー」（2026-11-03）の「次に実装すべきもの」の3「globalSetup への接続処理の組み込みと、R14 の残課題1の対策（Phase 4 の前）」。2-3（開始前の読み取り確認）。これがないと統合テストを実行できない |
 | 2. setupFiles での各ワーカーの接続先の照合 | 必須 | 同じレビューの「B. 未実装」（「globalSetup への接続処理の組み込み…と、setupFiles での各ワーカーの照合」）。2-2 |
 | 3. R14 の残課題1（runner を通さずに globalSetup・`lib/prisma.ts` の統合テストモードを起動する経路） | 必須 | 5章の R14。同じレビューの「次に実装すべきもの」の3（「Phase 4 の前」） |
-| 4. R13（`npm run build`） | 必須 | 5章の R13（「Phase 4 までに実施する」）。DB に接続しないことを確認できる方法が先に必要 |
+| 4. R13（`npm run build`） | 必須 | 5章の R13（「Phase 4 までに実施する」）。DB に接続しないことを確認できる方法が先に必要。（2026-11-23 追記・Step 4-11）実施済み（build は成功。DB に接続しないことを確かめた） |
 | 5. Phase 4 の開発用DB の件数の照合 | 必須 | Phase 4 の1と完了条件 |
 | 6. 単体テスト（`npm test`） | 必須 | Phase 4 の3 |
 | 7. 統合テスト6件 | 必須 | 0章の目的2・3、Phase 4 の4。1〜3が先に必要 |
@@ -3312,6 +3312,7 @@ npm run test:integration ─► 専用runner
 | 4-9A | 開発用DB の所在の調査（Docker・ホストの読み取りと設定の静的な確認だけ。DB への接続なし） | なし | 開発用DB のデータは Docker のボリュームにあり、稼働していない。ホスト・外部の DB ではない。件数の確かめ方の3案（A：稼働していないことの記録、B：ボリュームの複製で数える、C：いつもの開発用の起動）を比べ、A を推奨 |
 | 4-9B | 案Aの採用と、Phase 4 の開始時の記録（読み取り専用の `docker ps`・`docker volume inspect`・`docker system df -v`・`lsof` だけ） | `4dbd997`（記録） | 下の「Step 4-9A・4-9B の記録」 |
 | 4-10 | 統合テスト6件の初回の実行（統合テストの前の確認 → 第7のゲートの一時有効化 → 1回の実行 → ゲートの無効化 → 事後の確認）。各操作は、個別の承認を得て1回ずつ実行した。詳細は下の「Step 4-10 の実施記録」 | `4d8940d`（第7のゲートの一時有効化）・`3088ace`（無効化） | **6ファイル・54件が成功（終了コード0）。** 事後の `verify` で状態 C、`identity` は全項目が一致 |
+| 4-11 | R13：`npm run build` の実行（`DATABASE_URL` を接続できないダミーにして、DB に接続しないことを確かめる）。詳細は下の「Step 4-11 の実施記録」 | なし（コードの変更なし） | **build は成功（終了コード0）。DB に接続しようとした形跡はない。** Google Fonts の取得は未確認 |
 
 **Step 4-8B の実施記録（2026-11-23。テストDB の復旧。統合テストは実行していない）：**
 
@@ -3361,6 +3362,16 @@ npm run test:integration ─► 専用runner
 
 - **終了時の比べ方：** Phase 4 の最後に、同じコマンドで同じ項目を読む（読み取りだけ。承認が必要）。1〜3がすべて0のまま、4の作成日時・ラベル・config-hash・大きさが同じなら、完了条件（読み替えたもの）を満たす。大きさは Docker の集計の値で、細かい書き込みまでは捉えないので、主な根拠は1〜3。途中で開発用DB を起動した場合は、この比べ方は使えない。
 - **限界：** 記録は、読んだ2つの時点のスナップショット。その間に、別のプロセスが一時的に 5433 番で DB を起動して止めた場合は、検出できない（運用で、Phase 4 のあいだ開発用DB を起動しない）。
+
+**Step 4-11 の実施記録（2026-11-23。R13：`npm run build`）：**
+
+- **実行の前：** HEAD `a55940b`、変更なし。`.next/`・`next-env.d.ts`・`tsconfig.tsbuildinfo` は Git の対象外（`.next/` は実行の前から存在した）。Git で管理している `tsconfig.json` と `next-env.d.ts` のハッシュを記録した。5432・5433番の待ち受けは0件。固定ゲートは7つとも無効。
+- **実行：** `npm run build` を1回だけ（2026-11-23T11:53:04Z〜11:53:13Z）。環境変数は、`DATABASE_URL` を接続できないダミー（`127.0.0.1:9` のポート。パスワードなし）、`AUTH_SECRET` をダミー、`NEXT_TELEMETRY_DISABLED=1` にした。Next は `.env.local`・`.env` を読むが、シェルで渡した値が優先されるので、本物の `DATABASE_URL`・`AUTH_SECRET` は使われない。開発用DB は起動していない。
+- **結果：** **終了コード0。** Next.js 16.0.10（Turbopack）で、コンパイル（約1.9秒）・TypeScript の検査・ページのデータの収集・静的なページの生成（3ページ）が成功した。ルートは、`/_not-found` だけが静的で、`/[locale]` 以下のすべてのページと `/api/auth/[...nextauth]` は動的（リクエストのときに描画する）。DB を使うページが build の時点で描画されないという、Step 4-0 の静的な見込みと一致する。
+- **DB に接続しないことの根拠：** 出力に、接続の失敗を示す語（`ECONNREFUSED`・`P1001`・`Can't reach database`・`DriverAdapterError`・`PrismaClientInitializationError`・`127.0.0.1:9`）は0件。接続しようとすれば、ダミーの接続先のために失敗するか、エラーが出るはず。出力に `.env*` の値・接続 URL は0件。
+- **実行の後：** Git の状態は変わらず、`tsconfig.json`・`next-env.d.ts` のハッシュは実行の前と同じ（書き換わったのは Git の対象外の `.next/` だけ）。5432・5433番の待ち受けは0件のまま（開発用DB は起動しておらず、案Aの記録は崩れていない）。固定ゲートは7つとも無効。
+- **警告：** `baseline-browser-mapping` のデータが古いという警告が繰り返し出た（パッケージの更新の案内。build の結果には関係しない。パッケージは更新していない）。
+- **確かめていないこと：** **Google Fonts の取得。** `app/layout.tsx` は `next/font/google` を使っており、build は成功したが、出力にフォントの取得の表示がない。今回ネットワークから取得したのか、`.next/` のキャッシュを使ったのかは分からない。確かめるには、キャッシュを空にした状態でもう一度 build する（`.next/` の削除を伴うので、別の承認が必要）。
 
 **Step 4-10 の実施記録（2026-11-23。統合テストの初回の実行）：**
 
@@ -3412,7 +3423,7 @@ npm run test:integration ─► 専用runner
 | 接続プール内の別の接続 | setupFiles はテストファイルの開始時に1回だけ照合する。同じ URL の別の接続は照合していない | C |
 | `.env.test` の読み込みの間の TOCTOU | runner・globalSetup・各ワーカー・setupFiles が、それぞれ別の時点で読む。その間の書き換えは防げない | C |
 | P9（`KATANA_DB_TARGET=test` での開発サーバーのガード） | 未対応。統合テストには不要だが、E2E の前には必須 | C（統合テスト）／E2E の前に必須 |
-| R13（`npm run build`） | 未実施。統合テストとは独立に実施できる。Phase 4 の完了には必須 | C（統合テスト）／Phase 4 の完了に必須 |
+| R13（`npm run build`） | 未実施。統合テストとは独立に実施できる。Phase 4 の完了には必須。（2026-11-23・Step 4-11）**実施済み。** build は成功し、DB に接続しないことを確かめた（「Step 4-11 の実施記録」）。Google Fonts の取得は未確認 | C（統合テスト）／Phase 4 の完了に必須 |
 
 **統合テストを実行する前の必須条件（それぞれ承認が必要）：**
 
@@ -3439,7 +3450,7 @@ npm run test:integration ─► 専用runner
 | R12 | Step 3-0で取得したDockerの記録（コンテキスト・ボリューム名・`katana-db`）が残っていない | 解消（Step 3-9で取得し直した：コンテキスト `desktop-linux`、ボリューム `katana-web_postgres_data`）。**調査の時点で、開発用コンテナ `katana-db` は存在しない。** 今後の比較の対象は、開発用ボリュームの名前・作成日時（2026-07-18T05:42:41Z）・ラベル（`com.docker.compose.project=katana-web`・`com.docker.compose.volume=postgres_data`）と、`katana-db` の有無。`testdb --status` がこれらを読み取る。ボリュームへの操作は読み取りだけ |
 | R14 | `.env.test` のパスワードがプレースホルダーのままでもガードを通る。`DATABASE_URL` と `KATANA_TEST_DB_PASSWORD` の一致は、運用で守っている | **一部対策済み・残課題あり。** Step 3-9Cで、共通の `assertTestDatabaseCredentials()`（見本の値・空・文字種・URLとの一致・管理用との違い）を、4つの正規の経路（Dockerのラッパー・統合テストのrunner・`testdb-migrate`・Prisma CLIのテストDBモード）に適用した。残り：(1) runnerを通さずに globalSetup・`lib/prisma.ts` の統合テストモードを起動する経路（パスワードは未検証。今は globalSetup が必ず停止する）、(2) `docker compose` の直接実行、(3) 外部の道具からの接続（対象外）。詳細は3-Aの3-9C。（2026-11-23 追記・Step 4-1〜4-4）**(1) は、対策実装済み・モック/静的検証済み。実際の Vitest ワーカーと実DBでは未検証。**共通の `assertIntegrationRuntime()`（目印・`NODE_OPTIONS`・`.env.test` の存在・接続先・`DATABASE_URL` と `.env.test` の完全一致・パスワード）を、globalSetup（`3c4c7f8`）・`lib/prisma.ts`（`272b8b2`）・setupFiles（`7ae4047`）に適用した。実環境での確認が終わるまで、解消済みとは扱わない。(2)・(3) は変更なし（延期可能）。4章の「4-A. 実施結果」（2026-11-23 追記・Step 4-10）(1) は、統合テストの初回の実行で、実際の Vitest のメインプロセス・ワーカーと実DBで、接続前の検証が**成功の経路で通ることを確かめた**。runner を通さない起動の拒否（否定の経路）は、モック・静的な検証だけで、実際のプロセスでは確かめていない。そのため、解消済みとは扱わず、「対策実装済み。成功の経路は実環境で検証済み、否定の経路はモック/静的検証済み」とする |
 | R15 | Composeの変数展開では、シェルの環境変数が `--env-file` より優先される | 対策済み（Step 3-9B）。Composeの子プロセスには、許可リストの変数と検証済みのパスワードだけを渡す。親に `COMPOSE_*` や同名のパスワードを設定しても結果が変わらないことを、`config` で確認した |
-| R13 | Step 3-3の完了条件の `npm run build` を実施していない | DBに接続しないことを確認できる方法が見つかるまで保留。Phase 4までに実施する |
+| R13 | Step 3-3の完了条件の `npm run build` を実施していない | DBに接続しないことを確認できる方法が見つかるまで保留。Phase 4までに実施する。（2026-11-23 追記・Step 4-11）**解消。** `DATABASE_URL` を接続できないダミーにして `npm run build` を1回実行し、成功した（終了コード0）。接続の失敗の形跡はなく、DB を使うページはすべて動的。Git で管理しているファイルは変わらず、開発用DB は起動していない。Google Fonts の取得は、別の事項として未確認（4-A の「Step 4-11 の実施記録」） |
 | R9 | テストが途中で落ちた後は、`testdb:reset` が必要になる | 利便性の問題であり、安全性の問題ではない |
 | R10 | ガードのコードそのものを書き換えられると防げない | CLAUDE.mdとレビューで対処する。（2026-11-15 追記）`CLAUDE.md` に、ガードとそのテストを緩めないことを明記した（`e9d520d`） |
 | R11 | 開発用DBの認証情報が `docker-compose.yml` に直接書かれている | 範囲外 |
@@ -3450,6 +3461,7 @@ npm run test:integration ─► 専用runner
 
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
+   - **（2026-11-23 更新・Step 4-11）この行が、下の Step 4-10 以前の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-11 の記録の commit（作る場合）、またはその親の `a55940b`（`docs: record first integration test run in Phase 4`）。変更済み（未commit）は、記録を commit していなければ本ファイルだけ。未追跡は既存の2件。固定ゲートは7つとも無効。統合テスト6件は成功済み、R13 の build も成功済み（DB に接続しない）。Phase 4 の残り（どれも承認が必要）：`npm test` の全体、F-01 の E2E（先に P9 の対応と Playwright の判断）、Phase 4 の終了時の案Aの記録。Google Fonts の取得の確認は任意（`.next/` の削除を伴う）。
    - **（2026-11-23 更新・Step 4-10）この行が、下の Step 4-9B・4-8B・4-7・4-5 の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-10 の記録の commit（作る場合）、またはその親の `3088ace`（`test: restore disabled integration database gate in both places`）。変更済み（未commit）は、記録を commit していなければ本ファイルだけ。未追跡は既存の2件。固定ゲートは7つとも無効（第7のゲートは2か所とも）。**統合テスト6件は 2026-11-23 に実DBで1回実行し、54件が成功した。** テストDB は、最後に確認した時点（Step 4-10 の事後の確認）で状態 C。開発用DB は、Phase 4 が終わるまで起動しない（案A）。Phase 4 の残り（どれも承認が必要）：R13 の build（`DATABASE_URL` を接続できないダミーにする）、`npm test` の全体、F-01 の E2E（先に P9 の対応と Playwright の判断）、Phase 4 の終了時の案Aの記録。
    - **（2026-11-23 更新・Step 4-9B）この行が、下の Step 4-8B・4-7・4-5 の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-9B の記録の commit（作る場合）、またはその親の `f6c7851`（`docs: record test database recovery in Phase 4`）。変更済み（未commit）は、記録を commit していなければ本ファイルだけ。未追跡は既存の2件。固定ゲートは7つとも無効。開発用DB の確認は案A（稼働していないことの記録）に読み替え、開始時の記録は 2026-11-23T09:53:26Z（4-A の「Step 4-9A・4-9B の記録」）。**Phase 4 が終わるまで、開発用DB（`katana-db`）を起動しない。** 次の候補（どれも承認が必要）：統合テストのための第7のゲートの有効化（2か所を同じ commit で）→ 統合テストを1回 → 事後の確認 → ゲートの無効化、R13 の build、`npm test` の全体、Phase 4 の終了時の案Aの記録。
    - **（2026-11-23 更新・Step 4-8B）この行が、下の Step 4-7・4-5 の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-8B の記録の commit（作る場合）、またはその親の `72d95fb`（`test: restore disabled migration gate after test DB recovery`）。変更済み（未commit）は、記録を commit していなければ本ファイルだけ。未追跡は `docs/presentations/KatanaService_プロジェクト構成.pptx`・`test-data/`。固定ゲートは7つとも無効（第7のゲートは2か所とも）。テストDB は、2026-11-23 に作り直したコンテナ `katana-test-db`（`1ba1b8ccc55d…`）で、最後に確認した時点（Step 4-8B の手順10a）で状態 C。`katana_test_ro` はない。次のセッションでも、状態 C を過去の記録から推定せず、`status`・`identity`・`verify` で確かめる（コンテナが停止・再起動していれば、tmpfs のためデータは失われている）。次の候補（どれも承認が必要）：開発用DB の件数の記録（Phase 4 の開始時）、R13 の build、`npm test` の全体、統合テストのための第7のゲートの有効化（2か所を同じ commit で）。
