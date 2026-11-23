@@ -258,5 +258,85 @@ runner は URL を子プロセスの環境変数に入れず、URL の SHA-256 �
 ### テストが失敗したとき・データが残ったとき
 
 - **自動では削除しません。** TRUNCATE・DELETE・DROP・migration・reset・Docker の操作は、統合テストの経路のどこにもありません。
-- データが残ると、次の実行は globalSetup の開始前の検査（状態 C でない）で止まります。元に戻す方法は、テストDB の作り直しだけです（`testdb:reset` は未実装。手作業の作り直しには、Docker の操作・migration・`katana_test_ro` の再作成と、それぞれの承認・固定ゲートが必要）。**復旧の方法は、統合テストを実行する前に決めます**（PLAN の4章の「Phase 4 の残余リスク」）。
+- データが残ると、次の実行は globalSetup の開始前の検査（状態 C でない）で止まります。元に戻す方法は、テストDB の作り直しだけです（`testdb:reset` は未実装。手作業の作り直しには、Docker の操作・migration・`katana_test_ro` の再作成と、それぞれの承認・固定ゲートが必要）。**復旧の方法は、統合テストを実行する前に決めます**（PLAN の4章の「Phase 4 の残余リスク」）。→（2026-11-23・Step 4-6）既存のコマンドによる段階的な手動復旧（案2）に決めました。手順は「6. 統合テスト失敗後のテストDB復旧」。
 - 失敗の出力は記録し、報告して、承認を待ちます（「失敗したときの対応」と同じ）。
+
+---
+
+## 6. 統合テスト失敗後のテストDB復旧（2026-11-23・Step 4-6 で決定、Step 4-7 で記録）
+
+**この節は、承認を得て1つずつ行う手順の記録です。まとめて実行するスクリプトではなく、自動では実行しません。** 復旧の方式は、既存のコマンドによる段階的な手動復旧（PLAN の Step 4-6 の案2）です。専用の `testdb:reset` は作っていません（延期）。テストで作ったデータだけを SQL で削除する方法は採りません（「SQL による削除をしない」方針のため）。
+
+統合テストは、まだ実DBで一度も実行していません。この手順も、統合テストのための復旧としては、まだ実施していません（同じ down・up・migration の組み合わせは、2026-11-07〜08 に Phase 3 で1回実施しています。PLAN の 3-12B-2・3-12B-3）。
+
+### A. 復旧が必要になる状況
+
+- テストデータが残った（teardown の `INTEGRATION_TEARDOWN_STATE_NOT_C`、または次の実行の globalSetup の `INTEGRATION_STATE_NOT_C`）
+- DB が状態 B になった（データの残り、migration の不一致、想定外のオブジェクト）
+- teardown が失敗した（`INTEGRATION_TEARDOWN_INSPECTION_FAILED`。DB の状態は不明）
+- プロセスの異常終了（SIGKILL など）で teardown が動かず、DB の状態が不明
+- コンテナが再起動した（`INTEGRATION_TEARDOWN_SERVER_CHANGED`、`testdb:identity` の StartedAt・RestartCount の変化。tmpfs のため、データとロールは消えている）
+- migration が途中で失敗した（`testdb:migrate` が止まった。一部だけ適用された可能性がある）
+
+### B. 復旧を始める前の確認
+
+1. **Git の状態：** ブランチ・HEAD・未commit の変更が想定どおりであること。
+2. **固定ゲート：** 7つ（第7のゲートは2か所とも）が無効であること。統合テストのために第7のゲートを有効にしていた場合は、先に無効に戻す commit を作る（統合テストと復旧を同時に行わない）。
+3. **Docker の対象の同一性：** `npm run testdb:status`・`npm run testdb:identity`（Docker の読み取り。承認が必要）。プロジェクト `katana-test`・コンテナ `katana-test-db` だけで、開発用ボリュームの記録が変わっていないこと。
+4. **DB と postmaster の同一性：** `npm run testdb:verify`（DB の読み取り。承認が必要）。本人確認の4項目、状態 A・B・C、`pg_postmaster_start_time()`・`inet_server_addr()` を記録する。
+5. **ほかのプロセスによる操作がないこと：** ほかの端末・セッションで、統合テスト・`testdb:*` の操作を行っていないこと。**これを検出する仕組み（ロックなど）はなく、運用で守ります。**
+6. **開発用DB への影響がないこと：** 復旧の手順は、開発用のコンテナ・ボリューム・DB を操作の対象にしません（下の「開発用DB の保護」）。Phase 4 の件数の照合（開始時・終了時）で、最終的に確かめます。
+
+### C. 状態ごとの対応
+
+| `testdb:verify` の結果 | 対応 |
+|---|---|
+| 状態 C | 復旧は不要。独立した `testdb:verify` をもう一度行って確かめ、記録する |
+| 状態 A | 本人確認の4項目が成功していることを先に確かめる。そのうえで、D の手順7〜10（migration のゲートの有効化 → `migrate --apply` を1回 → ゲートを無効に戻す → `verify`）で C にする。down・up はしない |
+| 状態 B | 承認を得て、D の手順1から（down・up からやり直す）。B のまま migration を実行しない（runner も B では止まる） |
+| 状態が分からない（`verify` が本人確認・接続・SQL で失敗した、識別情報が想定と違う） | 原因を読み取りだけで調べ、復旧の方法を決めるまで止まる。推測で down・up・migration を行わない |
+
+### D. 復旧の手順（案2）
+
+**それぞれの手順は、個別の承認を得てから行います。手順を自動で続けて実行しません。どの手順でも、失敗したら、そこで止まり、次の手順に進みません**（自動の再試行・修復・推測による変更をしない。終了コードと、失敗した手順を記録して、承認を待つ）。
+
+| # | 操作 | 触れるもの | 固定ゲート | 止まる条件（主なもの） |
+|---|---|---|---|---|
+| 1 | `npm run testdb:status`・`npm run testdb:identity`・`npm run testdb:verify` | Docker・DB（読み取り） | 不要 | プロジェクトにほかのコンテナがある、識別の照合の失敗、本人確認の失敗 |
+| 2 | `npm run testdb:down`（`--apply` なしの予行） | Docker（読み取り） | 不要 | コンテナ・マウントが想定と違う（`CONTAINER_INSPECT_MISMATCH`）、プロジェクトの中身が想定と違う |
+| 3 | `npm run testdb:down -- --apply` | Docker（`katana-test` のコンテナの停止・削除。tmpfs のデータとロールは消える） | なし（`--apply` と個別の承認） | 2 と同じ確認。停止後の照合の失敗（`POST_CHECK_FAILED`。作り直さない） |
+| 4 | `npm run testdb:up`（`--apply` なしの予行） | Docker（読み取り） | 不要 | コンテナが残っている（`TEST_CONTAINER_EXISTS`）、5434番が使われている、イメージ `postgres:15` がない（取得しない） |
+| 5 | `npm run testdb:up -- --apply` | Docker（`katana-test-db` の作成・起動） | なし（`--apply` と個別の承認） | 4 と同じ確認。起動後の照合の失敗（tmpfs・ポート・healthy・ボリューム・開発用の記録。何も削除しない） |
+| 6 | `npm run testdb:status`・`npm run testdb:identity`・`npm run testdb:verify` | Docker・DB（読み取り） | 不要 | **状態 A でなければ止まる**。新しいコンテナの識別情報を記録する |
+| 7 | migration のゲート `LIVE_DATABASE_DISABLED`（`scripts/testdb-migrate.mts`）を有効にする commit | コードの変更 | migration のゲート | 個別の承認と、対応する静的テストの更新が必要。ほかのゲートは変えない |
+| 8 | `npm run testdb:migrate -- --apply` を1回だけ | Docker（読み取り）・DB（migration） | migration のゲート（手順7） | 状態 B（状態 C なら CLI を起動せずに成功とする）、権限の不足（`MIGRATION_PRIVILEGES_INSUFFICIENT`）、D1・F1・D2 の不一致（CLI の起動前）。CLI の失敗・F2・D3 の不一致（起動後。一部適用の可能性。自動の再実行・reset はしない） |
+| 9 | migration のゲートを無効に戻す commit | コードの変更 | — | 手順8が失敗しても、必ず行う |
+| 10 | 独立した `npm run testdb:verify`（あわせて `testdb:identity`） | Docker・DB（読み取り） | 不要 | 状態 C でなければ、復旧は未完了 |
+
+- `npm run testdb:migrate`（引数なし）は予行で、Docker・DB に触れず、Prisma CLI も起動しません（承認なしで実行できます）。手順7の前の確認に使えます。
+- migration のゲートを有効にしているあいだ、第7のゲート（統合テスト）は有効にしません。
+- 手順3の後は、手順5が成功するまで、テストDB はありません（統合テストも、ほかの `testdb:*` の DB への接続もできません）。
+
+### E. 読み取り専用ロール `katana_test_ro`
+
+- `katana_test_ro` は schemaDiff でだけ使い、統合テストでは使いません。**統合テストのための復旧の対象には含めません。**
+- down・up の後は、ロールはありません（tmpfs）。schemaDiff を行う前に、必要なら、別の承認で作り直して確かめます（`npm run testdb:ro-role:preflight-create` → create のゲート `RO_ROLE_CREATE_DISABLED` の有効化 → `npm run testdb:ro-role:create -- --apply` → ゲートを無効に戻す → `npm run testdb:ro-role:verify-created`）。
+
+### F. 復旧の完了条件
+
+次のすべてを、**復旧の後に新しく実行した結果で**確かめます（過去の検証結果で代えない）。
+
+- Docker の対象の同一性：`testdb:identity` が成功（プロジェクト・ラベル・`127.0.0.1:5434` だけ・tmpfs・マウント・healthy・イメージ・開発用の記録）
+- 正しい DB と postmaster：`testdb:verify` の本人確認の4項目が成功し、postmaster の識別情報を記録した
+- migration の8件が、名前で完全に一致し、失敗・ロールバック・重複がない（`testdb:verify` の状態 C の判定に含まれる）
+- 状態 C（15テーブルが空、想定外のオブジェクトがない）
+- 開発用DB への影響がない（up・down の事後の照合と、Phase 4 の件数の照合）
+- 固定ゲートが7つとも無効（migration のゲートを戻した）
+- 復旧の結果（実行した手順、終了コード、識別情報、状態）を、PLAN に記録した
+
+### 開発用DB の保護（この手順で働く既存の仕組み）
+
+- Docker の操作は `scripts/testdb.mts` からだけ行い、Compose のプロジェクト（`katana-test`）・ファイル（`docker-compose.test.yml`）・ディレクトリ・env ファイルを必ず固定する。開発用の `docker-compose.yml` は使わない。
+- `--volumes`・`--remove-orphans`・`--rmi` などの引数は使わない（拒否する）。`DOCKER_HOST`・`DOCKER_CONTEXT` があれば止まり、コンテキスト `desktop-linux` を照合する。
+- 開発用のコンテナ `katana-db` と開発用ボリュームには、読み取りしかしない。開発用ボリュームの記録を、操作の前後で比べる。
+- DB への接続は、接続前のガード（`127.0.0.1:5434`・`katana_test`・`katana_test_user`、開発用DB の URL の拒否）と、接続後の本人確認を通る。

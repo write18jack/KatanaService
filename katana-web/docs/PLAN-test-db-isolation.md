@@ -3301,7 +3301,9 @@ npm run test:integration ─► 専用runner
 | 4-2 | ワーカー側のガード：`lib/prisma.ts` の統合テストのモードで `assertIntegrationRuntime()` を、`PrismaPg`・`PrismaClient` の生成より前に呼ぶ。通常テストでの拒否と、Vitest 以外での動作は不変 | `272b8b2` | 4ファイル・549件成功。`tsc`・ESLint 成功 |
 | 4-3 | globalSetup の本体（`lib/testing/integrationDatabaseSetup.ts`）、teardown、第7の固定ゲート `INTEGRATION_DATABASE_DISABLED`（`Object.freeze({ mode: "disabled" })`）。`CLAUDE.md`・`docs/TESTING.md` を7つのゲートに更新 | `b39c674` | 5ファイル・584件成功。ゲートの行を一時的に有効の値に書き換えると静的テストが失敗することを確認（ハッシュで復元を確認） |
 | 4-4 | setupFiles（`lib/testing/integrationSetup.ts`。本体は `lib/testing/integrationWorkerCheck.ts`）：同じゲートの後に `@/lib/prisma` を動的 import し、SELECT 1文で本人確認。`vitest.integration.config.ts` に `setupFiles`・`bail: 1` | `7ae4047` | 6ファイル・627件成功。ゲートの有効化・Prisma の静的 import を一時的に入れると静的テストが失敗することを確認（ハッシュで復元を確認） |
-| 4-5 | 記録とドキュメント：`CLAUDE.md`（第7のゲートの2か所の適用）、`docs/TESTING.md`（5章「統合テストの経路」）、本節 | 未commit（記録の時点） | テストは実行していない（文書の変更だけ） |
+| 4-5 | 記録とドキュメント：`CLAUDE.md`（第7のゲートの2か所の適用）、`docs/TESTING.md`（5章「統合テストの経路」）、本節 | `aee9c88` | テストは実行していない（文書の変更だけ） |
+| 4-6 | 統合テストが失敗したときの復旧方式の調査・設計（コードの変更なし）。**採用：案2（既存のコマンドによる段階的な手動復旧）。延期：案1（専用の `testdb:reset`）。不採用：案3（テストで作ったデータだけを SQL で削除する。「SQL による削除をしない」方針に反する）。** 案1を延期した理由：down → up → migration を1回の実行で続けると「危険な操作を無条件に連続実行しない」と衝突する、migration のゲートを迂回できない、R9 は利便性の問題とされている、案2の部品はすべてあり 2026-11-07〜08 に実DBで1回実施した実績がある。`katana_test_ro` は統合テストでは使わないので、統合テストのための復旧の対象外（schemaDiff の前に、必要なら別に作り直す） | なし（調査だけ） | テストは実行していない |
+| 4-7 | 案2の手順の文書化：`docs/TESTING.md` の6章「統合テスト失敗後のテストDB復旧」（復旧が必要な状況、始める前の確認、状態 A・B・C ごとの対応、手順1〜10と止まる条件、`katana_test_ro` の扱い、完了条件、開発用DB の保護）。コマンド名・引数・エラーコードは、`package.json` と runner の実装（`parseTestDbArgs`・`parseTestDbMigrateArgs`・ro-role の引数の一覧）に静的に照合した | 未commit（記録の時点） | テストは実行していない（文書の変更だけ） |
 
 **設計（2-2・2-3）との違い：**
 
@@ -3322,7 +3324,8 @@ npm run test:integration ─► 専用runner
 
 | 項目 | 内容 | 分類 |
 |---|---|---|
-| テストデータが残った場合の復旧 | 自動では削除しない。元に戻すには、テストDB の作り直し（`testdb:reset` は未実装。手作業なら Docker の down・up、migration のゲートの有効化、`katana_test_ro` の再作成。それぞれ承認が必要）。**方法を、実行の前に決める（今回は reset を実装・実行しない）** | A |
+| テストデータが残った場合の復旧 | 自動では削除しない。元に戻すには、テストDB の作り直し（`testdb:reset` は未実装。手作業なら Docker の down・up、migration のゲートの有効化、`katana_test_ro` の再作成。それぞれ承認が必要）。**方法を、実行の前に決める（今回は reset を実装・実行しない）**。（2026-11-23 追記・Step 4-6・4-7）**復旧方針決定済み（案2）。運用手順の文書化（`docs/TESTING.md` の6章）と、実行前の確認（手順の予行）が必要。** `katana_test_ro` の再作成は、統合テストのための復旧から外した | A |
+| 同時実行（ロック機構なし） | 統合テスト・復旧・ほかの `testdb:*` の操作が、別の端末・セッションで同時に行われることを検出する仕組み（ロックなど）はない。**運用で防ぐ**（1つのセッションでだけ操作し、統合テストと復旧を同時に行わない。第7のゲートと migration のゲートを同時に有効にしない）。強化の案（未実装）：`testdb:verify` で、ほかのセッションの有無を読み取りで確かめる | A（運用で守ることの確認）／C（仕組みの追加） |
 | 実DBでの Prisma の SQL の結果の型 | `$queryRaw` が `::text` と `shobj_description()` を文字列で返す前提。違えば `IDENTITY_UNAVAILABLE` で止まる（安全側） | B |
 | `bail` が発動したときの teardown | `bail: 1` で残りを中止したときに、teardown が実行されること。実行されなければ、残ったデータは次の実行の開始前の検査で検出される | B |
 | `NODE_OPTIONS` などの環境変数 | Vitest がメインプロセス・ワーカーに `NODE_OPTIONS` を設定する場合は、`FORBIDDEN_ENV_PRESENT` で止まる（安全側）。runner を通さない経路では、`NODE_PATH`・`DYLD_*` などは見ていない（runner は許可リストで落とす） | B（`NODE_OPTIONS`）／C（その他の変数） |
@@ -3334,7 +3337,7 @@ npm run test:integration ─► 専用runner
 
 **統合テストを実行する前の必須条件（それぞれ承認が必要）：**
 
-1. 上の表の A（データが残った場合の復旧方法）を決めている。
+1. 上の表の A（データが残った場合の復旧方法）を決めている。→（2026-11-23）案2に決定し、`docs/TESTING.md` の6章に記録した。実行の前に、手順の予行（`testdb:down`・`testdb:up`（`--apply` なし。Docker の読み取りなので承認が必要）、`testdb:migrate`（引数なし））で、手順が今の環境で通ることを確かめる。同時実行がないことを運用で確かめる。
 2. 開発用DB の件数を、`BEGIN READ ONLY` の中の SELECT で記録している（4章の1。開始時）。
 3. `testdb:status`・`testdb:identity`・`testdb:verify` を、その時点で新たに実行し、状態 C と、コンテナ・postmaster の同一性を確かめている（2026-11-22 以前の結果で代えない）。
 4. 第7のゲートを2か所とも有効にする commit（対応する静的テストの更新を含む）を、承認を得て作っている。ほかの6つのゲートは無効のまま。
@@ -3368,6 +3371,7 @@ npm run test:integration ─► 専用runner
 
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
+   - **（2026-11-23 更新・Step 4-7）この行が、下の Step 4-5 の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-7 の記録の commit（作る場合）、またはその親の `aee9c88`（`docs: record Phase 4 integration safety infrastructure`）。変更済み（未commit）は、Step 4-7 を commit していなければ `docs/TESTING.md`・本ファイルの2つ。未追跡は `docs/presentations/KatanaService_プロジェクト構成.pptx`・`test-data/`。固定ゲートは7つとも無効（第7のゲートは2か所とも）。
    - **（2026-11-23 更新・Step 4-5）以下の想定より、この行が優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-5 の記録の commit（作る場合）、またはその親の `7ae4047`（`test: verify integration database identity in Vitest workers`）。変更済み（未commit）は、Step 4-5 を commit していなければ `CLAUDE.md`・`docs/TESTING.md`・本ファイルの3つ。未追跡は `docs/presentations/KatanaService_プロジェクト構成.pptx`・`test-data/`。固定ゲートは7つとも無効（第7のゲートは2か所とも）。下の `chore/test-db-isolation` 以降の行は、Phase 3 の時点の想定（`chore/test-db-isolation` は `09423a4` のまま）。
    - ブランチ：`chore/test-db-isolation`
    - HEAD：PLAN の記録の commit（`docs: record Step 3-13 completion and remaining verification tasks`。親は `e9d520d`（`docs: document test database isolation and testing procedures`。Step 3-13・3-13A））
@@ -3377,7 +3381,7 @@ npm run test:integration ─► 専用runner
    - `.env.test` はユーザーが作成済み（`-rw-------`。中身は表示しない）
    - テストDBのコンテナ `katana-test-db` が起動している場合がある（Step 3-11。データは tmpfs）。`docker ps -a` で確かめる
 3. Step 3-9・3-9Bは、構成ファイル・ラッパーの `--check`・`--status`・`docker compose config` による照合まで実施し、`61f8105` でcommit済み。Step 3-9C（R14のパスワード検証の共通化）は `4553f2f` でcommit済みだが、R14には残課題がある（3-Aの3-9C）。Step 3-9D（ラッパーの `--up`・`--down`）は、実装・単体テスト・静的検証と障害時の down のレビューまで実施し、`5fcc259` でcommit済み。Step 3-11 で、ユーザーがテストDBを初めて起動した（R7 は今回の起動で合格。3-Aの「Step 3-11」）。`down` はまだ実行していない。Step 3-11の実施前レビューの結果（3-Aの「Step 3-11の実施前レビュー」。前提条件の表 C、R7 の D、失敗時の E、DB検証の F、TOCTOU の G、`.env.test` の I）を先に読む。レビューの時点では Docker のデーモンが停止中だったが、Step 3-11A でユーザーが Docker Desktop を起動し、前提条件 C の2〜9 を満たすことを確かめた（3-Aの「Step 3-11A」）。初期化スクリプトのログ漏洩の対策も 3-11A で済んだ。初回の up の後に問題が起きたときは、自動で削除せず、読み取りで調べて報告し、個別の承認を待つ（3-11A で確定）。次に何を行うかは、始める前にユーザーに確認する。候補は次のとおり。
-   - （2026-11-23 更新・Step 4-5）**Phase 4 は実施中。** Step 4-1〜4-4（`3c4c7f8`・`272b8b2`・`b39c674`・`7ae4047`）で、接続前のガード・ワーカー側のガード・globalSetup と teardown・第7の固定ゲート・setupFiles を実装した（モック・静的検証だけ。実DBでは未実行）。R14-1 は「対策実装済み・モック/静的検証済み。実際の Vitest ワーカーと実DBでは未検証」。**次は、統合テストを実行する前の必須条件（4章の「4-A. 実施結果」の末尾）を、1つずつ承認を得て満たすこと。** 最初に、データが残った場合の復旧方法（reset の扱い）を決める。R13 の build・`npm test` の全体・開発用DB の件数の照合は、統合テストとは独立に、それぞれの承認で行える。認可の3件（自己登録で ADMIN を作れる、承認されていない店舗が市場データを見られる、`proxy.ts` が JWT の role で判定する）は、本ファイルの範囲外で、本番公開の前に別の工程で扱う（Step 4-0 の整理）。
+   - （2026-11-23 更新・Step 4-5）**Phase 4 は実施中。** Step 4-1〜4-4（`3c4c7f8`・`272b8b2`・`b39c674`・`7ae4047`）で、接続前のガード・ワーカー側のガード・globalSetup と teardown・第7の固定ゲート・setupFiles を実装した（モック・静的検証だけ。実DBでは未実行）。R14-1 は「対策実装済み・モック/静的検証済み。実際の Vitest ワーカーと実DBでは未検証」。**次は、統合テストを実行する前の必須条件（4章の「4-A. 実施結果」の末尾）を、1つずつ承認を得て満たすこと。** 最初に、データが残った場合の復旧方法（reset の扱い）を決める（→ 2026-11-23 の Step 4-6 で案2に決定、Step 4-7 で `docs/TESTING.md` の6章に記録。次は、手順の予行と、開発用DB の件数の記録などの、承認が必要な事前確認）。R13 の build・`npm test` の全体・開発用DB の件数の照合は、統合テストとは独立に、それぞれの承認で行える。認可の3件（自己登録で ADMIN を作れる、承認されていない店舗が市場データを見られる、`proxy.ts` が JWT の role で判定する）は、本ファイルの範囲外で、本番公開の前に別の工程で扱う（Step 4-0 の整理）。
    - （2026-11-15 更新・3-13B）Step 3-13 は完了（`docs/TESTING.md`・`CLAUDE.md` の追加は `e9d520d`。`CLAUDE.md` の変更は Step 3-13 に限った例外）。**固定ゲートは6つとも無効。** プロジェクト全体は未完了。**次は「Phase 4 の準備（残工程・依存関係・受け入れ条件の最終整理）」の提示で、承認が必要。** globalSetup・setupFiles・R14 の残課題1・R13 の build・Phase 4 の実施は、それぞれ別の承認。3-Aの「残工程の整理（Step 3-13 の後）」〜「次工程の方針：Phase 4 の準備」
    - （2026-11-15 更新・5E-9A）Prisma CLI による schemaDiff を実装し（`95b7a6d`・`d16ad0e`・`93b42b6`）、9-6E で実DBで1回実行して `no-diff`（Prisma が比較できる範囲だけ）。9-7 の独立した事後検証も成功し、ゲートは 9-8A（`241d7d8`）で無効に戻した。**固定ゲートは6つとも無効。** Step 3-12B-5E-9A は完了したが、プロジェクト全体は未完了。次の候補（どれも承認が必要）：Step 3-13（ドキュメント）、Phase 4 の計画、checksum の再照合と fingerprint の4区分の扱い、R13（build）・R14 の残課題、`reset` の実装。3-Aの「Step 3-12B-5E-9A」〜「Step 3-12B-5E-9A の完了判定」
    - （2026-11-09 更新）migration は Step 3-12B-3 で適用済み（最後に確認した時点で状態 C）。3つの固定ゲート（migration・checksum・schemaDiff）はすべて無効。
