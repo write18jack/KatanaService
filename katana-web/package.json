@@ -22,6 +22,7 @@
     "testdb:ro-role:preflight-create": "node scripts/testdb-ro-role.mts --preflight-create",
     "testdb:ro-role:verify-created": "node scripts/testdb-ro-role.mts --verify-created",
     "testdb:schema-diff": "node scripts/testdb-schema-diff.mts",
+    "testdb:e2e": "node scripts/testdb-e2e.mts",
     "testdb:check": "node scripts/testdb.mts --check",
     "testdb:status": "node scripts/testdb.mts --status",
     "testdb:identity": "node scripts/testdb.mts --identity-check",
