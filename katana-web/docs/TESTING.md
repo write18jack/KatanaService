@@ -10,6 +10,8 @@
 
 （2026-11-23 追記・Step 4-13B・4-14）F-01 の E2E 用の開発サーバーを起動するスクリプト（`scripts/e2e-dev-server.mts`）に、**8つ目の固定ゲート `E2E_DEV_SERVER_DISABLED`** を追加しました。**固定ゲートは8つともすべて無効です。** E2E 用の開発サーバーは、まだ一度も起動していません（「7. E2E 用の開発サーバー」）。
 
+（2026-11-24 追記・Step 4-13C・4-15）E2E 用のテストデータの準備と、シナリオごとの DB の変更を行うスクリプト（`scripts/testdb-e2e.mts`）に、**9つ目の固定ゲート `E2E_FIXTURE_DISABLED`** を追加しました。**固定ゲートは9つともすべて無効です。** このスクリプトは、まだ一度も `--apply` で実行していません（「7. E2E 用の開発サーバー」の「E2E 用のテストデータ」）。
+
 ---
 
 ## 1. 承認の原則
@@ -42,7 +44,7 @@
 |---|---|---|
 | Docker | `docker-compose.yml`・コンテナ `katana-db`・ボリューム `postgres_data` | `docker-compose.test.yml`・プロジェクト `katana-test`・コンテナ `katana-test-db` |
 | 接続先 | `localhost:5433`・DB `katana` | `127.0.0.1` または `localhost`、ポート `5434`、DB `katana_test`、ユーザー `katana_test_user` |
-| 設定ファイル | `.env` | `.env.test`（アプリ用・管理用のパスワード）、`.env.test.readonly`（`katana_test_ro`） |
+| 設定ファイル | `.env` | `.env.test`（アプリ用・管理用のパスワード）、`.env.test.readonly`（`katana_test_ro`）、`.env.e2e`（E2E 用のユーザーのパスワード `KATANA_E2E_USER_PASSWORD` だけ。Step 4-13C） |
 | データ | ボリュームに保存 | tmpfs（コンテナを作り直すと消える） |
 
 `.env.test`・`.env.test.readonly` は、ユーザーが作成し、権限は `-rw-------` にします。中身は表示しません。
@@ -94,12 +96,13 @@
 | `RO_ROLE_GRANT_SYNC_DISABLED` | `scripts/testdb-ro-role.mts` | `--grant-sync --apply`（権限の補完） | 無効 |
 | `INTEGRATION_DATABASE_DISABLED` | 定数は `lib/testing/integrationDatabaseSetup.ts`。適用箇所は2か所：`lib/testing/integrationGlobalSetup.ts`（globalSetup）と `lib/testing/integrationSetup.ts`（setupFiles） | `npm run test:integration`（統合テストのDBへの接続。Step 4-3 で追加、Step 4-4 で setupFiles にも適用） | 無効（2か所とも） |
 | `E2E_DEV_SERVER_DISABLED` | `scripts/e2e-dev-server.mts`（定数は `lib/testing/e2eDevServer.ts`） | `npm run e2e:dev-server -- --start`（E2E 用の開発サーバーの起動。テストDB に書き込める。Step 4-13B で追加） | 無効 |
+| `E2E_FIXTURE_DISABLED` | `scripts/testdb-e2e.mts`（定数は `lib/testing/testDbE2eFixtures.ts`） | `npm run testdb:e2e -- --op <操作> --apply`（E2E 用のテストデータの準備と、シナリオごとの DB の変更。Step 4-13C で追加） | 無効 |
 
-ゲートが無効の場合、これらの操作は、事前の検証の後、Docker・DB・Prisma CLI に触れる前に、それぞれのエラー（`TESTDB_MIGRATION_LIVE_DISABLED`・`CHECKSUM_LIVE_DISABLED`・`CATALOG_AUDIT_LIVE_DISABLED`・`SCHEMA_DIFF_LIVE_DISABLED`・`RO_ROLE_CREATE_DISABLED`・`RO_ROLE_GRANT_SYNC_DISABLED`・`INTEGRATION_DATABASE_LIVE_DISABLED`・`E2E_DEV_SERVER_LIVE_DISABLED`）で止まります。
+ゲートが無効の場合、これらの操作は、事前の検証の後、Docker・DB・Prisma CLI に触れる前に、それぞれのエラー（`TESTDB_MIGRATION_LIVE_DISABLED`・`CHECKSUM_LIVE_DISABLED`・`CATALOG_AUDIT_LIVE_DISABLED`・`SCHEMA_DIFF_LIVE_DISABLED`・`RO_ROLE_CREATE_DISABLED`・`RO_ROLE_GRANT_SYNC_DISABLED`・`INTEGRATION_DATABASE_LIVE_DISABLED`・`E2E_DEV_SERVER_LIVE_DISABLED`・`E2E_FIXTURE_LIVE_DISABLED`）で止まります。
 
 第7のゲート（`INTEGRATION_DATABASE_DISABLED`）は、2か所の適用箇所が**それぞれ**接続を拒否します。有効化・無効化は、承認を得て、**2か所を同じ commit で変え、両方を確かめます**（2か所の値が同じであることは、`lib/testing/integrationWorkerCheck.test.ts` の静的テストで確かめています）。環境変数や引数でゲートを有効にする仕組みは作りません。
 
-`testdb:verify` の読み取り専用の接続は、上の8つとは別の固定の許可（`readOnlyDatabase`。Step 3-11B で承認済み）で、有効です。
+`testdb:verify` の読み取り専用の接続は、上の9つとは別の固定の許可（`readOnlyDatabase`。Step 3-11B で承認済み）で、有効です。
 
 ---
 
@@ -114,6 +117,7 @@
 | `npx eslint <ファイル>` | ESLint |
 | `npm run test:integration:check` | 統合テストの runner の検証と、子プロセスの設定の表示だけ（Vitest を起動しない） |
 | `npm run e2e:dev-server` | E2E 用の開発サーバーの予行（`.env.test` の検証と、起動予定のコマンド・環境変数の表示だけ。開発サーバーを起動しない。DB・Docker に触れない） |
+| `npm run testdb:e2e` / `npm run testdb:e2e -- --op <操作>` | E2E 用のテストデータの操作の一覧と、予行（`.env.test` と、`seed` のときは `.env.e2e` の検証と、実行予定の SQL の種類・件数の表示だけ。パスワードのハッシュを作らない。DB・Docker に触れない） |
 | `npm run testdb:migrate` / `testdb:migrate:check` | migration の予行・確認（Prisma CLI を起動しない） |
 | `npm run testdb:checksums` | ローカルの checksum の計算だけ |
 | `npm run testdb:catalog` | リポジトリのファイルからの期待値の構築だけ |
@@ -147,6 +151,7 @@
 | `node scripts/testdb-ro-role.mts --create --apply` / `--grant-sync --apply` | `katana_test_ro` の作成・補完 | ゲートが無効なので止まる |
 | `npm run test:integration` | 統合テスト | **まだ使えない（実DBでは一度も実行していない）。**（→ 2026-11-23 更新・Step 4-10：承認を得てゲートを一時的に有効にし、1回実行して成功。今はゲートが無効なので、再び止まる） globalSetup（`lib/testing/integrationGlobalSetup.ts`）は、接続前の検証（R14-1）の後、第7の固定ゲート `INTEGRATION_DATABASE_DISABLED` で、DB に接続する前・テストを始める前に必ず停止する（`INTEGRATION_DATABASE_LIVE_DISABLED`）。setupFiles（`lib/testing/integrationSetup.ts`）も同じゲートで、Prisma を読み込む前に止まる。ゲートが有効なときだけ、読み取り専用で状態 C とサーバーの識別情報を確かめ、終了後に再確認する（データの削除・reset はしない）。詳細は「5. 統合テストの経路」 |
 | `npm run e2e:dev-server -- --start` | E2E 用の開発サーバーの起動（テストDB に書き込める。Step 4-13B） | **ゲートが無効なので止まる**（検証の後、起動の前に `E2E_DEV_SERVER_LIVE_DISABLED`）。まだ一度も起動していない。詳細は「7. E2E 用の開発サーバー」 |
+| `npm run testdb:e2e -- --op <操作> --apply` | E2E 用のテストデータの準備・シナリオごとの DB の変更（Step 4-13C） | **ゲートが無効なので止まる**（検証の後、読み取り専用の検査・接続の前に `E2E_FIXTURE_LIVE_DISABLED`）。まだ一度も実行していない。詳細は「7. E2E 用の開発サーバー」 |
 
 ### 使わないもの
 
@@ -286,7 +291,7 @@ runner は URL を子プロセスの環境変数に入れず、URL の SHA-256 �
 ### B. 復旧を始める前の確認
 
 1. **Git の状態：** ブランチ・HEAD・未commit の変更が想定どおりであること。
-2. **固定ゲート：** 7つ（第7のゲートは2か所とも）が無効であること（2026-11-23・Step 4-13B 以降は、8つ目の `E2E_DEV_SERVER_DISABLED` を含めて8つ。E2E 用の開発サーバーも止めておく）。統合テストのために第7のゲートを有効にしていた場合は、先に無効に戻す commit を作る（統合テストと復旧を同時に行わない）。
+2. **固定ゲート：** 7つ（第7のゲートは2か所とも）が無効であること（2026-11-23・Step 4-13B 以降は、8つ目の `E2E_DEV_SERVER_DISABLED` を含めて8つ。E2E 用の開発サーバーも止めておく。2026-11-24・Step 4-13C 以降は、9つ目の `E2E_FIXTURE_DISABLED` を含めて9つ）。統合テストのために第7のゲートを有効にしていた場合は、先に無効に戻す commit を作る（統合テストと復旧を同時に行わない）。
 3. **Docker の対象の同一性：** `npm run testdb:status`・`npm run testdb:identity`（Docker の読み取り。承認が必要）。プロジェクト `katana-test`・コンテナ `katana-test-db` だけで、開発用ボリュームの記録が変わっていないこと。
 4. **DB と postmaster の同一性：** `npm run testdb:verify`（DB の読み取り。承認が必要）。本人確認の4項目、状態 A・B・C、`pg_postmaster_start_time()`・`inet_server_addr()` を記録する。
 5. **ほかのプロセスによる操作がないこと：** ほかの端末・セッションで、統合テスト・`testdb:*` の操作を行っていないこと。**これを検出する仕組み（ロックなど）はなく、運用で守ります。**
@@ -336,7 +341,7 @@ runner は URL を子プロセスの環境変数に入れず、URL の SHA-256 �
 - migration の8件が、名前で完全に一致し、失敗・ロールバック・重複がない（`testdb:verify` の状態 C の判定に含まれる）
 - 状態 C（15テーブルが空、想定外のオブジェクトがない）
 - 開発用DB への影響がない（up・down の事後の照合と、Phase 4 の件数の照合）
-- 固定ゲートが7つとも無効（migration のゲートを戻した）。Step 4-13B 以降は8つとも無効
+- 固定ゲートが7つとも無効（migration のゲートを戻した）。Step 4-13B 以降は8つとも無効、Step 4-13C 以降は9つとも無効
 - 復旧の結果（実行した手順、終了コード、識別情報、状態）を、PLAN に記録した
 
 ### 開発用DB の保護（この手順で働く既存の仕組み）
@@ -357,4 +362,14 @@ runner は URL を子プロセスの環境変数に入れず、URL の SHA-256 �
 - **渡す環境変数：** 親の許可リストの変数と、`DATABASE_URL`（`.env.test` の値）・`KATANA_DB_TARGET=test`・`AUTH_SECRET`（起動のたびに作る乱数。保存も表示もしない。`.env.local` の値は使わない）・`NEXT_TELEMETRY_DISABLED=1` だけ。親の `DATABASE_URL`・`AUTH_SECRET`・`AUTH_URL`・`PG*`・`DOTENV_*`・`PORT` などは渡さない。親に `NODE_OPTIONS` があれば止まる。
 - **アプリの中のガード（P9。`lib/prisma.ts`）：** Vitest の外で `KATANA_DB_TARGET` が設定されていれば、`PrismaPg`・`PrismaClient` を作る前に `assertAppDatabaseTarget()` で確かめる。`test` なら、`DATABASE_URL` が `.env.test` の値と完全に一致し、テストDB を指し、`.env.test` のパスワードが正しいこと。それ以外の値は拒否する。未設定のとき（開発・本番の通常の起動）は何もしない。
 - **有効化・無効化：** 承認を得て、`scripts/e2e-dev-server.mts` のゲートの行を変える commit で行う（対応する静的テスト `lib/testing/e2eDevServer.test.ts` も同じ commit で更新する）。E2E が終わったら、開発サーバーを止めて、ゲートを無効に戻す。環境変数や引数でゲートを有効にする仕組みは作らない。
+- **E2E の後：** テストDB を、「6. 統合テスト失敗後のテストDB復旧」の手順で作り直す（E2E で作ったデータは、SQL で削除しない）。
+
+### E2E 用のテストデータ（2026-11-24・Step 4-13C。準備中）
+
+**まだ一度も `--apply` で実行していません。** 9つ目の固定ゲート（`E2E_FIXTURE_DISABLED`）が無効なので、`--apply` でも、検証の後、DB に接続する前に止まります。
+
+- **経路：** `npm run testdb:e2e`（操作の一覧）／`npm run testdb:e2e -- --op <操作>`（予行）／`npm run testdb:e2e -- --op <操作> --apply`（ゲートが有効なときだけ実行）。本体は `lib/testing/testDbE2eFixtures.ts`、入口は `scripts/testdb-e2e.mts`。E2E のデータを、このスクリプトの固定の操作以外の SQL や Prisma で書き込まない。
+- **操作（固定の名前だけ）：** `seed`（状態 C の空のテストDB に、店舗 A〜D・ユーザー7人・商品4件・取り込み2件・マスタ2件）、`e2e01-deactivate-shop-a`、`e2e02-activate-shop-a`、`e2e03-delete-user`、`e2e04-move-user-to-shop-b`、`e2e05-demote-admin`、`e2e06-deactivate-shop-d`。SQL は固定の文字列で、変更の操作は、固定の ID と今の値の条件で、ちょうど1行だけを対象にする（同じ操作を2回行うと、2回目は0件で ROLLBACK して止まる）。削除は `e2e03-delete-user` のユーザー1件だけ（取り込み・商品・履歴の参照がないことが条件）。
+- **`--apply` の流れ：** 検証（引数、Node の起動オプション、`NODE_OPTIONS`、`.env.test` の接続先とパスワード、親の `PG*`・`DOTENV_*`、`seed` のときは `.env.e2e`）→ 9つ目の固定ゲート → 読み取り専用の検査（`seed` は状態 C、それ以外は「データがあるだけの B」）→ 1回の接続で BEGIN・search_path の固定・本人確認・固定の SQL（件数を確かめる）・COMMIT（途中で失敗したら ROLLBACK）→ 事後の読み取り専用の検査（「データがあるだけの B」で、サーバーが同じ）。TRUNCATE・DROP・ALTER・GRANT・migration・Docker の操作はしない。
+- **E2E 用のユーザー：** メールアドレスは `e2e-01@example.invalid` などの、実在しないドメイン。パスワードは `.env.e2e`（キーは `KATANA_E2E_USER_PASSWORD` だけ。16文字以上、`[A-Za-z0-9_-]` だけ、見本の値でない、テストDB のパスワードと違う。`.env*` なので Git の対象外）に、ユーザーが作って置く（Step 4-13C の時点では、まだない）。DB には `bcryptjs` のハッシュ（コスト10）だけを入れる。パスワードとハッシュは表示しない。
 - **E2E の後：** テストDB を、「6. 統合テスト失敗後のテストDB復旧」の手順で作り直す（E2E で作ったデータは、SQL で削除しない）。
