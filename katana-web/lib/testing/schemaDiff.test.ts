@@ -792,8 +792,8 @@ describe("静的な確認（ソース）", () => {
     const runner = code("lib/testing/testDbSchemaDiffRunner.ts");
     expect(runner).toContain('const gateEnabled = deps.access.mode === "enabled-ro-schema-diff";');
     expect(runner.match(/enabled-ro-schema-diff/g)).toHaveLength(1);
-    // migration 用のゲートは、Step 4-8B の一時的な有効化（固定のリテラル）だけ。ほかの固定のゲート（checksum・catalog・ro-role の作成と補完）は無効のまま
-    expect(code("scripts/testdb-migrate.mts")).toMatch(/^ {2}liveDatabase: \{ mode: "enabled" \},$/m); // Step 4-8B：テストDB の復旧のために一時的に有効（固定のリテラル。migrate --apply の1回の後、LIVE_DATABASE_DISABLED に戻す）
+    // migration 用のゲートは変えない。ほかの固定のゲート（checksum・catalog・ro-role の作成と補完）も無効のまま
+    expect(code("scripts/testdb-migrate.mts")).toMatch(/^ {2}liveDatabase: LIVE_DATABASE_DISABLED,$/m);
     expect(code("scripts/testdb-checksums.mts")).toMatch(/^ {2}checksumDatabase: CHECKSUM_DATABASE_DISABLED,$/m);
     expect(code("scripts/testdb-catalog.mts")).toMatch(/^ {2}catalogDatabase: CATALOG_AUDIT_DATABASE_DISABLED,$/m);
     expect(code("scripts/testdb-ro-role.mts")).toMatch(/^ {2}createGate: RO_ROLE_CREATE_DISABLED,$/m);

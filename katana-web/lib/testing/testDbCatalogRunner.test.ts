@@ -372,7 +372,7 @@ describe("静的な確認（ソース）", () => {
       expect(CATALOG_AUDIT_DATABASE_DISABLED).not.toBe(other);
       expect(other).toEqual({ mode: "disabled" });
     }
-    expect(code("scripts/testdb-migrate.mts")).toMatch(/^ {2}liveDatabase: \{ mode: "enabled" \},$/m); // Step 4-8B：テストDB の復旧のために一時的に有効（固定のリテラル。migrate --apply の1回の後、LIVE_DATABASE_DISABLED に戻す）
+    expect(code("scripts/testdb-migrate.mts")).toMatch(/^ {2}liveDatabase: LIVE_DATABASE_DISABLED,$/m);
     expect(code("scripts/testdb-checksums.mts")).toMatch(/^ {2}checksumDatabase: CHECKSUM_DATABASE_DISABLED,$/m);
     expect(EXPECTED_CATALOG_MIGRATION_COUNT).toBe(EXPECTED_MIGRATION_COUNT);
   });
