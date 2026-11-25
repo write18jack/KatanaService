@@ -3321,7 +3321,9 @@ npm run test:integration ─► 専用runner
 | 4-13B | E2E 用の開発サーバーを起動するスクリプト（`scripts/e2e-dev-server.mts`。本体は `lib/testing/e2eDevServer.ts`）と、**8つ目の固定ゲート `E2E_DEV_SERVER_DISABLED`**（無効）。`package.json` に `e2e:dev-server`（予行だけ）。開発サーバーは起動していない | `710bbd1` | 9ファイル・809件が成功（新しいテスト29件を含む）、型検査・ESLint 成功、静的テストの空振りの確認（2種類の書き換えで各1件の失敗） |
 | 4-14 | 8つ目のゲートの文書化：`CLAUDE.md`（ゲートを8つに。テストDB を使う開発サーバーはスクリプトからだけ起動し、Phase 4 のあいだ開発用DB を起動しない）、`docs/TESTING.md`（ゲートの表・エラーコード・コマンドの一覧、新しい7章「E2E 用の開発サーバー」）、本ファイル。あわせて、`docs/TESTING.md` の、Step 4-8B・4-10 より前のままだった事実の記述（統合テストは未実行、復旧は未実施、最後の状態 C は 2026-11-14）を、今の事実に合わせて追記で直した | `6180836` | テストは実行していない（文書の変更だけ） |
 | 4-13C | E2E 用のテストデータの準備と、シナリオごとの DB の変更（`scripts/testdb-e2e.mts`。本体は `lib/testing/testDbE2eFixtures.ts`。方式 D1）と、**9つ目の固定ゲート `E2E_FIXTURE_DISABLED`**（無効）。`package.json` に `testdb:e2e`（一覧だけ）。DB には接続していない | `486e3b9` | 9ファイル・706件が成功（新しいテスト62件を含む）、型検査・ESLint 成功、静的テストの空振りの確認（3種類の書き換えで各1件の失敗） |
-| 4-15 | 9つ目のゲートの文書化：`CLAUDE.md`（ゲートを9つに。E2E のデータは `scripts/testdb-e2e.mts` の固定の操作だけで書き込み、`.env.e2e` のパスワードは表示・記録しない）、`docs/TESTING.md`（ゲートの表・エラーコード・コマンドの一覧・設定ファイル、7章の「E2E 用のテストデータ」）、本ファイル | 未commit（記録の時点） | テストは実行していない（文書の変更だけ） |
+| 4-15 | 9つ目のゲートの文書化：`CLAUDE.md`（ゲートを9つに。E2E のデータは `scripts/testdb-e2e.mts` の固定の操作だけで書き込み、`.env.e2e` のパスワードは表示・記録しない）、`docs/TESTING.md`（ゲートの表・エラーコード・コマンドの一覧・設定ファイル、7章の「E2E 用のテストデータ」）、本ファイル | `595976d` | テストは実行していない（文書の変更だけ） |
+| 4-16 | F-01 の E2E の手順書 `docs/E2E-F01-RUNBOOK.md`（方式 B・案2：ログインのパスワードはユーザーが入力し、Claude は `.env.e2e` を読まず、パスワードの欄に入力しない）。まだ実行していない | `57bb1ec` | テストは実行していない（文書だけ）。期待の結果を実装（`shopId` の絞り込み・ダッシュボードの表示・固定の ID・画面の文言）と照合した |
+| 4-17 | テストDB の停止と再開：シャットダウンの前に `testdb:down -- --apply` で削除し、再開の後に `docs/TESTING.md` の6章の手順で作り直した（状態 A → C）。詳細は下の「Step 4-17 の実施記録」 | `ded0ed6`（migration のゲートの一時有効化）・`0d06da0`（無効化） | 状態 C。migration の前後で同じコンテナ・同じ postmaster。9つの固定ゲートはすべて無効に戻した |
 
 **Step 4-8B の実施記録（2026-11-23。テストDB の復旧。統合テストは実行していない）：**
 
@@ -3371,6 +3373,25 @@ npm run test:integration ─► 専用runner
 
 - **終了時の比べ方：** Phase 4 の最後に、同じコマンドで同じ項目を読む（読み取りだけ。承認が必要）。1〜3がすべて0のまま、4の作成日時・ラベル・config-hash・大きさが同じなら、完了条件（読み替えたもの）を満たす。大きさは Docker の集計の値で、細かい書き込みまでは捉えないので、主な根拠は1〜3。途中で開発用DB を起動した場合は、この比べ方は使えない。
 - **限界：** 記録は、読んだ2つの時点のスナップショット。その間に、別のプロセスが一時的に 5433 番で DB を起動して止めた場合は、検出できない（運用で、Phase 4 のあいだ開発用DB を起動しない）。
+
+**Step 4-17 の実施記録（2026-11-24〜2026-11-25。テストDB の停止と、再開の後の作り直し。統合テスト・E2E は実行していない）：**
+
+- **停止（2026-11-24）：** ユーザーのシャットダウンの前に、承認を得て `npm run testdb:down -- --apply` を1回（終了コード0）。`katana-test-db`（Step 4-8B で作ったコンテナ `1ba1b8ccc55d…`）を停止・削除した。停止後の照合に通った（テスト用のコンテナなし、ボリュームの増減なし、開発用の記録は不変）。tmpfs のため、状態 C のデータはここで失われた。
+- **再開（2026-11-25）：** ユーザーが Docker Desktop を起動した後、承認を得て、`docs/TESTING.md` の6章の手順を1回ずつ続けて実行した（途中で失敗すれば止まる条件）。どれも終了コード0。
+
+  | # | 操作 | 結果 |
+  |---|---|---|
+  | 1 | `npm run testdb:status` | テスト用のコンテナなし。`katana-db` なし。開発用ボリューム（2026-07-18T05:42:41Z）は未使用。ボリュームは全部で3つ |
+  | 2 | `npm run testdb:up`（予行） | コンテナなし、5434番は空き、イメージ `postgres:15` はある |
+  | 3 | `npm run testdb:up -- --apply` | 新しい `katana-test-db` を作成・起動（running・healthy）。起動後の照合に通った |
+  | 4 | `status`・`identity`・`verify` | **状態 A**。本人確認の4項目が一致。コンテナ `503c0375ddd858ed7f8b8fc72e97c5022acc5770031508347f169754c0921940`、StartedAt `2026-11-25T06:55:24.704162261Z`、RestartCount 0、アドレス `172.18.0.2`、postmaster の起動時刻 `2026-11-25T06:55:25.305225Z` |
+  | 5 | migration のゲートの一時有効化（commit `ded0ed6`） | 対象の6ファイルが `72d95fb` から変わっていないことを確かめ、前回の有効化の commit `136ebeb` と同じ内容にした。6ファイル・591件が成功、型検査・ESLint 成功。ほかの8つのゲートは無効のまま |
+  | 6 | `npm run testdb:migrate -- --apply` を1回 | D1・F1 の照合に通った（コンテナ `503c0375ddd8`）。8件を適用し、migration の後の照合で状態 C |
+  | 7 | migration のゲートの無効化（commit `0d06da0`） | 6ファイルを `57bb1ec` の内容に戻した（HEAD のファイルの中身は `57bb1ec` と完全に一致）。6ファイル・591件が成功、型検査・ESLint 成功。9つのゲートはすべて無効 |
+  | 8 | `verify`・`identity` | **状態 C**（8件・テーブルは空）。postmaster の起動時刻とコンテナ（ID・StartedAt・RestartCount 0）は、手順4と一致 |
+
+- **秘密情報の照合：** 各操作の出力と、commit の前の差分で照合した。接続 URL は0件。値の一致は、開発用DB のパスワードが英単語の `password` で、表示の「password hidden」などに一致したものだけ。手順1では、照合の一時スクリプトが `dotenv` を見つけられずに動かなかった（表示したのは、ふだんから秘密情報を含まない行だけ）。スクリプトを直して働くことを確かめてから、手順2以降を行った。
+- **今の状態：** テストDB は新しいコンテナ `503c0375ddd8…` で、手順8の時点で状態 C。`katana_test_ro` はない（schemaDiff の前だけ必要）。開発用DB は起動していない（案A の記録は崩れていない）。
 
 **Step 4-13C の記録（2026-11-24。E2E 用のテストデータの準備スクリプトと、9つ目の固定ゲート。commit `486e3b9`）：**
 
@@ -3517,6 +3538,7 @@ npm run test:integration ─► 専用runner
 
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
+   - **（2026-11-25 更新・Step 4-17）この行が、下の Step 4-15 以前の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-17 の記録の commit（作る場合）、またはその親の `0d06da0`（`test: restore disabled migration gate after test DB rebuild`）。変更済み（未commit）は、記録を commit していなければ本ファイルだけ。未追跡は既存の2件。固定ゲートは9つとも無効。テストDB は 2026-11-25 に作り直したコンテナ `503c0375ddd8…` で、最後に確認した時点（Step 4-17 の手順8）で状態 C。次のセッションでも、状態 C を過去の記録から推定せず、`status`・`identity`・`verify` で確かめる。`.env.e2e` はまだない。次の候補（どれも承認が必要）：`.env.e2e` の作成（ユーザー）、E2E の手順書（`docs/E2E-F01-RUNBOOK.md`）の3章「始める前の条件」。
    - **（2026-11-24 更新・Step 4-15）この行が、下の Step 4-14 以前の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-15 の文書の commit（作る場合）、またはその親の `486e3b9`（`feat: add gated E2E fixture script for the test database`）。変更済み（未commit）は、文書を commit していなければ `CLAUDE.md`・`docs/TESTING.md`・本ファイルの3つ。未追跡は既存の2件。**固定ゲートは9つ（`E2E_DEV_SERVER_DISABLED`・`E2E_FIXTURE_DISABLED` を含む）とも無効。** E2E 用の開発サーバーは一度も起動しておらず、E2E 用のテストデータのスクリプトも一度も `--apply` で実行していない。`.env.e2e` はまだない。次の候補（どれも承認が必要）：方式 B でのログインのパスワードの扱いの決定、`.env.e2e` の作成（ユーザー）、E2E の手順書。
    - **（2026-11-23 更新・Step 4-14）この行が、下の Step 4-13A 以前の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-14 の文書の commit（作る場合）、またはその親の `710bbd1`（`feat: add gated launcher for the E2E dev server`）。変更済み（未commit）は、文書を commit していなければ `CLAUDE.md`・`docs/TESTING.md`・本ファイルの3つ。未追跡は既存の2件。**固定ゲートは8つ（`E2E_DEV_SERVER_DISABLED` を含む）とも無効。** E2E 用の開発サーバーは、まだ一度も起動していない。次の候補（どれも承認が必要）：E2E 用の開発サーバーの予行（`npm run e2e:dev-server`。起動しない）、Step 4-13C（データの準備用のスクリプトと固定ゲート。コードだけ）、E2E の手順書。
    - **（2026-11-23 更新・Step 4-13A）この行が、下の Step 4-12 以前の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-13A の記録の commit（作る場合）、またはその親の `83fc0f9`（`feat: guard the app database target for E2E dev servers (P9)`）。変更済み（未commit）は、記録を commit していなければ本ファイルだけ。未追跡は既存の2件。固定ゲートは7つとも無効。P9 は実装済みで、build の再確認も成功。E2E の方式は B・D1・固定ゲートあり・作り直し（4-A の「Step 4-13・4-13A の記録」）。次の候補（どれも承認が必要）：Step 4-13B（E2E 用の開発サーバーを起動するスクリプトと固定ゲート。コードだけ）、Step 4-13C（データの準備用のスクリプトと固定ゲート。コードだけ）。
