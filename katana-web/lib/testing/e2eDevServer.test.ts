@@ -216,14 +216,12 @@ describe("静的検査：scripts/e2e-dev-server.mts と package.json（import �
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/^\s*\/\/.*$/gm, "");
 
-  // F-01 の E2E（docs/E2E-F01-RUNBOOK.md の4章）のために、承認を得て一時的に有効化。E2E の後、無効の定数の形に戻し、この確認も元に戻す
-  it("8つ目の固定ゲートを、固定のリテラル { mode: \"enabled\" } で渡す（一時的に有効。切り替えの経路がない）", () => {
-    expect(code.match(/^ {2}devServer: .*$/gm)).toEqual(['  devServer: { mode: "enabled" },']);
-    // 有効値はこの1か所だけ。無効の定数の import・条件式・環境変数・引数による切り替えがないこと
-    expect(code.match(/mode:\s*["']enabled["']/g)).toHaveLength(1);
-    expect(code.match(/mode:/g)).toHaveLength(1);
-    expect(code).not.toContain("E2E_DEV_SERVER_DISABLED");
-    for (const forbidden of ["process.argv.includes", "process.env.", "process.env[", "? {", "?? {", "|| {", "&& {"]) {
+  it("8つ目の固定ゲートを、無効の定数で固定して渡す（有効にする経路がない）", () => {
+    expect(code.match(/^ {2}devServer: .*$/gm)).toEqual(["  devServer: E2E_DEV_SERVER_DISABLED,"]);
+    expect(code.match(/E2E_DEV_SERVER_DISABLED/g)).toHaveLength(2);
+    expect(code).toMatch(/import \{[^}]*\bE2E_DEV_SERVER_DISABLED\b[^}]*\} from "\.\.\/lib\/testing\/e2eDevServer\.ts";/);
+    // ゲートの行は上で完全一致を確かめている（条件式・||・&& を含まない）。ファイル全体では、有効値と、環境変数・引数による切り替えがないこと
+    for (const forbidden of ['"enabled"', "mode:", "process.argv.includes", "process.env.", "process.env["]) {
       expect(code, forbidden).not.toContain(forbidden);
     }
   });

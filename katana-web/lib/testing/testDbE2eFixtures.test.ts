@@ -346,14 +346,10 @@ describe("静的検査：scripts/testdb-e2e.mts と package.json（import しな
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/^\s*\/\/.*$/gm, "");
 
-  // F-01 の E2E（docs/E2E-F01-RUNBOOK.md の4章）のために、承認を得て一時的に有効化。E2E の後、無効の定数の形に戻し、この確認も元に戻す
-  it("9つ目の固定ゲートを、固定のリテラル { mode: \"enabled\" } で渡す（一時的に有効。切り替えの経路がない）", () => {
-    expect(code.match(/^ {2}fixtures: .*$/gm)).toEqual(['  fixtures: { mode: "enabled" },']);
-    // 有効値はこの1か所だけ。無効の定数の import・条件式・環境変数・引数による切り替えがないこと
-    expect(code.match(/mode:\s*["']enabled["']/g)).toHaveLength(1);
-    expect(code.match(/mode:/g)).toHaveLength(1);
-    expect(code).not.toContain("E2E_FIXTURE_DISABLED");
-    for (const forbidden of ["process.argv.includes", "process.env.", "process.env[", "? {", "?? {", "|| {", "&& {"]) expect(code, forbidden).not.toContain(forbidden);
+  it("9つ目の固定ゲートを、無効の定数で固定して渡す（有効にする経路がない）", () => {
+    expect(code.match(/^ {2}fixtures: .*$/gm)).toEqual(["  fixtures: E2E_FIXTURE_DISABLED,"]);
+    expect(code.match(/E2E_FIXTURE_DISABLED/g)).toHaveLength(2);
+    for (const forbidden of ['"enabled"', "mode:", "process.argv.includes", "process.env.", "process.env["]) expect(code, forbidden).not.toContain(forbidden);
   });
 
   it("接続の部品は、inspectDatabase と connect の行の中だけ。ハッシュは bcryptjs のコスト 10", () => {
