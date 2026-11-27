@@ -54,7 +54,6 @@ F-01の判定は **CONDITIONAL PASS のまま**。実DB・Cookie・HTTPでの検
 
   承認は操作ごとに個別に得る。
 - `docker-compose.yml`（開発用）と、ボリューム `postgres_data` を変更しない。
-- `test-data/` を変更・削除しない。
 - 秘密情報（パスワード、`AUTH_SECRET`、接続文字列の全文）をドキュメント・ログ・報告に書かない。
 - 既存の差分を破棄しない。ユーザーの指示なしに add・commit・push・reset・clean をしない。
 - `CLAUDE.md` を変更しない（変更が必要なら提案だけにする）。
