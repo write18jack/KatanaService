@@ -25,7 +25,7 @@
 
 | もの | 値 |
 |---|---|
-| 開発サーバー | `http://127.0.0.1:3100`（`npm run e2e:dev-server -- --start` だけで起動する） |
+| 開発サーバー | 待ち受けは `127.0.0.1:3100`（`npm run e2e:dev-server -- --start` だけで起動する）。**ブラウザでは `http://localhost:3100` で開く**（`proxy.ts` の転送先が `localhost` になるため。`127.0.0.1` で開くと、途中で転送先のホストと入れ替わり、Cookie が2つに分かれる。`docs/PLAN-test-db-isolation.md` の R16） |
 | テストDB | `127.0.0.1:5434`・`katana_test`（状態 C から `seed` で準備する） |
 | データの準備・変更 | `npm run testdb:e2e -- --op <操作> --apply`（固定の操作だけ） |
 | ブラウザ | Claude が操作するブラウザ（組み込みブラウザ、または Chrome）。**シナリオごとに新しいプライベートウィンドウ（新しいブラウザのコンテキスト）を使う**（K7：localhost のポートが違っても Cookie が混ざるため） |
@@ -62,13 +62,13 @@
 ## 5. 準備（それぞれ承認が必要）
 
 1. **データの準備：** `npm run testdb:e2e -- --op seed --apply` を1回。期待：終了コード0、「rows changed: 20」、事後の検査に通る。
-2. **開発サーバーの起動：** `npm run e2e:dev-server -- --start`。Claude がバックグラウンドで起動し、`http://127.0.0.1:3100/ja/login` が表示されるまで待つ。期待：ログインの画面が出る。開発サーバーの出力に、接続の失敗・`TARGET_INVALID`・`DATABASE_URL_MISMATCH` などのガードのエラーが出ない。
+2. **開発サーバーの起動：** `npm run e2e:dev-server -- --start`。Claude がバックグラウンドで起動し、`http://localhost:3100/ja/login` が表示されるまで待つ。期待：ログインの画面が出る。開発サーバーの出力に、接続の失敗・`TARGET_INVALID`・`DATABASE_URL_MISMATCH` などのガードのエラーが出ない。
 
 ## 6. シナリオ
 
 各シナリオの「DB の変更」は、`npm run testdb:e2e -- --op <操作> --apply` の1回で、それぞれ承認が必要です。期待：終了コード0、「rows changed: 1」。**同じ操作を2回行わない**（2回目は0件で止まる）。
 
-ログインの手順（各シナリオ共通）：新しいプライベートウィンドウで `http://127.0.0.1:3100/<ja|en>/login` を開く → Claude がメールアドレスを入力する → **ユーザーがパスワードを入力して「ログイン」（en は「Sign In」）を押す** → `/<ja|en>/dashboard` に移ることを確かめる。
+ログインの手順（各シナリオ共通）：新しいプライベートウィンドウで `http://localhost:3100/<ja|en>/login` を開く → Claude がメールアドレスを入力する → **ユーザーがパスワードを入力して「ログイン」（en は「Sign In」）を押す** → `/<ja|en>/dashboard` に移ることを確かめる。
 
 ### E2E-01：ログイン中に店舗を無効にする
 
