@@ -3330,6 +3330,7 @@ npm run test:integration ─► 専用runner
 | 4-16 | F-01 の E2E の手順書 `docs/E2E-F01-RUNBOOK.md`（方式 B・案2：ログインのパスワードはユーザーが入力し、Claude は `.env.e2e` を読まず、パスワードの欄に入力しない）。まだ実行していない | `57bb1ec` | テストは実行していない（文書だけ）。期待の結果を実装（`shopId` の絞り込み・ダッシュボードの表示・固定の ID・画面の文言）と照合した |
 | 4-17 | テストDB の停止と再開：シャットダウンの前に `testdb:down -- --apply` で削除し、再開の後に `docs/TESTING.md` の6章の手順で作り直した（状態 A → C）。詳細は下の「Step 4-17 の実施記録」 | `ded0ed6`（migration のゲートの一時有効化）・`0d06da0`（無効化） | 状態 C。migration の前後で同じコンテナ・同じ postmaster。9つの固定ゲートはすべて無効に戻した |
 | 4-18 | F-01 の E2E（E2E-01〜06）の実行と後片付け：始める前の条件の確認 → E2E の2つのゲートの一時有効化 → `seed` → 開発サーバーの起動 → 6つのシナリオ → 開発サーバーの停止 → ゲートの無効化 → テストDB の作り直し（状態 A → C）→ 終了時の案A の記録 → F-01 の判定の更新。各操作は、個別の承認を得て1回ずつ実行した。詳細は下の「Step 4-18 の実施記録」 | `5b20e5a`（E2E の2つのゲートの一時有効化）・`cf5ac05`（無効化）・`66cf6d8`（migration のゲートの一時有効化）・`fdd69a3`（無効化） | **6つのシナリオがすべて期待どおり。F-01 は PASS に更新。** テストDB は新しいコンテナで状態 C。終了時の案A の記録は開始時と一致。9つの固定ゲートはすべて無効 |
+| 4-19 | Phase 4 の後の文書の整理・push・PR・テストDB の停止：`docs/TESTING.md` への Step 4-18 の結果の反映、手順書への Chrome のシークレットウィンドウの注意、作業ブランチの push、PR #10 の作成、`testdb:down -- --apply`。詳細は下の「Step 4-19 の実施記録」 | `d59a4c6`（TESTING.md）・`46a44e1`（手順書） | PR #10（`develop` 向け、OPEN）。テストDB は停止・削除（コンテナなし）。開発用DB は起動していない。9つの固定ゲートはすべて無効 |
 
 **Step 4-8B の実施記録（2026-11-23。テストDB の復旧。統合テストは実行していない）：**
 
@@ -3379,6 +3380,15 @@ npm run test:integration ─► 専用runner
 
 - **終了時の比べ方：** Phase 4 の最後に、同じコマンドで同じ項目を読む（読み取りだけ。承認が必要）。1〜3がすべて0のまま、4の作成日時・ラベル・config-hash・大きさが同じなら、完了条件（読み替えたもの）を満たす。大きさは Docker の集計の値で、細かい書き込みまでは捉えないので、主な根拠は1〜3。途中で開発用DB を起動した場合は、この比べ方は使えない。
 - **限界：** 記録は、読んだ2つの時点のスナップショット。その間に、別のプロセスが一時的に 5433 番で DB を起動して止めた場合は、検出できない（運用で、Phase 4 のあいだ開発用DB を起動しない）。
+
+**Step 4-19 の実施記録（2026-11-27。Phase 4 の後の文書の整理・push・PR・テストDB の停止。各操作は、個別の承認を得て行った）：**
+
+- **`docs/TESTING.md`（commit `d59a4c6`）：** Step 4-18 の結果を、日付付きの追記で反映した（F-01 は PASS・Phase 4 は完了、3章の表の `e2e:dev-server -- --start` と `testdb:e2e -- … --apply` の行、6章の手順を Step 4-17・4-18 でも行ったこと、7章のブラウザの URL（`localhost`。R16）・Chrome のシークレットウィンドウの Cookie の共有・Next.js が `.env.local`・`.env` を読み込むが設定済みの変数は上書きしないこと）。手順書へのリンクを追加した。
+- **手順書（commit `46a44e1`）：** `docs/E2E-F01-RUNBOOK.md` の2章の「ブラウザ」に、Chrome のシークレットウィンドウは開いているもの同士で Cookie を共有すること（新しいシナリオの前にすべて閉じる、2つのセッションにはシークレットウィンドウとゲストウィンドウを使う）を加え、E2E-06 の手順1を、シークレットウィンドウとゲストウィンドウを1つずつ使う形に直した。
+- **push：** `git push -u origin chore/phase4-test-db-integration`（新しいブランチ。リモートの先頭は `46a44e1`）。push の前に、`develop`（`8ec71c0`）からの33個の commit の中身（途中の版を含む）を、`.env`・`.env.test`・`.env.test.readonly`・`.env.local` の値と照合した。値の一致は英単語の `password`（開発用DB のパスワードと同じ単語）だけで、それを含む接続文字列は `develop` にすでにあったテストの値（`lib/db/testDatabaseGuard.test.ts`）だった。この単語は、Git で管理している `docker-compose.yml` にもともと書かれている（R11）。bcrypt の形の文字列は、テストの定数 `FAKE_HASH`（`486e3b9`。`.env.e2e` を作る前）だけだった。`.env` 系のファイルは含まれていない。
+- **PR：** はじめは `gh` がインストールされていなかったので、PR の説明を用意した（ユーザーが開けるように `~/Desktop/KatanaService-PR-phase4.md` に置いた。Git の対象外）。ユーザーが `gh` をインストールしてログインした後、`gh auth status` でログインを確かめ、説明の本文を照合（値の一致は本文中の英単語の `password` だけ。`@` の通知・メールアドレスなし）してから、**PR #10** を作った（`chore/phase4-test-db-integration` → `develop`、タイトル `Phase 4: verify integration tests and F-01 E2E on the isolated test DB`、OPEN、下書きではない）。`develop` は `8ec71c0` のままで、競合はない。マージはしていない。
+- **テストDB の停止：** `npm run testdb:down -- --apply` を1回（終了コード0）。コンテナ `ec632283…` を停止・削除した（tmpfs の状態 C の空の DB も消えた）。停止後の照合に通った（テスト用のコンテナなし、ボリュームの増減なし（全部で3つ）、開発用の記録は不変）。
+- **今の状態：** HEAD `46a44e1`（この記録を commit する前）で、リモートと同じ。9つの固定ゲートはすべて無効。**テストDB のコンテナはない。** 次に使うときは `testdb:up -- --apply` で状態 A から始まり、状態 C が必要なら `docs/TESTING.md` の6章の手順（migration のゲートの有効化 → `migrate -- --apply` を1回 → 無効化）が要る。開発用DB は起動していない。
 
 **Step 4-18 の実施記録（2026-11-25〜2026-11-27。F-01 の E2E と後片付け。`docs/E2E-F01-RUNBOOK.md` に沿って、各操作を個別の承認を得て1回ずつ実行した）：**
 
@@ -3610,6 +3620,7 @@ npm run test:integration ─► 専用runner
 
 1. `CLAUDE.md` と本ファイルを読む。特に「全Phase共通の禁止事項」、3章の「3-A. 実施結果」、これから行うStepの節を読む。
 2. `git branch --show-current`、`git status --short`、`git log -1 --oneline` で状態を確認し、次の想定と一致するかを確かめる。一致しなければ、作業を始めずに報告する。
+   - **（2026-11-27 更新・Step 4-19）この行が、下の Step 4-18 以前の行より優先する：** ブランチ `chore/phase4-test-db-integration`（`origin` に push 済みで、追跡あり）、HEAD は Step 4-19 の記録の commit（作る場合。push するかは別に決める）、またはその親の `46a44e1`（`docs: note that Chrome incognito windows share cookies in the runbook`）。変更済み（未commit）は、記録を commit していなければ本ファイルだけ。未追跡は既存の2件。固定ゲートは9つとも無効。**PR #10（`develop` 向け）が OPEN。** F-01 は PASS、Phase 4 は完了。**テストDB のコンテナはない**（Step 4-19 で停止・削除）。使うときは `testdb:up -- --apply` から始め、`status`・`identity`・`verify` で状態を確かめる（状態 A から始まる）。開発用DB は起動していない。次の候補（どれも承認が必要）：PR #10 のレビュー・マージ（ユーザー）、5章の残り（R16 の原因、R14 の否定の経路、R1 の残り）、F-01 の範囲外の事項（ヘッダーのログアウトの言語、認可の3件）。
    - **（2026-11-27 更新・Step 4-18）この行が、下の Step 4-17 以前の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-18 の記録の commit（作る場合）、またはその親の `fdd69a3`（`test: restore disabled migration gate after F-01 rebuild`）。変更済み（未commit）は、記録を commit していなければ本ファイルだけ。未追跡は既存の2件。固定ゲートは9つとも無効。**F-01 の E2E は実施済みで、F-01 は PASS。** テストDB は 2026-11-26 に作り直したコンテナ `ec632283…` で、最後に確認した時点（Step 4-18 の後片付けの手順7）で状態 C。次のセッションでも、状態 C を過去の記録から推定せず、`status`・`identity`・`verify` で確かめる。**Phase 4 は完了**（終了時の案A の記録も一致。ユーザーの承認による）。R16 は、手順書のブラウザで開く URL を `localhost` に変えて運用で回避した（原因は未調査）。次の候補（どれも承認が必要）：作業ブランチの push・PR、`docs/TESTING.md` への実施結果の反映、5章の残り（R16 の原因、R14 の否定の経路、R1 の残り）、F-01 の範囲外の事項（ヘッダーのログアウトの言語、認可の3件）。
    - **（2026-11-25 更新・Step 4-17）この行が、下の Step 4-15 以前の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-17 の記録の commit（作る場合）、またはその親の `0d06da0`（`test: restore disabled migration gate after test DB rebuild`）。変更済み（未commit）は、記録を commit していなければ本ファイルだけ。未追跡は既存の2件。固定ゲートは9つとも無効。テストDB は 2026-11-25 に作り直したコンテナ `503c0375ddd8…` で、最後に確認した時点（Step 4-17 の手順8）で状態 C。次のセッションでも、状態 C を過去の記録から推定せず、`status`・`identity`・`verify` で確かめる。`.env.e2e` はまだない。次の候補（どれも承認が必要）：`.env.e2e` の作成（ユーザー）、E2E の手順書（`docs/E2E-F01-RUNBOOK.md`）の3章「始める前の条件」。
    - **（2026-11-24 更新・Step 4-15）この行が、下の Step 4-14 以前の行より優先する：** ブランチ `chore/phase4-test-db-integration`、HEAD は Step 4-15 の文書の commit（作る場合）、またはその親の `486e3b9`（`feat: add gated E2E fixture script for the test database`）。変更済み（未commit）は、文書を commit していなければ `CLAUDE.md`・`docs/TESTING.md`・本ファイルの3つ。未追跡は既存の2件。**固定ゲートは9つ（`E2E_DEV_SERVER_DISABLED`・`E2E_FIXTURE_DISABLED` を含む）とも無効。** E2E 用の開発サーバーは一度も起動しておらず、E2E 用のテストデータのスクリプトも一度も `--apply` で実行していない。`.env.e2e` はまだない。次の候補（どれも承認が必要）：方式 B でのログインのパスワードの扱いの決定、`.env.e2e` の作成（ユーザー）、E2E の手順書。
