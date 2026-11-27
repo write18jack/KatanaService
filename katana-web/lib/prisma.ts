@@ -4,31 +4,35 @@ import path from "node:path";
 import { parse } from "dotenv";
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { assertTestDatabaseTarget } from "./db/testDatabaseGuard";
+import { assertAppDatabaseTarget, assertIntegrationRuntime } from "./db/testDatabaseGuard";
 
 /**
- * 開発用DBの接続URLを `.env` から読む（process.env は変えない）。
- * `.env` がなければ undefined。あるのに読めない・解析できない場合は、比較できないので拒否する。
+ * 作業ディレクトリの env ファイル（`.env`・`.env.test`）を dotenv.parse で読む（process.env は変えない）。
+ * ファイルがなければ undefined。あるのに読めない・解析できない場合は、検証できないので拒否する。
+ * 値は返すだけで表示しない。エラーにはファイル名とエラーコードだけを含める。
  */
-function readDevelopmentDatabaseUrl(): string | undefined {
+function readEnvFileInCwd(fileName: ".env" | ".env.test"): Record<string, string> | undefined {
   let source: string;
   try {
-    source = readFileSync(path.resolve(process.cwd(), ".env"), "utf8");
+    source = readFileSync(path.resolve(process.cwd(), fileName), "utf8");
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return undefined;
-    throw new Error(`[lib/prisma] .env exists but could not be read (${code ?? "unknown error"}); refusing to connect.`);
+    throw new Error(`[lib/prisma] ${fileName} exists but could not be read (${code ?? "unknown error"}); refusing to connect.`);
   }
   try {
-    return parse(source).DATABASE_URL;
+    return parse(source);
   } catch {
-    throw new Error("[lib/prisma] .env could not be parsed; refusing to connect.");
+    throw new Error(`[lib/prisma] ${fileName} could not be parsed; refusing to connect.`);
   }
 }
 
 /**
  * Vitest実行中だけ、PrismaPg・PrismaClient を作る前に接続先を検証する。
  * 統合テスト用runnerから起動され、テスト専用DBを指している場合だけ許可し、それ以外はすぐに throw する。
+ * 統合テストのモードでは、globalSetup と同じ接続前の検証（assertIntegrationRuntime。R14-1）を行う：
+ * runner の目印・禁止する環境変数・`.env.test` の存在・接続先・DATABASE_URL と `.env.test` の完全一致・`.env.test` のパスワード。
+ * `.env.test`・`.env` は、検証の直前にここで読む（統合テストのモードのときだけ）。
  * Vitest以外（Next.jsの開発サーバー・本番）では何もしない。
  */
 function assertVitestDatabaseAccess(): void {
@@ -41,15 +45,30 @@ function assertVitestDatabaseAccess(): void {
       '[lib/prisma] The real Prisma Client cannot be loaded in unit tests. Mock "@/lib/prisma", or run DB tests through the integration test runner.',
     );
   }
-  assertTestDatabaseTarget({
-    databaseUrl: env.DATABASE_URL,
+  assertIntegrationRuntime({
     env,
-    developmentDatabaseUrl: readDevelopmentDatabaseUrl(),
+    testEnv: readEnvFileInCwd(".env.test"),
+    developmentDatabaseUrl: readEnvFileInCwd(".env")?.DATABASE_URL,
+  });
+}
+
+/**
+ * KATANA_DB_TARGET が設定されているときだけ、PrismaPg・PrismaClient を作る前に接続先を検証する（P9。E2E 用の開発サーバー）。
+ * KATANA_DB_TARGET=test なら、DATABASE_URL が `.env.test` の値と完全に一致し、テストDBを指し、`.env.test` のパスワードが正しいこと。
+ * それ以外の値は拒否する。未設定のとき（開発・本番の通常の起動）は何もしない。`.env.test`・`.env` は、設定されているときだけ読む。
+ */
+function assertAppDatabaseTargetAccess(): void {
+  if (process.env.KATANA_DB_TARGET === undefined) return;
+  assertAppDatabaseTarget({
+    env: process.env,
+    testEnv: readEnvFileInCwd(".env.test"),
+    developmentDatabaseUrl: readEnvFileInCwd(".env")?.DATABASE_URL,
   });
 }
 
 // 既存クライアントの再利用より前に置き、どの経路でも必ず検証を通す
 assertVitestDatabaseAccess();
+assertAppDatabaseTargetAccess();
 
 const globalForPrisma = global as unknown as {
   prisma: PrismaClient;

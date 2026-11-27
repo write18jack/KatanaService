@@ -21,6 +21,10 @@ export default defineConfig({
     include: ["**/*.integration.test.{ts,tsx}"],
     exclude: [...configDefaults.exclude],
     globalSetup: ["./lib/testing/integrationGlobalSetup.ts"],
+    // 各テストファイルの前に、ワーカーの Prisma Client の接続先を照合する（Step 4-4。第7の固定ゲートが無効なら、Prisma を読み込まずに止まる）
+    setupFiles: ["./lib/testing/integrationSetup.ts"],
+    // 最初の失敗で、残りのテストファイルを実行しない（接続先の照合の失敗の後に、テストを続けない）
+    bail: 1,
     // 全件を集計するテストがあるので、ファイルもテストも1つずつ実行する
     fileParallelism: false,
     maxWorkers: 1,
