@@ -49,7 +49,8 @@ export async function registerUser(values: RegisterInput) {
           name,
           email,
           password: hashedPassword,
-          role: UserRole.ADMIN,
+          // 自己登録では、運営者（ADMIN）を作らない。ADMIN は運営者が別の方法で作る
+          role: UserRole.STORE,
           shopId: shop.id,
         },
       });
