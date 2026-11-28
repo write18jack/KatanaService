@@ -22,17 +22,10 @@ export default async function HomePage() {
               <Link href="/dashboard">ダッシュボードへ（ログイン済み）</Link>
             </Button>
           ) : (
-            <>
-              {/* ログイン画面へのリンク */}
-              <Button asChild variant="outline">
-                <Link href="/login">ログイン</Link>
-              </Button>
-
-              {/* 新規登録画面へのリンク（app/(auth)/register/page.tsx に対応） */}
-              <Button asChild>
-                <Link href="/register">新規アカウント登録</Link>
-              </Button>
-            </>
+            // 新規登録は受け付けていないため、登録画面へのリンクは出さない
+            <Button asChild>
+              <Link href="/login">ログイン</Link>
+            </Button>
           )}
         </div>
       </div>

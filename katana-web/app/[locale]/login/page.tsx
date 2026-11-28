@@ -135,16 +135,6 @@ const Page: NextPage = () => {
                 <Button className="h-11 w-full text-lg" disabled={isPending}>
                   {isPending ? t("authenticating") : t("submit")}
                 </Button>
-
-                <div className="text-muted-foreground text-center text-sm">
-                  {t("noAccount")}{" "}
-                  <Link
-                    href="/register"
-                    className="text-primary font-semibold hover:underline"
-                  >
-                    {t("registerHere")}
-                  </Link>
-                </div>
               </CardFooter>
             </Card>
           </form>

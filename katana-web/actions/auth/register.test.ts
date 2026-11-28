@@ -4,24 +4,17 @@ vi.mock("bcryptjs", () => ({
   default: { hash: vi.fn(async () => "hashed-password") },
 }));
 
-const tx = {
-  shop: { create: vi.fn() },
-  user: { create: vi.fn() },
-};
-
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    user: { findUnique: vi.fn() },
+    user: { findUnique: vi.fn(), create: vi.fn() },
+    shop: { create: vi.fn() },
     $transaction: vi.fn(),
   },
 }));
 
-import { UserRole } from "@prisma/client";
+import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { registerUser } from "./register";
-
-const mockedFindUnique = vi.mocked(prisma.user.findUnique);
-const mockedTransaction = vi.mocked(prisma.$transaction);
 
 const VALID_INPUT = {
   shopName: "テスト店舗",
@@ -32,27 +25,38 @@ const VALID_INPUT = {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockedFindUnique.mockResolvedValue(null);
-  tx.shop.create.mockResolvedValue({ id: "shop-new" });
-  tx.user.create.mockResolvedValue({ id: "user-new" });
-  mockedTransaction.mockImplementation((async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx)) as never);
 });
 
-describe("registerUser", () => {
-  it("自己登録で作るユーザーは STORE で、ADMIN にはならない", async () => {
-    const result = await registerUser(VALID_INPUT);
+function expectNoSideEffects() {
+  expect(prisma.user.findUnique).not.toHaveBeenCalled();
+  expect(prisma.user.create).not.toHaveBeenCalled();
+  expect(prisma.shop.create).not.toHaveBeenCalled();
+  expect(prisma.$transaction).not.toHaveBeenCalled();
+  expect(bcrypt.hash).not.toHaveBeenCalled();
+}
 
-    expect(result).toEqual({ success: expect.any(String) });
-    expect(tx.user.create).toHaveBeenCalledTimes(1);
-    const data = tx.user.create.mock.calls[0][0].data;
-    expect(data.role).toBe(UserRole.STORE);
-    expect(data.role).not.toBe(UserRole.ADMIN);
-    expect(data.shopId).toBe("shop-new");
+describe("registerUser（自己登録は停止中）", () => {
+  it("正しい入力でも、何も作らずにエラーを返す", async () => {
+    const call = registerUser as unknown as (v: unknown) => Promise<unknown>;
+    const result = await call(VALID_INPUT);
+
+    expect(result).toEqual({ error: "現在、新規登録は受け付けていません。" });
+    expect(result).not.toHaveProperty("success");
+    expectNoSideEffects();
   });
 
-  it("入力に role を混ぜても、STORE のまま作る", async () => {
-    await registerUser({ ...VALID_INPUT, role: UserRole.ADMIN } as typeof VALID_INPUT);
+  it("role: ADMIN を混ぜて直接呼ばれても、何も作らない", async () => {
+    const call = registerUser as unknown as (v: unknown) => Promise<unknown>;
+    const result = await call({ ...VALID_INPUT, role: "ADMIN" });
 
-    expect(tx.user.create.mock.calls[0][0].data.role).toBe(UserRole.STORE);
+    expect(result).toEqual({ error: "現在、新規登録は受け付けていません。" });
+    expectNoSideEffects();
+  });
+
+  it("引数なしでも、同じエラーを返す", async () => {
+    await expect(registerUser()).resolves.toEqual({
+      error: "現在、新規登録は受け付けていません。",
+    });
+    expectNoSideEffects();
   });
 });

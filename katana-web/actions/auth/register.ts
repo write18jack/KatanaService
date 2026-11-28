@@ -1,69 +1,11 @@
 "use server";
 
-import { prisma } from "@/lib/prisma";
-import bcrypt from "bcryptjs";
-import {
-  RegisterInput,
-  registerSchema,
-} from "@/actions/validation/auth-schema";
-import { UserRole } from "@prisma/client";
-
-export async function registerUser(values: RegisterInput) {
-  // バリデーション
-  const validatedFields = registerSchema.safeParse(values);
-
-  if (!validatedFields.success) {
-    return {
-      error: "入力内容が正しくありません。",
-    };
-  }
-
-  const { shopName, name, email, password } = validatedFields.data;
-
-  try {
-    // メールアドレス重複チェック
-    const existingUser = await prisma.user.findUnique({
-      where: { email },
-    });
-
-    if (existingUser) {
-      return {
-        error: "このメールアドレスは既に登録されています。",
-      };
-    }
-
-    // パスワードハッシュ化
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Shop作成 + User作成
-    await prisma.$transaction(async (tx) => {
-      const shop = await tx.shop.create({
-        data: {
-          name: shopName,
-          email,
-        },
-      });
-
-      await tx.user.create({
-        data: {
-          name,
-          email,
-          password: hashedPassword,
-          // 自己登録では、運営者（ADMIN）を作らない。ADMIN は運営者が別の方法で作る
-          role: UserRole.STORE,
-          shopId: shop.id,
-        },
-      });
-    });
-
-    return {
-      success: "ユーザー登録が完了しました。ログインしてください。",
-    };
-  } catch (error) {
-    console.error("Registration error:", error);
-
-    return {
-      error: "登録中にエラーが発生しました。",
-    };
-  }
+/**
+ * 自己登録は受け付けていない（docs/PLAN-authorization-fixes.md の案 C-1）。
+ * Server Action は画面を通さずに直接呼べるため、ここで必ず止める。
+ * 引数は読まず、何も検証・作成せずにエラーを返す。
+ * 登録を再開するときは、承認の流れと一緒に改めて実装する。
+ */
+export async function registerUser(): Promise<{ error: string }> {
+  return { error: "現在、新規登録は受け付けていません。" };
 }
